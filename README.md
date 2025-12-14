@@ -57,26 +57,6 @@ sudo ./target/release/argos recover --device /dev/sda --output ./recovered --con
 sudo ./target/release/argos info --device /dev/sda
 ```
 
-## Architecture
-
-Argos follows Clean Architecture principles with four main layers:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Presentation Layer                        │
-│                    (CLI, future GUI)                         │
-├─────────────────────────────────────────────────────────────┤
-│                    Application Layer                         │
-│                (Use Cases, DTOs)                             │
-├─────────────────────────────────────────────────────────────┤
-│                      Domain Layer                            │
-│           (Entities, Repository Traits, Services)            │
-├─────────────────────────────────────────────────────────────┤
-│                  Infrastructure Layer                        │
-│  (LinuxBlockDevice, Ext4/Btrfs/NTFS Parsers, ImageCarver)   │
-└─────────────────────────────────────────────────────────────┘
-```
-
 ## Supported Filesystems
 
 | Filesystem | Status | Notes |
