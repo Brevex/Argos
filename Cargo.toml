@@ -1,0 +1,43 @@
+[package]
+name = "argos"
+version = "0.1.0"
+edition = "2021"
+authors = ["Breno"]
+description = "A powerful image recovery tool for Linux"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Byte manipulation
+byteorder = "1.5"
+
+# Memory-mapped I/O for performance
+memmap2 = "0.9"
+
+# Parallel processing
+rayon = "1.10"
+
+# Image processing (for PNG conversion)
+image = "0.24"
+
+[dev-dependencies]
+tempfile = "3"
+assert_fs = "1"
+rstest = "0.18"
+pretty_assertions = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = true
