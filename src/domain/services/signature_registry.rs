@@ -1,15 +1,17 @@
 //! Signature registry service
 //!
 //! Manages the collection of file signatures used for file carving.
-//! This service is extensible to support new file types.
+//! Uses Aho-Corasick algorithm for efficient O(n+m+z) multi-pattern matching.
 
 use crate::domain::entities::{FileSignature, FileType};
+use aho_corasick::AhoCorasick;
 use std::collections::HashMap;
 
 /// Registry of file signatures for file type detection
 ///
 /// This service maintains a collection of known file signatures
-/// and provides methods for matching data against these signatures.
+/// and provides methods for matching data against these signatures
+/// using the Aho-Corasick algorithm for optimal performance.
 ///
 /// # Example
 ///
@@ -27,6 +29,10 @@ use std::collections::HashMap;
 pub struct SignatureRegistry {
     signatures: HashMap<FileType, Vec<FileSignature>>,
     enabled_types: Vec<FileType>,
+    /// Aho-Corasick automaton for efficient multi-pattern matching
+    pattern_matcher: Option<AhoCorasick>,
+    /// Maps pattern index to (FileType, signature index within that type)
+    pattern_map: Vec<(FileType, usize)>,
 }
 
 impl SignatureRegistry {
@@ -35,6 +41,8 @@ impl SignatureRegistry {
         Self {
             signatures: HashMap::new(),
             enabled_types: Vec::new(),
+            pattern_matcher: None,
+            pattern_map: Vec::new(),
         }
     }
 
@@ -113,6 +121,9 @@ impl SignatureRegistry {
             500 * 1024 * 1024,
         ));
 
+        // Build the Aho-Corasick automaton
+        registry.build_pattern_matcher();
+
         registry
     }
 
@@ -128,6 +139,29 @@ impl SignatureRegistry {
             .entry(file_type)
             .or_insert_with(Vec::new)
             .push(signature);
+
+        // Invalidate the pattern matcher - needs rebuild
+        self.pattern_matcher = None;
+    }
+
+    /// Builds the Aho-Corasick automaton from registered signatures
+    fn build_pattern_matcher(&mut self) {
+        let mut patterns: Vec<Vec<u8>> = Vec::new();
+        let mut pattern_map: Vec<(FileType, usize)> = Vec::new();
+
+        for file_type in &self.enabled_types {
+            if let Some(sigs) = self.signatures.get(file_type) {
+                for (idx, sig) in sigs.iter().enumerate() {
+                    patterns.push(sig.header().to_vec());
+                    pattern_map.push((*file_type, idx));
+                }
+            }
+        }
+
+        if !patterns.is_empty() {
+            self.pattern_matcher = AhoCorasick::new(&patterns).ok();
+        }
+        self.pattern_map = pattern_map;
     }
 
     /// Returns all registered signatures for a file type
@@ -151,10 +185,73 @@ impl SignatureRegistry {
     /// Enables only specific file types
     pub fn filter_types(&mut self, types: &[FileType]) {
         self.enabled_types.retain(|t| types.contains(t));
+        // Rebuild pattern matcher with filtered types
+        self.build_pattern_matcher();
     }
 
-    /// Finds all signatures that match the given data
+    /// Finds all signatures that match the given data using Aho-Corasick
+    ///
+    /// This is O(n + m + z) where:
+    /// - n = length of data
+    /// - m = total length of all patterns
+    /// - z = number of matches
     pub fn find_matches(&self, data: &[u8]) -> Vec<&FileSignature> {
+        // Rebuild if needed
+        let matcher = match &self.pattern_matcher {
+            Some(m) => m,
+            None => {
+                // Fallback to linear search if no matcher built
+                return self.find_matches_linear(data);
+            }
+        };
+
+        // Use Aho-Corasick to find all matches at position 0
+        let mut results = Vec::new();
+        
+        for mat in matcher.find_overlapping_iter(data) {
+            // Only consider matches starting at position 0
+            if mat.start() == 0 {
+                let (file_type, sig_idx) = self.pattern_map[mat.pattern().as_usize()];
+                if self.enabled_types.contains(&file_type) {
+                    if let Some(sigs) = self.signatures.get(&file_type) {
+                        if let Some(sig) = sigs.get(sig_idx) {
+                            results.push(sig);
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Finds all pattern matches in the data and returns (offset, signature) pairs
+    ///
+    /// This is the optimized method for scanning - returns all matches at any offset
+    pub fn find_all_matches_with_offsets(&self, data: &[u8]) -> Vec<(usize, &FileSignature)> {
+        let matcher = match &self.pattern_matcher {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        
+        for mat in matcher.find_overlapping_iter(data) {
+            let (file_type, sig_idx) = self.pattern_map[mat.pattern().as_usize()];
+            if self.enabled_types.contains(&file_type) {
+                if let Some(sigs) = self.signatures.get(&file_type) {
+                    if let Some(sig) = sigs.get(sig_idx) {
+                        results.push((mat.start(), sig));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Fallback linear search for when pattern matcher is not built
+    fn find_matches_linear(&self, data: &[u8]) -> Vec<&FileSignature> {
         self.signatures
             .iter()
             .filter(|(ft, _)| self.enabled_types.contains(ft))
@@ -179,3 +276,4 @@ impl Default for SignatureRegistry {
         Self::default_images()
     }
 }
+

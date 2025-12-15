@@ -7,7 +7,9 @@ pub mod application;
 pub mod domain;
 pub mod infrastructure;
 pub mod presentation;
+pub mod utils;
 
 pub use application::*;
 pub use domain::entities::*;
 pub use domain::repositories::*;
+

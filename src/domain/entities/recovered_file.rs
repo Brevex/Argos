@@ -3,6 +3,7 @@
 //! Represents a file that has been successfully recovered from storage.
 
 use super::file_signature::FileType;
+use crate::utils::format_bytes;
 use std::path::PathBuf;
 
 /// Represents a recovered file with its metadata and content
@@ -110,18 +111,6 @@ impl RecoveredFile {
 
     /// Returns a human-readable size string
     pub fn size_human(&self) -> String {
-        const KB: u64 = 1024;
-        const MB: u64 = KB * 1024;
-        const GB: u64 = MB * 1024;
-
-        if self.size >= GB {
-            format!("{:.2} GB", self.size as f64 / GB as f64)
-        } else if self.size >= MB {
-            format!("{:.2} MB", self.size as f64 / MB as f64)
-        } else if self.size >= KB {
-            format!("{:.2} KB", self.size as f64 / KB as f64)
-        } else {
-            format!("{} bytes", self.size)
-        }
+        format_bytes(self.size)
     }
 }

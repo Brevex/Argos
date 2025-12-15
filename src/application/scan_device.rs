@@ -94,39 +94,40 @@ impl ScanDeviceUseCase {
         Ok(result)
     }
 
-    /// Scans a single chunk for file signatures
+    /// Scans a single chunk for file signatures using Aho-Corasick
+    ///
+    /// This uses O(n + m + z) complexity where:
+    /// - n = chunk size
+    /// - m = total pattern length
+    /// - z = number of matches
     fn scan_chunk(&self, data: &[u8], base_offset: u64) -> Vec<SignatureMatch> {
         let mut matches = Vec::new();
 
-        // Scan every byte offset for signatures
-        // In a production system, we might optimize this with sliding windows
-        for i in 0..data.len() {
-            let remaining = &data[i..];
+        // Use Aho-Corasick for efficient multi-pattern matching
+        for (offset, sig) in self.signature_registry.find_all_matches_with_offsets(data) {
+            let start_offset = base_offset + offset as u64;
+            let remaining = &data[offset..];
 
-            for sig in self.signature_registry.find_matches(remaining) {
-                let start_offset = base_offset + i as u64;
+            // Try to find the footer
+            let end_offset = sig
+                .find_footer(remaining)
+                .map(|pos| start_offset + pos as u64);
 
-                // Try to find the footer
-                let end_offset = sig
-                    .find_footer(remaining)
-                    .map(|pos| start_offset + pos as u64);
+            let estimated_size = end_offset
+                .map(|e| e - start_offset)
+                .unwrap_or(sig.max_size());
 
-                let estimated_size = end_offset
-                    .map(|e| e - start_offset)
-                    .unwrap_or(sig.max_size());
-
-                // Skip if this looks like a false positive
-                if estimated_size < 100 {
-                    continue; // Too small to be a real file
-                }
-
-                matches.push(SignatureMatch::new(
-                    sig.file_type(),
-                    start_offset,
-                    end_offset,
-                    estimated_size,
-                ));
+            // Skip if this looks like a false positive
+            if estimated_size < 100 {
+                continue; // Too small to be a real file
             }
+
+            matches.push(SignatureMatch::new(
+                sig.file_type(),
+                start_offset,
+                end_offset,
+                estimated_size,
+            ));
         }
 
         matches

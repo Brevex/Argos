@@ -29,8 +29,18 @@ memmap2 = "0.9"
 # Parallel processing
 rayon = "1.10"
 
-# Image processing (for PNG conversion)
-image = "0.24"
+# Multi-pattern matching for signature scanning
+aho-corasick = "1.1"
+
+# Image processing (for PNG conversion) - only needed formats
+image = { version = "0.24", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "bmp",
+    "webp",
+    "tiff"
+] }
 
 [dev-dependencies]
 tempfile = "3"
