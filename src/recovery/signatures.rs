@@ -51,7 +51,6 @@ pub struct FileSignature {
     header: Vec<u8>,
     footer: Option<Vec<u8>>,
     max_size: u64,
-    header_offset: usize,
 }
 
 impl FileSignature {
@@ -66,7 +65,6 @@ impl FileSignature {
             header,
             footer,
             max_size,
-            header_offset: 0,
         }
     }
 

@@ -41,7 +41,7 @@ impl BtrfsSuperblock {
 
         let mut cursor = Cursor::new(data);
         let mut csum = [0u8; 32];
-        cursor.read_exact(&mut csum).unwrap(); // Infallible unless bug
+        cursor.read_exact(&mut csum).unwrap();
 
         let mut fsid = [0u8; 16];
         cursor.read_exact(&mut fsid).unwrap();

@@ -20,26 +20,21 @@ pub struct Cli {
     pub debug: bool,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Scan a device for recoverable files
     Scan {
-        /// Path to device or image file (e.g., /dev/sda, disk.img)
         #[arg(short, long)]
         device: String,
 
-        /// Output directory for scan results
         #[arg(short, long, default_value = "./scan_results")]
         output: PathBuf,
 
-        /// File types to scan for (jpeg, png, gif, bmp, webp, tiff)
         #[arg(short = 't', long, value_delimiter = ',')]
         types: Option<Vec<String>>,
 
-        /// Chunk size in MB for reading
         #[arg(short, long, default_value = "4")]
         chunk_size: usize,
     },
@@ -48,23 +43,18 @@ pub enum Commands {
         #[arg(short, long)]
         device: String,
 
-        /// Output directory for recovered files
         #[arg(short, long, default_value = "./recovered")]
         output: PathBuf,
 
-        /// File types to recover (jpeg, png, gif, bmp, webp, tiff)
         #[arg(short = 't', long, value_delimiter = ',')]
         types: Option<Vec<String>>,
 
-        /// Convert all images to PNG format
         #[arg(long, default_value = "true")]
         convert_png: bool,
 
-        /// Overwrite existing files
         #[arg(long)]
         overwrite: bool,
 
-        /// Organize files by type in subdirectories
         #[arg(long, default_value = "true")]
         organize: bool,
     },

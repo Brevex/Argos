@@ -2,13 +2,13 @@ use super::error::BlockDeviceError;
 use super::io::{BlockDeviceReader, DeviceInfo};
 use memmap2::Mmap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::Mutex;
 
 /// Linux block device reader implementation
 pub struct LinuxBlockDevice {
-    file: Mutex<File>,
+    file: File,
     path: String,
     size: u64,
     block_size: u32,
@@ -31,8 +31,6 @@ impl LinuxBlockDevice {
             let mut f = file.try_clone().map_err(BlockDeviceError::IoError)?;
             let size = f
                 .seek(SeekFrom::End(0))
-                .map_err(BlockDeviceError::IoError)?;
-            f.seek(SeekFrom::Start(0))
                 .map_err(BlockDeviceError::IoError)?;
             if size == 0 {
                 Err(BlockDeviceError::Other(format!(
@@ -65,7 +63,7 @@ impl BlockDeviceReader for LinuxBlockDevice {
         let block_size = Self::detect_block_size(path_obj);
 
         Ok(Self {
-            file: Mutex::new(file),
+            file,
             path: path.to_string(),
             size,
             block_size,
@@ -91,17 +89,11 @@ impl BlockDeviceReader for LinuxBlockDevice {
             });
         }
 
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| BlockDeviceError::Other("Failed to acquire lock".to_string()))?;
-        file.seek(SeekFrom::Start(offset))
-            .map_err(BlockDeviceError::IoError)?;
-
         let available = (self.size - offset) as usize;
         let to_read = length.min(available);
         let mut buffer = vec![0u8; to_read];
-        file.read_exact(&mut buffer).map_err(|e| {
+
+        self.file.read_at(&mut buffer, offset).map_err(|e| {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 BlockDeviceError::ReadError {
                     offset,
@@ -111,6 +103,7 @@ impl BlockDeviceReader for LinuxBlockDevice {
                 BlockDeviceError::IoError(e)
             }
         })?;
+
         Ok(buffer)
     }
 

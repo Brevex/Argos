@@ -10,6 +10,9 @@ readme = "README.md"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
+inquire = "0.7"
+humansize = "2.1"
+sysinfo = "0.30"
 thiserror = "1.0"
 anyhow = "1.0"
 log = "0.4"

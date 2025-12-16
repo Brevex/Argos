@@ -130,31 +130,69 @@ impl Carver {
         progress_callback: Option<ProgressCallback>,
     ) -> anyhow::Result<ScanResult> {
         let start = Instant::now();
-        let size = device.size();
-        let mut progress = ScanProgress::new(size);
-        let mut result = ScanResult::new(device.path().to_string(), size, Duration::ZERO);
+        let device_size = device.size();
+        let chunk_size = options.chunk_size;
 
-        device.read_chunks(0, options.chunk_size, |chunk_offset, data| {
-            let matches = self.scan_chunk(data, chunk_offset);
-            for m in matches {
-                if options.file_types.is_empty() || options.file_types.contains(&m.file_type()) {
-                    result.add_match(m);
+        let scanned_bytes = Arc::new(AtomicU64::new(0));
+        let matches_found = Arc::new(AtomicUsize::new(0));
+
+        let progress_tracker = if let Some(cb) = &progress_callback {
+            Some((cb, Arc::clone(&scanned_bytes), Arc::clone(&matches_found)))
+        } else {
+            None
+        };
+
+        // Calculate number of chunks
+        let num_chunks = (device_size + chunk_size as u64 - 1) / chunk_size as u64;
+
+        let all_matches: Vec<SignatureMatch> = (0..num_chunks)
+            .into_par_iter()
+            .map(|chunk_idx| {
+                let offset = chunk_idx * chunk_size as u64;
+                let actual_chunk_size =
+                    ((offset + chunk_size as u64).min(device_size) - offset) as usize;
+
+                // Stateless read
+                match device.read_at(offset, actual_chunk_size) {
+                    Ok(data) => {
+                        let matches = self.scan_chunk(&data, offset);
+
+                        // Update progress
+                        let current_scanned = scanned_bytes
+                            .fetch_add(actual_chunk_size as u64, Ordering::Relaxed)
+                            + actual_chunk_size as u64;
+                        let current_matches = matches_found
+                            .fetch_add(matches.len(), Ordering::Relaxed)
+                            + matches.len();
+
+                        // Report progress occasionally or if needed.
+                        if let Some((cb, _, _)) = &progress_tracker {
+                            let p = ScanProgress {
+                                total_bytes: device_size,
+                                scanned_bytes: current_scanned,
+                                matches_found: current_matches,
+                                estimated_remaining: None,
+                                speed_bps: 0,
+                            };
+                            cb(&p);
+                        }
+
+                        matches
+                    }
+                    Err(_) => Vec::new(),
                 }
-            }
+            })
+            .flat_map(|matches| matches)
+            .filter(|m| {
+                options.file_types.is_empty() || options.file_types.contains(&m.file_type())
+            })
+            .collect();
 
-            let elapsed = start.elapsed().as_secs().max(1);
-            progress.update(
-                chunk_offset + data.len() as u64,
-                result.total_matches(),
-                (chunk_offset + data.len() as u64) / elapsed,
-            );
-            if let Some(ref cb) = progress_callback {
-                cb(&progress);
-            }
-            true
-        })?;
+        let mut result = ScanResult::new(device.path().to_string(), device_size, start.elapsed());
+        for m in all_matches {
+            result.add_match(m);
+        }
 
-        result.duration = start.elapsed();
         Ok(result)
     }
 

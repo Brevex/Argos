@@ -10,6 +10,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
+use inquire::{Confirm, InquireError, Select, Text};
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -23,31 +25,199 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
     match cli.command {
-        Commands::Scan {
+        Some(Commands::Scan {
             device,
             output,
             types,
             chunk_size,
-        } => {
+        }) => {
             run_scan(&device, &output, types, chunk_size)?;
         }
-        Commands::Recover {
+        Some(Commands::Recover {
             device,
             output,
             types,
             convert_png,
             overwrite,
             organize,
-        } => {
+        }) => {
             run_recover(&device, &output, types, convert_png, overwrite, organize)?;
         }
-        Commands::ListSignatures => {
+        Some(Commands::ListSignatures) => {
             list_signatures();
         }
-        Commands::Info { device } => {
+        Some(Commands::Info { device }) => {
             show_device_info(&device)?;
         }
+        None => match run_wizard() {
+            Ok(_) => {}
+            Err(e) => {
+                if let Some(inquire_err) = e.downcast_ref::<InquireError>() {
+                    match inquire_err {
+                        InquireError::OperationCanceled => {
+                            println!("👋 Operation cancelled.");
+                        }
+                        _ => eprintln!("❌ Error: {}", e),
+                    }
+                } else {
+                    eprintln!("❌ Error: {}", e);
+                }
+            }
+        },
     }
+    Ok(())
+}
+
+struct PhysicalDisk {
+    name: String,
+    model: String,
+    size: u64,
+    path: String,
+}
+
+fn get_physical_disks() -> Result<Vec<PhysicalDisk>> {
+    let mut disks = Vec::new();
+    let sys_block = Path::new("/sys/class/block");
+
+    if sys_block.exists() {
+        for entry in fs::read_dir(sys_block)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_name = entry.file_name().to_string_lossy().to_string();
+
+            if file_name.starts_with("loop")
+                || file_name.starts_with("ram")
+                || file_name.starts_with("zram")
+            {
+                continue;
+            }
+
+            if path.join("partition").exists() {
+                continue;
+            }
+
+            let size_path = path.join("size");
+            if !size_path.exists() {
+                continue;
+            }
+            let sectors_str = fs::read_to_string(&size_path)?.trim().to_string();
+            let sectors: u64 = sectors_str.parse().unwrap_or(0);
+            if sectors == 0 {
+                continue;
+            }
+
+            let size_bytes = sectors * 512;
+
+            let model_path = path.join("device/model");
+            let model = if model_path.exists() {
+                fs::read_to_string(model_path)?.trim().to_string()
+            } else {
+                "Unknown Model".to_string()
+            };
+
+            disks.push(PhysicalDisk {
+                name: file_name.clone(),
+                model,
+                size: size_bytes,
+                path: format!("/dev/{}", file_name),
+            });
+        }
+    }
+
+    disks.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(disks)
+}
+
+fn run_wizard() -> Result<()> {
+    println!("🧙 Argos Recovery Wizard");
+
+    let disks = get_physical_disks()?;
+    let mut options: Vec<String> = disks
+        .iter()
+        .map(|d| {
+            format!(
+                "{} - {} ({})",
+                d.path,
+                d.model,
+                humansize::format_size(d.size, humansize::BINARY)
+            )
+        })
+        .collect();
+
+    options.push("Manual Entry".to_string());
+
+    let selection = Select::new("Which storage device do you want to analyze?", options)
+        .with_page_size(10)
+        .prompt()?;
+
+    let device_path = if selection == "Manual Entry" {
+        Text::new("Enter the device path (e.g., /dev/sdb):")
+            .with_validator(|input: &str| {
+                if input.trim().is_empty() {
+                    Ok(inquire::validator::Validation::Invalid(
+                        "Path cannot be empty".into(),
+                    ))
+                } else {
+                    Ok(inquire::validator::Validation::Valid)
+                }
+            })
+            .prompt()?
+    } else {
+        selection
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    if device_path.is_empty() {
+        anyhow::bail!("Invalid device path selection");
+    }
+
+    let output_path_str = Text::new("Where do you want to save the recovered images?")
+        .with_default("./recovered")
+        .with_validator(|input: &str| {
+            if input.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid(
+                    "Path cannot be empty".into(),
+                ))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .prompt()?;
+
+    if device_path == output_path_str {
+        println!("⚠️  Warning: Source and Destination look identical. This is dangerous!");
+        if !Confirm::new("Are you sure you want to proceed?")
+            .with_default(false)
+            .prompt()?
+        {
+            println!("Operation cancelled.");
+            return Ok(());
+        }
+    }
+    println!("\n📊 Configuration:");
+    println!("   Target Device: {}", device_path);
+    println!("   Output Path:   {}", output_path_str);
+
+    if !Confirm::new("Start recovery scan?")
+        .with_default(true)
+        .prompt()?
+    {
+        println!("Operation cancelled.");
+        return Ok(());
+    }
+
+    run_recover(
+        &device_path,
+        Path::new(&output_path_str),
+        None,
+        true,
+        false,
+        true,
+    )?;
+
     Ok(())
 }
 
