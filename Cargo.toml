@@ -8,31 +8,16 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
-# CLI
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
-
-# Error handling
 thiserror = "1.0"
 anyhow = "1.0"
-
-# Logging
 log = "0.4"
 env_logger = "0.11"
-
-# Byte manipulation
 byteorder = "1.5"
-
-# Memory-mapped I/O for performance
 memmap2 = "0.9"
-
-# Parallel processing
 rayon = "1.10"
-
-# Multi-pattern matching for signature scanning
 aho-corasick = "1.1"
-
-# Image processing (for PNG conversion) - only needed formats
 image = { version = "0.24", default-features = false, features = [
     "jpeg",
     "png",

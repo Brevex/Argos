@@ -1,25 +1,18 @@
-//! Argos - Image Recovery Tool
-//!
-//! A powerful file recovery tool specialized in recovering deleted images
-//! from storage devices, even after formatting.
-
 use anyhow::{Context, Result};
-use argos::application::dto::ScanOptions;
-use argos::application::{RecoverFilesUseCase, ScanDeviceUseCase};
-use argos::domain::repositories::{BlockDeviceReader, RecoveredFileWriter, WriteOptions};
-use argos::domain::services::SignatureRegistry;
-use argos::infrastructure::block_device::LinuxBlockDevice;
-use argos::infrastructure::carvers::ImageCarver;
-use argos::infrastructure::persistence::LocalFileWriter;
-use argos::presentation::cli::{parse_file_types, Cli, Commands, ProgressReporter};
-use argos::utils::format_bytes;
+use argos::cli::{parse_file_types, Cli, Commands, ProgressReporter};
+use argos::core::device::LinuxBlockDevice;
+use argos::core::io::BlockDeviceReader;
+use argos::recovery::carver::{Carver, RecoveredFile, ScanOptions};
+use argos::recovery::signatures::{FileType, SignatureRegistry};
 use clap::Parser;
+use image::ImageFormat;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::Path;
 
 fn main() -> Result<()> {
-    // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Initialize logging
     let log_level = if cli.debug {
         "debug"
     } else if cli.verbose {
@@ -29,7 +22,6 @@ fn main() -> Result<()> {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
-    // Execute command
     match cli.command {
         Commands::Scan {
             device,
@@ -37,9 +29,8 @@ fn main() -> Result<()> {
             types,
             chunk_size,
         } => {
-            run_scan(&device, &output.to_string_lossy(), types, chunk_size)?;
+            run_scan(&device, &output, types, chunk_size)?;
         }
-
         Commands::Recover {
             device,
             output,
@@ -50,102 +41,73 @@ fn main() -> Result<()> {
         } => {
             run_recover(&device, &output, types, convert_png, overwrite, organize)?;
         }
-
         Commands::ListSignatures => {
             list_signatures();
         }
-
         Commands::Info { device } => {
             show_device_info(&device)?;
         }
     }
-
     Ok(())
 }
 
-/// Runs the scan command
 fn run_scan(
     device_path: &str,
-    output_path: &str,
+    output_path: &Path,
     types: Option<Vec<String>>,
     chunk_size_mb: usize,
 ) -> Result<()> {
-    println!("\n🔍 Argos Image Recovery Tool\n");
-    println!("Scanning: {}", device_path);
+    println!("\n🔍 Argos Image Recovery Tool\nScanning: {}", device_path);
 
-    // Open device
-    let device = LinuxBlockDevice::open(device_path)
-        .context("Failed to open device. Make sure you have read permissions (try sudo).")?;
+    let device = LinuxBlockDevice::open(device_path).context("Failed to open device")?;
+    let info = device.device_info()?;
+    println!("Device size: {} bytes", info.size);
 
-    let device_info = device.device_info()?;
-    println!(
-        "Device size: {} ({} bytes)",
-        format_bytes(device_info.size),
-        device_info.size
-    );
-    println!("Block size: {} bytes\n", device_info.block_size);
+    let options = ScanOptions {
+        chunk_size: chunk_size_mb * 1024 * 1024,
+        file_types: parse_file_types(types),
+    };
 
-    // Create scan options
-    let file_types = parse_file_types(types);
-    let options = ScanOptions::new(device_path)
-        .with_chunk_size(chunk_size_mb * 1024 * 1024)
-        .with_types(file_types);
-
-    // Create progress reporter
-    let progress = ProgressReporter::for_scan(device_info.size);
-
-    // Create and execute use case
-    let scan_use_case = ScanDeviceUseCase::with_default_signatures();
-    let result = scan_use_case.execute(&device, &options, Some(progress.scan_callback()))?;
-
+    let progress = ProgressReporter::for_scan(info.size);
+    let carver = Carver::new();
+    let result = carver.scan(&device, &options, Some(progress.scan_callback()))?;
     progress.finish("Scan complete!");
 
-    // Display results
     println!("\n{}", result.summary());
 
-    // Save results summary to file
-    let summary_path = format!("{}/scan_summary.txt", output_path);
-    std::fs::create_dir_all(output_path)?;
-    std::fs::write(&summary_path, result.summary())?;
-    println!("Results saved to: {}", summary_path);
-
+    fs::create_dir_all(output_path)?;
+    let summary_path = output_path.join("scan_summary.txt");
+    fs::write(&summary_path, result.summary())?;
+    println!("Results saved to: {}", summary_path.display());
     Ok(())
 }
 
-/// Runs the recover command
 fn run_recover(
     device_path: &str,
-    output_path: &std::path::Path,
+    output_path: &Path,
     types: Option<Vec<String>>,
     convert_png: bool,
     overwrite: bool,
     organize: bool,
 ) -> Result<()> {
-    println!("\n🔄 Argos Image Recovery Tool\n");
-    println!("Device: {}", device_path);
-    println!("Output: {}\n", output_path.display());
-
-    // Open device
-    let device = LinuxBlockDevice::open(device_path)
-        .context("Failed to open device. Make sure you have read permissions (try sudo).")?;
-
-    let device_info = device.device_info()?;
     println!(
-        "Device size: {} ({} bytes)\n",
-        format_bytes(device_info.size),
-        device_info.size
+        "\n🔄 Argos Image Recovery Tool\nDevice: {}\nOutput: {}",
+        device_path,
+        output_path.display()
     );
 
-    // First, scan for files
-    println!("Phase 1: Scanning for recoverable files...\n");
+    let device = LinuxBlockDevice::open(device_path).context("Failed to open device")?;
+    let info = device.device_info()?;
+    println!("Device size: {} bytes\nPhase 1: Scanning...", info.size);
 
-    let file_types = parse_file_types(types);
-    let scan_options = ScanOptions::new(device_path).with_types(file_types);
+    let options = ScanOptions {
+        chunk_size: 4 * 1024 * 1024,
+        file_types: parse_file_types(types),
+    };
 
-    let progress = ProgressReporter::for_scan(device_info.size);
-    let scan_use_case = ScanDeviceUseCase::with_default_signatures();
-    let scan_result =
-        scan_use_case.execute(&device, &scan_options, Some(progress.scan_callback()))?;
+    let carver = Carver::new();
+    let progress = ProgressReporter::for_scan(info.size);
+    let scan_result = carver.scan(&device, &options, Some(progress.scan_callback()))?;
 
     progress.finish(&format!(
         "Found {} potential files",
@@ -153,97 +115,121 @@ fn run_recover(
     ));
 
     if scan_result.total_matches() == 0 {
-        println!("\n⚠️  No recoverable files found.");
+        println!("\n⚠️ No recoverable files found.");
         return Ok(());
     }
 
-    // Now recover files
     println!("\nPhase 2: Recovering files...\n");
-
-    let write_options = WriteOptions {
-        overwrite,
-        convert_to_png: convert_png,
-        organize_by_type: organize,
-        filename_prefix: "recovered".to_string(),
-    };
-
-    let carver = ImageCarver::new();
-    let writer = LocalFileWriter::new(output_path)?;
-
     let recovery_progress = ProgressReporter::for_recovery(scan_result.total_matches() as u64);
-    let recover_use_case = RecoverFilesUseCase::new(carver, writer);
-    let recovery_result = recover_use_case.execute(
-        &device,
-        &scan_result,
-        &write_options,
-        Some(recovery_progress.recovery_callback()),
-    )?;
+
+    let _chunk_size = 1024 * 1024;
+
+    let mut files_recovered = 0;
+
+    let mut matches = scan_result.matches.clone();
+    matches.sort_by_key(|m| m.start_offset());
+
+    for (id, m) in matches.iter().enumerate() {
+        let max_size = m.estimated_size() as usize;
+        let read_size = max_size.min(200 * 1024 * 1024);
+
+        match device.read_at(m.start_offset(), read_size) {
+            Ok(data) => {
+                if let Ok(file) = carver.recover_file(&data, m, id as u64) {
+                    save_recovered_file(&file, output_path, convert_png, overwrite, organize)?;
+                    files_recovered += 1;
+                }
+            }
+            Err(e) => eprintln!("Error reading at {}: {}", m.start_offset(), e),
+        }
+        recovery_progress.recovery_inc();
+    }
 
     recovery_progress.finish("Recovery complete!");
-
-    // Display results
-    println!("\n{}", recovery_result.summary());
-    println!("Files saved to: {}", output_path.display());
-
+    println!(
+        "Recovered {} files to {}",
+        files_recovered,
+        output_path.display()
+    );
     Ok(())
 }
 
-/// Lists all supported file signatures
+fn save_recovered_file(
+    file: &RecoveredFile,
+    output_dir: &Path,
+    convert_png: bool,
+    overwrite: bool,
+    organize: bool,
+) -> Result<()> {
+    let mut path = output_dir.to_path_buf();
+    if organize {
+        path.push(file.file_type.extension());
+    }
+    fs::create_dir_all(&path)?;
+
+    let should_convert =
+        convert_png && file.file_type != FileType::Png && file.file_type != FileType::Unknown;
+    let extension = if should_convert {
+        "png"
+    } else {
+        file.file_type.extension()
+    };
+    let filename = format!("recovered_{:06}.{}", file.id, extension);
+    path.push(filename);
+
+    if path.exists() && !overwrite {
+        return Ok(());
+    }
+
+    let data_to_write = if should_convert {
+        match convert_to_png(&file.data, file.file_type) {
+            Ok(d) => d,
+            Err(_) => file.data.clone(), // Fallback
+        }
+    } else {
+        file.data.clone()
+    };
+
+    File::create(path)?.write_all(&data_to_write)?;
+    Ok(())
+}
+
+fn convert_to_png(data: &[u8], file_type: FileType) -> Result<Vec<u8>> {
+    let format = match file_type {
+        FileType::Jpeg => ImageFormat::Jpeg,
+        FileType::Gif => ImageFormat::Gif,
+        FileType::Bmp => ImageFormat::Bmp,
+        FileType::WebP => ImageFormat::WebP,
+        FileType::Tiff => ImageFormat::Tiff,
+        _ => return Ok(data.to_vec()),
+    };
+
+    let img = image::load_from_memory_with_format(data, format)?;
+    let mut png_data = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png_data), ImageFormat::Png)?;
+    Ok(png_data)
+}
+
 fn list_signatures() {
     println!("\n📋 Supported File Signatures\n");
-
     let registry = SignatureRegistry::default_images();
-
     for file_type in registry.enabled_types() {
-        let sigs = registry.get_signatures(*file_type);
-        println!("  {} ({}):", file_type.name(), file_type.extension());
-
-        for sig in sigs {
+        println!("  {} ({})", file_type.name(), file_type.extension());
+        for sig in registry.get_signatures(*file_type) {
             let header_hex: Vec<String> =
                 sig.header().iter().map(|b| format!("{:02X}", b)).collect();
-            print!("    Header: {}", header_hex.join(" "));
-
-            if let Some(footer) = sig.footer() {
-                let footer_hex: Vec<String> = footer.iter().map(|b| format!("{:02X}", b)).collect();
-                print!(" | Footer: {}", footer_hex.join(" "));
-            }
-
-            println!(" | Max: {}", format_bytes(sig.max_size()));
+            println!("    Header: {}", header_hex.join(" "));
         }
         println!();
     }
 }
 
-/// Shows device information
 fn show_device_info(device_path: &str) -> Result<()> {
     println!("\n📊 Device Information\n");
-
-    let device = LinuxBlockDevice::open(device_path)
-        .context("Failed to open device. Make sure you have read permissions (try sudo).")?;
-
+    let device = LinuxBlockDevice::open(device_path).context("Failed to open device")?;
     let info = device.device_info()?;
-
     println!("  Path:       {}", info.path);
-    println!(
-        "  Size:       {} ({} bytes)",
-        format_bytes(info.size),
-        info.size
-    );
+    println!("  Size:       {} bytes", info.size);
     println!("  Block Size: {} bytes", info.block_size);
-    println!("  Blocks:     {}", info.block_count());
-    println!(
-        "  Read-Only:  {}",
-        if info.read_only { "Yes" } else { "No" }
-    );
-
-    if let Some(model) = &info.model {
-        println!("  Model:      {}", model);
-    }
-    if let Some(serial) = &info.serial {
-        println!("  Serial:     {}", serial);
-    }
-
-    println!();
-
     Ok(())
 }

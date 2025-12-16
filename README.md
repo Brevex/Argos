@@ -6,10 +6,10 @@ A powerful file recovery tool specialized in recovering deleted images from stor
 
 - **File Carving**: Recovers images by scanning for file signatures (magic bytes)
 - **Multi-format Support**: JPEG, PNG, GIF, BMP, WebP, TIFF
-- **Filesystem Parsing**: ext4, Btrfs, and NTFS (with metadata-based recovery)
+- **Filesystem Parsing**: ext4 and Btrfs (Superblock parsing)
 - **PNG Conversion**: Automatically converts recovered images to PNG format
 - **Progress Reporting**: Real-time progress with speed and ETA
-- **Clean Architecture**: Modular design for easy extension
+- **Vertical Slice Architecture**: Organized by domain (ext4, btrfs, recovery) for better cohesion
 
 ## Installation
 
@@ -63,21 +63,15 @@ sudo ./target/release/argos info --device /dev/sda
 |------------|--------|-------|
 | ext4       | ✅ Superblock parsing | Inode table parsing planned |
 | Btrfs      | ✅ Superblock parsing | B-tree recovery planned |
-| NTFS       | ✅ Boot sector + MFT location | MFT parsing planned |
 | Raw        | ✅ Full support | Pure file carving |
 
 ## Testing
 
-Tests are organized in the `tests/` directory using [rstest](https://crates.io/crates/rstest):
+Tests are organized to ensure reliability:
 
 ```bash
 # Run all tests
 cargo test
-
-# Run specific test file
-cargo test --test domain_tests
-cargo test --test infrastructure_tests
-cargo test --test integration_tests
 ```
 
 ## Development
