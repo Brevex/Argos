@@ -11,11 +11,9 @@ use std::sync::Arc;
 #[command(version = "0.2.0")]
 #[command(about = "Recover deleted images from storage devices", long_about = None)]
 pub struct Cli {
-    /// Enable verbose output
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// Enable debug output
     #[arg(short, long, global = true)]
     pub debug: bool,
 
@@ -57,6 +55,18 @@ pub enum Commands {
 
         #[arg(long, default_value = "true")]
         organize: bool,
+
+        #[arg(long, default_value = "100")]
+        min_size: usize,
+
+        #[arg(long, default_value = "600")]
+        min_width: u32,
+
+        #[arg(long, default_value = "600")]
+        min_height: u32,
+
+        #[arg(long)]
+        no_validation: bool,
     },
 
     ListSignatures,

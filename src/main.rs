@@ -4,6 +4,7 @@ use argos::core::device::LinuxBlockDevice;
 use argos::core::io::BlockDeviceReader;
 use argos::recovery::carver::{Carver, RecoveredFile, ScanOptions};
 use argos::recovery::signatures::{FileType, SignatureRegistry};
+use argos::recovery::validator::{ImageValidator, ValidationConfig, ValidationStats};
 use clap::Parser;
 use image::ImageFormat;
 use std::fs::{self, File};
@@ -40,8 +41,23 @@ fn main() -> Result<()> {
             convert_png,
             overwrite,
             organize,
+            min_size,
+            min_width,
+            min_height,
+            no_validation,
         }) => {
-            run_recover(&device, &output, types, convert_png, overwrite, organize)?;
+            run_recover(
+                &device,
+                &output,
+                types,
+                convert_png,
+                overwrite,
+                organize,
+                min_size,
+                min_width,
+                min_height,
+                no_validation,
+            )?;
         }
         Some(Commands::ListSignatures) => {
             list_signatures();
@@ -216,6 +232,10 @@ fn run_wizard() -> Result<()> {
         true,
         false,
         true,
+        100,  
+        600,  
+        600,  
+        false, 
     )?;
 
     Ok(())
@@ -259,6 +279,10 @@ fn run_recover(
     convert_png: bool,
     overwrite: bool,
     organize: bool,
+    min_size_kb: usize,
+    min_width: u32,
+    min_height: u32,
+    no_validation: bool,
 ) -> Result<()> {
     println!(
         "\n🔄 Argos Image Recovery Tool\nDevice: {}\nOutput: {}",
@@ -294,6 +318,16 @@ fn run_recover(
 
     let _chunk_size = 1024 * 1024;
 
+    let validator = if no_validation {
+        None
+    } else {
+        let validation_config = ValidationConfig::new()
+            .with_min_size(min_size_kb)
+            .with_min_dimensions(min_width, min_height);
+        Some(ImageValidator::new(validation_config))
+    };
+    let validation_stats = ValidationStats::new();
+
     let mut files_recovered = 0;
 
     let mut matches = scan_result.matches.clone();
@@ -305,9 +339,12 @@ fn run_recover(
 
         match device.read_at(m.start_offset(), read_size) {
             Ok(data) => {
-                if let Ok(file) = carver.recover_file(&data, m, id as u64) {
-                    save_recovered_file(&file, output_path, convert_png, overwrite, organize)?;
-                    files_recovered += 1;
+                if let Ok(file) = carver.recover_file(&data, m, id as u64, validator.as_ref()) {
+                    validation_stats.record(file.validation_result);
+                    
+                    if save_recovered_file(&file, output_path, convert_png, overwrite, organize)? {
+                        files_recovered += 1;
+                    }
                 }
             }
             Err(e) => eprintln!("Error reading at {}: {}", m.start_offset(), e),
@@ -316,8 +353,10 @@ fn run_recover(
     }
 
     recovery_progress.finish("Recovery complete!");
+    
+    println!("\n{}", validation_stats.summary());
     println!(
-        "Recovered {} files to {}",
+        "\n✅ Successfully saved {} files to {}",
         files_recovered,
         output_path.display()
     );
@@ -330,7 +369,17 @@ fn save_recovered_file(
     convert_png: bool,
     overwrite: bool,
     organize: bool,
-) -> Result<()> {
+) -> Result<bool> {
+    if !file.validation_result.is_valid() {
+        log::debug!(
+            "Skipping file {} (offset {}): {}",
+            file.id,
+            file.offset,
+            file.validation_result.reason()
+        );
+        return Ok(false);
+    }
+
     let mut path = output_dir.to_path_buf();
     if organize {
         path.push(file.file_type.extension());
@@ -348,7 +397,7 @@ fn save_recovered_file(
     path.push(filename);
 
     if path.exists() && !overwrite {
-        return Ok(());
+        return Ok(false);
     }
 
     let data_to_write = if should_convert {
@@ -361,7 +410,7 @@ fn save_recovered_file(
     };
 
     File::create(path)?.write_all(&data_to_write)?;
-    Ok(())
+    Ok(true)
 }
 
 fn convert_to_png(data: &[u8], file_type: FileType) -> Result<Vec<u8>> {

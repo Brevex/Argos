@@ -2,10 +2,7 @@ use crate::fs::FileSystemError;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Cursor, Read};
 
-/// Btrfs superblock magic number "_BHRfS_M" in little-endian
 const BTRFS_MAGIC: [u8; 8] = [0x5f, 0x42, 0x48, 0x52, 0x66, 0x53, 0x5f, 0x4d];
-
-/// Primary superblock offset
 pub const SUPERBLOCK_OFFSET: u64 = 65536;
 pub const SUPERBLOCK_SIZE: usize = 4096;
 

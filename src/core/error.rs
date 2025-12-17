@@ -1,7 +1,6 @@
 use std::io;
 use thiserror::Error;
 
-/// Errors that can occur when reading from a block device
 #[derive(Error, Debug)]
 pub enum BlockDeviceError {
     #[error("Permission denied: {0}")]

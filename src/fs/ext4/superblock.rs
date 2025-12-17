@@ -2,14 +2,10 @@ use crate::fs::FileSystemError;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::Cursor;
 
-/// ext4 superblock magic number
 const EXT4_SUPER_MAGIC: u16 = 0xEF53;
-
-/// Superblock size
 pub const SUPERBLOCK_SIZE: usize = 1024;
 pub const SUPERBLOCK_OFFSET: u64 = 1024;
 
-/// ext4 superblock structure (partial)
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Ext4Superblock {

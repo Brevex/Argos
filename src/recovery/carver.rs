@@ -1,4 +1,5 @@
 use super::signatures::{FileType, SignatureMatch, SignatureRegistry};
+use super::validator::{ImageValidator, ValidationResult};
 use crate::core::io::BlockDeviceReader;
 use byteorder::{LittleEndian, ReadBytesExt};
 use rayon::prelude::*;
@@ -97,6 +98,7 @@ pub struct RecoveredFile {
     pub data: Vec<u8>,
     pub confidence: f32,
     pub is_corrupted: bool,
+    pub validation_result: ValidationResult,
 }
 
 impl RecoveredFile {
@@ -108,7 +110,16 @@ impl RecoveredFile {
             data,
             confidence,
             is_corrupted: false,
+            validation_result: ValidationResult::Valid,
         }
+    }
+
+    pub fn with_validation(mut self, result: ValidationResult) -> Self {
+        self.validation_result = result;
+        if !result.is_valid() {
+            self.is_corrupted = true;
+        }
+        self
     }
 }
 
@@ -142,7 +153,6 @@ impl Carver {
             None
         };
 
-        // Calculate number of chunks
         let num_chunks = (device_size + chunk_size as u64 - 1) / chunk_size as u64;
 
         let all_matches: Vec<SignatureMatch> = (0..num_chunks)
@@ -152,12 +162,10 @@ impl Carver {
                 let actual_chunk_size =
                     ((offset + chunk_size as u64).min(device_size) - offset) as usize;
 
-                // Stateless read
                 match device.read_at(offset, actual_chunk_size) {
                     Ok(data) => {
                         let matches = self.scan_chunk(&data, offset);
 
-                        // Update progress
                         let current_scanned = scanned_bytes
                             .fetch_add(actual_chunk_size as u64, Ordering::Relaxed)
                             + actual_chunk_size as u64;
@@ -165,7 +173,6 @@ impl Carver {
                             .fetch_add(matches.len(), Ordering::Relaxed)
                             + matches.len();
 
-                        // Report progress occasionally or if needed.
                         if let Some((cb, _, _)) = &progress_tracker {
                             let p = ScanProgress {
                                 total_bytes: device_size,
@@ -275,6 +282,7 @@ impl Carver {
         data: &[u8],
         match_info: &SignatureMatch,
         file_id: u64,
+        validator: Option<&ImageValidator>,
     ) -> anyhow::Result<RecoveredFile> {
         let file_type = match_info.file_type();
         let size = self
@@ -292,17 +300,22 @@ impl Carver {
         }
 
         let file_data = data[..size].to_vec();
-        let valid = self.validate(&file_data, file_type);
-        let mut recovered = RecoveredFile::new(
+        
+        let validation_result = if let Some(v) = validator {
+            v.validate_file_data(&file_data, file_type)
+        } else {
+            ValidationResult::Valid
+        };
+
+        let confidence = if validation_result.is_valid() { 0.9 } else { 0.5 };
+        let recovered = RecoveredFile::new(
             file_id,
             file_type,
             match_info.start_offset(),
             file_data,
-            if valid { 0.9 } else { 0.5 },
-        );
-        if !valid {
-            recovered.is_corrupted = true;
-        }
+            confidence,
+        )
+        .with_validation(validation_result);
 
         Ok(recovered)
     }
@@ -330,10 +343,6 @@ impl Carver {
             }
             _ => None,
         }
-    }
-
-    fn validate(&self, data: &[u8], _file_type: FileType) -> bool {
-        !data.is_empty()
     }
 
     fn find_jpeg_end(&self, data: &[u8]) -> Option<usize> {

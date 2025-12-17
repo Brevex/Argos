@@ -6,7 +6,6 @@ use std::io::{Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-/// Linux block device reader implementation
 pub struct LinuxBlockDevice {
     file: File,
     path: String,
@@ -141,7 +140,6 @@ impl BlockDeviceReader for LinuxBlockDevice {
     }
 }
 
-/// Memory-mapped block device reader implementation
 pub struct MmapBlockDevice {
     mmap: Mmap,
     path: String,
