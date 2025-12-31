@@ -61,6 +61,14 @@ impl DiskReader {
             .write(false)
             .open(path.as_ref())?;
 
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{fadvise, Advice};
+
+            let _ = fadvise(&file, 0, None, Advice::Sequential);
+            let _ = fadvise(&file, 0, None, Advice::NoReuse);
+        }
+
         let size = file.seek(SeekFrom::End(0))?;
         file.seek(SeekFrom::Start(0))?;
 

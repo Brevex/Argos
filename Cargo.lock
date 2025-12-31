@@ -449,6 +449,7 @@ dependencies = [
 name = "scav_io"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "scav_core",
  "tempfile",
 ]

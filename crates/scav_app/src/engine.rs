@@ -19,6 +19,7 @@ use crate::recovery::RecoveryManager;
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const OVERLAP: usize = 4 * 1024;
 const DATA_CHANNEL_CAPACITY: usize = 10;
+const RECYCLE_CHANNEL_CAPACITY: usize = DATA_CHANNEL_CAPACITY + 2;
 const EVENT_CHANNEL_CAPACITY: usize = 1000;
 
 /// A chunk of data read from the disk.
@@ -69,6 +70,8 @@ pub fn run_scan(
 
     let (data_tx, data_rx): (Sender<DataChunk>, Receiver<DataChunk>) =
         bounded(DATA_CHANNEL_CAPACITY);
+    let (recycle_tx, recycle_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+        bounded(RECYCLE_CHANNEL_CAPACITY);
     let (event_tx, event_rx): (Sender<ScanEvent>, Receiver<ScanEvent>) =
         bounded(EVENT_CHANNEL_CAPACITY);
     let device_path_owned = device_path.to_string();
@@ -76,8 +79,13 @@ pub fn run_scan(
     let running_producer = Arc::clone(&running);
 
     let producer_handle = thread::spawn(move || {
-        if let Err(e) = producer_thread(&device_path_owned, data_tx, pb_producer, running_producer)
-        {
+        if let Err(e) = producer_thread(
+            &device_path_owned,
+            data_tx,
+            recycle_rx,
+            pb_producer,
+            running_producer,
+        ) {
             eprintln!("[Producer] Error: {}", e);
         }
     });
@@ -85,16 +93,18 @@ pub fn run_scan(
     let mut worker_handles = Vec::with_capacity(num_workers);
     for worker_id in 0..num_workers {
         let rx = data_rx.clone();
+        let recycle_tx = recycle_tx.clone();
         let tx = event_tx.clone();
 
         let handle = thread::spawn(move || {
-            worker_thread(worker_id, rx, tx);
+            worker_thread(worker_id, rx, recycle_tx, tx);
         });
 
         worker_handles.push(handle);
     }
 
     drop(data_rx);
+    drop(recycle_tx);
     drop(event_tx);
 
     let mut recovery_manager = RecoveryManager::new(device_path, output_dir)?;
@@ -184,6 +194,7 @@ pub fn run_scan(
 fn producer_thread(
     device_path: &str,
     data_tx: Sender<DataChunk>,
+    recycle_rx: Receiver<Vec<u8>>,
     pb: Arc<ProgressBar>,
     running: Arc<AtomicBool>,
 ) -> EngineResult<()> {
@@ -194,12 +205,18 @@ fn producer_thread(
     let total_size = reader.size();
 
     let mut offset: u64 = 0;
-    let mut buffer = vec![0u8; CHUNK_SIZE];
 
     'outer: while offset < total_size {
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
+        let mut buffer = match recycle_rx.try_recv() {
+            Ok(mut buf) => {
+                if buf.capacity() < CHUNK_SIZE {
+                    buf.reserve(CHUNK_SIZE - buf.len());
+                }
+                buf.resize(CHUNK_SIZE, 0);
+                buf
+            }
+            Err(_) => vec![0u8; CHUNK_SIZE],
+        };
 
         let bytes_read = reader.read_chunk(offset, &mut buffer)?;
 
@@ -207,9 +224,11 @@ fn producer_thread(
             break;
         }
 
+        buffer.truncate(bytes_read);
+
         let chunk = DataChunk {
             offset,
-            data: Arc::new(buffer[..bytes_read].to_vec()),
+            data: Arc::new(buffer),
         };
 
         loop {
@@ -239,7 +258,12 @@ fn producer_thread(
 }
 
 /// Worker thread: receives data chunks and scans them for signatures.
-fn worker_thread(_worker_id: usize, data_rx: Receiver<DataChunk>, event_tx: Sender<ScanEvent>) {
+fn worker_thread(
+    _worker_id: usize,
+    data_rx: Receiver<DataChunk>,
+    recycle_tx: Sender<Vec<u8>>,
+    event_tx: Sender<ScanEvent>,
+) {
     let jpeg_scanner = JpegScanner::new();
     let png_scanner = PngScanner::new();
     let scanners: Vec<&dyn FileScanner> = vec![&jpeg_scanner, &png_scanner];
@@ -265,6 +289,10 @@ fn worker_thread(_worker_id: usize, data_rx: Receiver<DataChunk>, event_tx: Send
                     ftype: scanner.file_type(),
                 });
             }
+        }
+
+        if let Ok(vec) = Arc::try_unwrap(chunk.data) {
+            let _ = recycle_tx.send(vec);
         }
     }
 

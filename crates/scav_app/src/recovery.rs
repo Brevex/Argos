@@ -150,8 +150,7 @@ impl RecoveryManager {
 
     fn save_file(&mut self, start: u64, size: u64, output_path: &Path) -> anyhow::Result<()> {
         let file = File::create(output_path)?;
-        let mut writer = BufWriter::new(file);
-
+        let mut writer = BufWriter::with_capacity(131_072, file);
         let mut remaining = size;
         let mut offset = start;
         let mut buffer = vec![0u8; EXTRACTION_BUFFER_SIZE];
