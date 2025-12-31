@@ -1,0 +1,28 @@
+[package]
+name = "scav_app"
+description = "CLI application for Scav forensic image recovery tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scav"
+path = "src/main.rs"
+
+[dependencies]
+scav_core = { path = "../scav_core" }
+scav_io = { path = "../scav_io" }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+dialoguer = "0.11"
+crossbeam-channel = "0.5"
+num_cpus = "1.16"
+indicatif = "0.17"
+humansize = "2.1"
+ctrlc = "3.4"
+
+[dev-dependencies]
+tempfile = "3.14"
+
+

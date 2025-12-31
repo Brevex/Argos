@@ -1,41 +1,13 @@
-[package]
-name = "argos"
+[workspace]
+resolver = "2"
+members = [
+    "crates/scav_core",
+    "crates/scav_io",
+    "crates/scav_app",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 authors = ["Breno"]
-description = "A powerful image recovery tool for Linux"
 license = "MIT"
-readme = "README.md"
-
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-indicatif = "0.17"
-inquire = "0.7"
-humansize = "2.1"
-sysinfo = "0.30"
-thiserror = "1.0"
-anyhow = "1.0"
-log = "0.4"
-env_logger = "0.11"
-byteorder = "1.5"
-memmap2 = "0.9"
-rayon = "1.10"
-aho-corasick = "1.1"
-image = { version = "0.24", default-features = false, features = [
-    "jpeg",
-    "png",
-    "gif",
-    "bmp",
-    "webp",
-    "tiff"
-] }
-
-[dev-dependencies]
-tempfile = "3"
-assert_fs = "1"
-rstest = "0.18"
-pretty_assertions = "1.4"
-
-[profile.release]
-opt-level = 3
-lto = true

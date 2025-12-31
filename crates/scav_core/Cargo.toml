@@ -1,0 +1,12 @@
+[package]
+name = "scav_core"
+description = "Core domain definitions and traits for Scav forensic tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "1.0"
+memchr = "2.7"
+imagesize = "0.13"
