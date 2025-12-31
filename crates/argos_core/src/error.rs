@@ -1,4 +1,4 @@
-//! Core error types for scav forensic tool.
+//! Core error types for Argos forensic tool.
 
 use thiserror::Error;
 

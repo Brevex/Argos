@@ -1,6 +1,6 @@
-//! # Scav Core
+//! # Argos Core
 //!
-//! Core domain definitions and traits for the Scav forensic image recovery tool.
+//! Core domain definitions and traits for the Argos forensic image recovery tool.
 //!
 //! This crate provides the foundational abstractions that enable decoupled,
 //! testable implementations following the Ports & Adapters architecture pattern.
@@ -15,7 +15,7 @@
 //! ## Example
 //!
 //! ```ignore
-//! use scav_core::{BlockSource, FileScanner, FileType, CoreError, Result};
+//! use argos_core::{BlockSource, FileScanner, FileType, CoreError, Result};
 //!
 //! // Implement BlockSource for your data source
 //! // Implement FileScanner for formats you want to recover

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/scav_core",
-    "crates/scav_io",
-    "crates/scav_app",
+    "crates/argos_core",
+    "crates/argos_io",
+    "crates/argos_app",
 ]
 
 [workspace.package]

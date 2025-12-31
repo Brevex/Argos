@@ -60,7 +60,7 @@ pub trait BlockSource {
 /// # Example
 ///
 /// ```ignore
-/// use scav_core::{FileScanner, FileType};
+/// use argos_core::{FileScanner, FileType};
 ///
 /// struct MyScanner;
 ///

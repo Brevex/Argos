@@ -1,4 +1,4 @@
-//! Scav - Forensic Image Recovery Tool
+//! Argos - Forensic Image Recovery Tool
 //!
 //! A high-performance CLI tool for recovering images from disks on Linux.
 
@@ -13,11 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use device_discovery::{discover_disks, DiskInfo};
-use scav_core::BlockSource;
-use scav_io::DiskReader;
+use argos_core::BlockSource;
+use argos_io::DiskReader;
 
 #[derive(Parser, Debug)]
-#[command(name = "scav")]
+#[command(name = "argos")]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short, long)]

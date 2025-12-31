@@ -1,6 +1,6 @@
 //! Block reader implementation for physical disks and image files.
 
-use scav_core::{BlockSource, Result};
+use argos_core::{BlockSource, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -21,8 +21,8 @@ use std::path::Path;
 /// # Example
 ///
 /// ```ignore
-/// use scav_io::DiskReader;
-/// use scav_core::BlockSource;
+/// use argos_io::DiskReader;
+/// use argos_core::BlockSource;
 ///
 /// // Open a disk device or image file
 /// let mut reader = DiskReader::new("/dev/sda")?;

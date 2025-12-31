@@ -4,8 +4,8 @@
 //! using a stack-based approach to handle nested files (e.g., JPEG thumbnails).
 
 use crate::engine::ScanEvent;
-use scav_core::{BlockSource, FileType};
-use scav_io::DiskReader;
+use argos_core::{BlockSource, FileType};
+use argos_io::DiskReader;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -110,7 +110,7 @@ impl RecoveryManager {
 
         if header_read > 0 {
             if let Some((width, height)) =
-                scav_core::get_image_dimensions(&header_buf[..header_read])
+                argos_core::get_image_dimensions(&header_buf[..header_read])
             {
                 if width < MIN_RESOLUTION || height < MIN_RESOLUTION {
                     self.files_skipped += 1;

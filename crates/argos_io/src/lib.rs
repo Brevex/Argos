@@ -1,10 +1,11 @@
-//! # Scav I/O
+//! # Argos I/O
 //!
-//! I/O infrastructure implementations for the Scav forensic image recovery tool.
+//! I/O infrastructure implementations for the Argos forensic image recovery tool.
 //!
 //! This crate provides concrete implementations of the `BlockSource` trait
-//! defined in `scav_core`, allowing the forensic scanner to read raw block data
+//! defined in `argos_core`, allowing the forensic scanner to read raw block data
 //! from physical disks, disk images, and other block devices.
+
 //!
 //! ## Key Components
 //!
@@ -13,8 +14,8 @@
 //! ## Example
 //!
 //! ```ignore
-//! use scav_io::DiskReader;
-//! use scav_core::BlockSource;
+//! use argos_io::DiskReader;
+//! use argos_core::BlockSource;
 //!
 //! let mut reader = DiskReader::new("/dev/sda")?;
 //! let mut buffer = vec![0u8; 512];

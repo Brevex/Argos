@@ -6,8 +6,8 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
-use scav_core::{BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
-use scav_io::DiskReader;
+use argos_core::{BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
+use argos_io::DiskReader;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

@@ -1,18 +1,18 @@
 [package]
-name = "scav_app"
-description = "CLI application for Scav forensic image recovery tool"
+name = "argos"
+description = "CLI application for Argos forensic image recovery tool"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "scav"
+name = "argos"
 path = "src/main.rs"
 
 [dependencies]
-scav_core = { path = "../scav_core" }
-scav_io = { path = "../scav_io" }
+argos_core = { path = "../argos_core" }
+argos_io = { path = "../argos_io" }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 dialoguer = "0.11"

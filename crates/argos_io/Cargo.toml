@@ -1,6 +1,6 @@
 [package]
-name = "scav_io"
-description = "I/O infrastructure adapters for Scav forensic tool"
+name = "argos_io"
+description = "I/O infrastructure adapters for Argos forensic tool"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 
 [dependencies]
 rustix = { version = "1.1.3", features = ["fs"] }
-scav_core = { path = "../scav_core" }
+argos_core = { path = "../argos_core" }
 
 [dev-dependencies]
 tempfile = "3.8"
