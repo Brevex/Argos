@@ -3,11 +3,11 @@
 //! This module implements a producer-consumer pipeline that reads disk chunks
 //! in one thread and distributes them to multiple worker threads for scanning.
 
+use argos_core::{BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
+use argos_io::DiskReader;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
-use argos_core::{BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
-use argos_io::DiskReader;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -150,42 +150,42 @@ pub fn run_scan(
     pb.finish_and_clear();
 
     if was_cancelled {
-        println!("\n⚠️  Recebido Ctrl+C! Parando graciosamente...");
+        println!("\n⚠️  Received Ctrl+C! Stopping gracefully...");
     }
 
     let elapsed = start_time.elapsed();
 
     println!("\n╔════════════════════════════════════════╗");
     if was_cancelled {
-        println!("║       === Scan Interrompido ===        ║");
+        println!("║       === Scan Interrupted ===         ║");
     } else {
-        println!("║          === Scan Finalizado ===       ║");
+        println!("║         === Scan Finished ===          ║");
     }
     println!("╠════════════════════════════════════════╣");
     println!(
-        "║ Tempo decorrido:    {:>18} ║",
+        "║ Elapsed Time:       {:>18} ║",
         format!("{:.1}s", elapsed.as_secs_f64())
     );
     println!(
-        "║ Espaço escaneado:   {:>18} ║",
+        "║ Scanned Space:      {:>18} ║",
         format_size(pb.position(), BINARY)
     );
-    println!("║ Headers encontrados:{:>18} ║", headers_found);
-    println!("║ Footers encontrados:{:>18} ║", footers_found);
+    println!("║ Headers Found:      {:>18} ║", headers_found);
+    println!("║ Footers Found:      {:>18} ║", footers_found);
     println!(
-        "║ Imagens Recuperadas:{:>18} ║",
+        "║ Recovered Images:   {:>18} ║",
         recovery_manager.files_recovered()
     );
     println!(
-        "║ Arquivos Ignorados: {:>18} ║",
+        "║ Skipped Files:      {:>18} ║",
         recovery_manager.files_skipped()
     );
     println!(
-        "║ Candidatos Pendentes:{:>17} ║",
+        "║ Pending Candidates: {:>17} ║",
         recovery_manager.pending_candidates()
     );
     println!("╠════════════════════════════════════════╣");
-    println!("║ Arquivos salvos em: {:<18} ║", output_dir.display());
+    println!("║ Files saved to:     {:<18} ║", output_dir.display());
     println!("╚════════════════════════════════════════╝");
 
     Ok(())
