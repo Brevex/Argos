@@ -4,7 +4,7 @@
 //! in one thread and distributes them to multiple worker threads for scanning.
 
 use argos_core::{BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
-use argos_io::DiskReader;
+use argos_io::Reader;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -52,7 +52,7 @@ pub fn run_scan(
     let num_workers = num_cpus::get();
 
     let device_size = {
-        let reader = DiskReader::new(device_path)?;
+        let reader = Reader::new(device_path)?;
         reader.size()
     };
 
@@ -201,8 +201,15 @@ fn producer_thread(
     use crossbeam_channel::SendTimeoutError;
     use std::time::Duration;
 
-    let mut reader = DiskReader::new(device_path)?;
+    let mut reader = Reader::new(device_path)?;
+    let is_mmap = reader.is_mmap();
+    if is_mmap {
+        eprintln!("[Producer] Using memory-mapped I/O (zero-copy)");
+    }
     let total_size = reader.size();
+
+    // Number of chunks to prefetch ahead (reduces page fault latency)
+    const PREFETCH_CHUNKS: usize = 2;
 
     let mut offset: u64 = 0;
 
@@ -251,6 +258,13 @@ fn producer_thread(
 
         offset += advance as u64;
 
+        if let Reader::Mmap(ref mmap_reader) = reader {
+            let prefetch_offset = offset + (CHUNK_SIZE * PREFETCH_CHUNKS) as u64;
+            if prefetch_offset < total_size {
+                mmap_reader.prefetch(prefetch_offset, CHUNK_SIZE);
+            }
+        }
+
         pb.set_position(offset.min(total_size));
     }
 
@@ -266,30 +280,37 @@ fn worker_thread(
 ) {
     let jpeg_scanner = JpegScanner::new();
     let png_scanner = PngScanner::new();
-    let scanners: Vec<&dyn FileScanner> = vec![&jpeg_scanner, &png_scanner];
+
+    // Helper macro to scan with a concrete scanner type.
+    // This avoids dyn trait and enables zero-allocation callback methods.
+    macro_rules! scan_with {
+        ($scanner:expr, $chunk:expr, $event_tx:expr) => {{
+            let chunk_offset = $chunk.offset;
+            let ftype = $scanner.file_type();
+
+            // Zero-allocation header scanning
+            $scanner.scan_headers_callback(&$chunk.data, |relative_offset| {
+                let absolute_offset = chunk_offset + relative_offset as u64;
+                let _ = $event_tx.send(ScanEvent::HeaderFound {
+                    offset: absolute_offset,
+                    ftype,
+                });
+            });
+
+            // Zero-allocation footer scanning
+            $scanner.scan_footers_callback(&$chunk.data, |relative_offset| {
+                let absolute_offset = chunk_offset + relative_offset as u64;
+                let _ = $event_tx.send(ScanEvent::FooterFound {
+                    offset: absolute_offset,
+                    ftype,
+                });
+            });
+        }};
+    }
 
     for chunk in data_rx {
-        for scanner in &scanners {
-            let headers = scanner.scan_headers(&chunk.data);
-            for relative_offset in headers {
-                let absolute_offset = chunk.offset + relative_offset as u64;
-
-                let _ = event_tx.send(ScanEvent::HeaderFound {
-                    offset: absolute_offset,
-                    ftype: scanner.file_type(),
-                });
-            }
-
-            let footers = scanner.scan_footers(&chunk.data);
-            for relative_offset in footers {
-                let absolute_offset = chunk.offset + relative_offset as u64;
-
-                let _ = event_tx.send(ScanEvent::FooterFound {
-                    offset: absolute_offset,
-                    ftype: scanner.file_type(),
-                });
-            }
-        }
+        scan_with!(jpeg_scanner, chunk, event_tx);
+        scan_with!(png_scanner, chunk, event_tx);
 
         if let Ok(vec) = Arc::try_unwrap(chunk.data) {
             let _ = recycle_tx.send(vec);

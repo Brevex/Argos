@@ -109,4 +109,55 @@ pub trait FileScanner: Send + Sync {
     ///
     /// A `FileType` enum variant like `FileType::Jpeg`, `FileType::Png`, etc.
     fn file_type(&self) -> FileType;
+
+    /// Zero-allocation header scanning via callback.
+    ///
+    /// This method avoids allocating a `Vec` by calling the provided callback
+    /// for each match. Use this in hot paths where allocation overhead matters.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - A slice of bytes to scan for header signatures
+    /// * `callback` - Called with the offset of each header found
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let scanner = JpegScanner::new();
+    /// scanner.scan_headers_callback(&buffer, |offset| {
+    ///     println!("Found header at offset {}", offset);
+    /// });
+    /// ```
+    #[inline]
+    fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    where
+        F: FnMut(usize),
+    {
+        // Default implementation uses scan_headers() for backwards compatibility.
+        // Optimized scanners should override this to avoid allocation.
+        for offset in self.scan_headers(buffer) {
+            callback(offset);
+        }
+    }
+
+    /// Zero-allocation footer scanning via callback.
+    ///
+    /// This method avoids allocating a `Vec` by calling the provided callback
+    /// for each match. Use this in hot paths where allocation overhead matters.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - A slice of bytes to scan for footer signatures
+    /// * `callback` - Called with the offset of each footer found
+    #[inline]
+    fn scan_footers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    where
+        F: FnMut(usize),
+    {
+        // Default implementation uses scan_footers() for backwards compatibility.
+        // Optimized scanners should override this to avoid allocation.
+        for offset in self.scan_footers(buffer) {
+            callback(offset);
+        }
+    }
 }

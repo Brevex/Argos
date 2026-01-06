@@ -52,6 +52,27 @@ impl FileScanner for JpegScanner {
     fn file_type(&self) -> FileType {
         FileType::Jpeg
     }
+
+    // Zero-allocation override: iterate directly without collect()
+    #[inline]
+    fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    where
+        F: FnMut(usize),
+    {
+        for offset in self.header_finder.find_iter(buffer) {
+            callback(offset);
+        }
+    }
+
+    #[inline]
+    fn scan_footers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    where
+        F: FnMut(usize),
+    {
+        for offset in self.footer_finder.find_iter(buffer) {
+            callback(offset);
+        }
+    }
 }
 
 /// PNG file scanner.
@@ -95,6 +116,27 @@ impl FileScanner for PngScanner {
 
     fn file_type(&self) -> FileType {
         FileType::Png
+    }
+
+    // Zero-allocation override: iterate directly without collect()
+    #[inline]
+    fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    where
+        F: FnMut(usize),
+    {
+        for offset in self.header_finder.find_iter(buffer) {
+            callback(offset);
+        }
+    }
+
+    #[inline]
+    fn scan_footers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    where
+        F: FnMut(usize),
+    {
+        for offset in self.footer_finder.find_iter(buffer) {
+            callback(offset);
+        }
     }
 }
 
