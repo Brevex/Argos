@@ -6,11 +6,11 @@ Argos scans raw block devices to recover deleted images (JPEG, PNG) using signat
 
 ## Features
 
-- 🔍 **Signature scanning** — Detects file headers/footers using SIMD-accelerated pattern matching
-- ⚡ **High throughput** — Achieves 150-200+ MB/s on NVMe drives
-- 🧵 **Parallel extraction** — Multi-threaded file recovery
-- 📊 **Progress tracking** — Real-time progress bar with ETA
-- 🛡️ **Safe** — Read-only access to source device
+- **Signature scanning** — Detects file headers/footers using SIMD-accelerated pattern matching
+- **High throughput** — Achieves 150-200+ MB/s on NVMe drives
+- **Parallel extraction** — Multi-threaded file recovery
+- **Progress tracking** — Real-time progress bar with ETA
+- **Safe** — Read-only access to source device
 
 ## Requirements
 
