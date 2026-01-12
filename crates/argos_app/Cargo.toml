@@ -1,6 +1,6 @@
 [package]
 name = "argos"
-description = "CLI application for Argos forensic image recovery tool"
+description = "CLI application for Argos image recovery tool"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

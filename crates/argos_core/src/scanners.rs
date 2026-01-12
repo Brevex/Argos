@@ -1,20 +1,7 @@
-//! File signature scanners for forensic image recovery.
-//!
-//! This module provides high-performance scanners that detect file headers
-//! and footers using SIMD-accelerated pattern matching via `memchr`.
-
 use crate::traits::FileScanner;
 use crate::types::FileType;
 use memchr::memmem::Finder;
 
-/// JPEG file scanner.
-///
-/// Detects JPEG images by searching for:
-/// - Header: `FF D8 FF` (SOI marker + start of next marker)
-/// - Footer: `FF D9` (EOI marker)
-///
-/// Note: `FF D9` can occasionally appear in compressed data, so false
-/// positives may occur. Higher-level logic should validate matches.
 #[derive(Debug, Clone)]
 pub struct JpegScanner {
     header_finder: Finder<'static>,
@@ -53,7 +40,6 @@ impl FileScanner for JpegScanner {
         FileType::Jpeg
     }
 
-    // Zero-allocation override: iterate directly without collect()
     #[inline]
     fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
     where
@@ -75,11 +61,6 @@ impl FileScanner for JpegScanner {
     }
 }
 
-/// PNG file scanner.
-///
-/// Detects PNG images by searching for:
-/// - Header: `89 50 4E 47 0D 0A 1A 0A` (PNG signature)
-/// - Footer: `49 45 4E 44 AE 42 60 82` (IEND chunk type + CRC)
 #[derive(Debug, Clone)]
 pub struct PngScanner {
     header_finder: Finder<'static>,
@@ -118,7 +99,6 @@ impl FileScanner for PngScanner {
         FileType::Png
     }
 
-    // Zero-allocation override: iterate directly without collect()
     #[inline]
     fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
     where

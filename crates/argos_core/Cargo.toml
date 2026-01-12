@@ -1,6 +1,6 @@
 [package]
 name = "argos_core"
-description = "Core domain definitions and traits for Argos forensic tool"
+description = "Core domain definitions and traits for Argos tool"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

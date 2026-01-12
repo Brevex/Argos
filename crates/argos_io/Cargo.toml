@@ -1,6 +1,6 @@
 [package]
 name = "argos_io"
-description = "I/O infrastructure adapters for Argos forensic tool"
+description = "I/O infrastructure adapters for Argos tool"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

@@ -1,13 +1,3 @@
-//! File recovery module for reconstructing files from scan events.
-//!
-//! This module processes header/footer events and extracts complete files
-//! using a stack-based approach to handle nested files (e.g., JPEG thumbnails).
-//!
-//! # Performance
-//!
-//! File extraction is performed in parallel using a dedicated thread pool,
-//! preventing I/O from blocking the main event processing loop.
-
 use crate::engine::ScanEvent;
 use argos_core::{BlockSource, FileType};
 use argos_io::DiskReader;
@@ -49,18 +39,6 @@ struct ExtractionJob {
     file_type: FileType,
 }
 
-/// Manages file recovery using a stack-based approach.
-///
-/// The stack structure correctly handles nested files like JPEG thumbnails:
-/// - Header1 found → push
-/// - Header2 (thumbnail) found → push
-/// - Footer2 found → pop, save thumbnail
-/// - Footer1 found → pop, save main image
-///
-/// # Parallel Extraction
-///
-/// Large files are extracted in background threads to avoid blocking
-/// event processing. Atomic counters track completion status.
 pub struct RecoveryManager {
     stack: Vec<Candidate>,
     reader: DiskReader,
@@ -69,7 +47,7 @@ pub struct RecoveryManager {
     files_recovered: Arc<AtomicU64>,
     files_skipped: Arc<AtomicU64>,
     headers_pruned: Arc<AtomicU64>,
-    #[allow(dead_code)] // Used via Arc clone to workers
+    #[allow(dead_code)]
     seen_hashes: Arc<DashSet<u64>>,
     extraction_tx: Option<Sender<ExtractionJob>>,
     extraction_handles: Vec<JoinHandle<()>>,
@@ -118,12 +96,9 @@ impl RecoveryManager {
         })
     }
 
-    /// Processes a scan event, potentially recovering a file.
     pub fn process_event(&mut self, event: &ScanEvent) {
         match event {
             ScanEvent::HeaderFound { offset, ftype } => {
-                // Stack pruning: remove headers that are too far behind to be valid matches
-                // This prevents memory growth and wrong header-footer pairings
                 let prune_threshold = offset.saturating_sub(MAX_HEADER_DISTANCE);
                 let original_len = self.stack.len();
                 self.stack.retain(|c| c.offset_start >= prune_threshold);
@@ -209,7 +184,6 @@ impl RecoveryManager {
         );
         let output_path = self.output_dir.join(&filename);
 
-        // Queue job to extraction worker pool (non-blocking)
         let job = ExtractionJob {
             start: candidate.offset_start,
             size: file_size,
@@ -218,7 +192,6 @@ impl RecoveryManager {
             file_type: ftype,
         };
 
-        // This may block if queue is full (backpressure)
         if let Some(tx) = &self.extraction_tx {
             if tx.send(job).is_err() {
                 eprintln!("[Recovery] Extraction worker pool shut down unexpectedly");
@@ -242,25 +215,14 @@ impl RecoveryManager {
         self.stack.len()
     }
 
-    /// Returns count of headers pruned due to distance threshold.
     #[allow(dead_code)]
     pub fn headers_pruned(&self) -> u64 {
         self.headers_pruned.load(Ordering::Relaxed)
     }
 
-    /// Waits for all pending extraction jobs to complete.
-    ///
-    /// This method:
-    /// 1. Closes the extraction channel (no more jobs accepted)
-    /// 2. Waits for all workers to finish their current jobs
-    ///
-    /// Call this before reading final `files_recovered()`/`files_skipped()` counts.
-    #[allow(dead_code)] // Used in tests and available for external callers
+    #[allow(dead_code)]
     pub fn wait_for_completion(&mut self) {
-        // Close the channel to signal workers to shut down
         self.extraction_tx.take();
-
-        // Wait for all workers to finish
         let handles = std::mem::take(&mut self.extraction_handles);
         for handle in handles {
             let _ = handle.join();
@@ -270,15 +232,7 @@ impl RecoveryManager {
 
 impl Drop for RecoveryManager {
     fn drop(&mut self) {
-        // BUG 3 FIX: The existing implementation is correct - closing the sender
-        // causes workers' rx.recv() to return Disconnected, so they exit cleanly.
-        // The join() calls wait for workers to finish current jobs gracefully.
-        // This doesn't block indefinitely because workers exit once channel closes.
-        
-        // Signal workers to shut down by closing the send channel
         self.extraction_tx.take();
-
-        // Wait for all workers to complete their pending jobs
         let handles = std::mem::take(&mut self.extraction_handles);
         for handle in handles {
             let _ = handle.join();
@@ -286,11 +240,6 @@ impl Drop for RecoveryManager {
     }
 }
 
-/// Extraction worker thread function.
-///
-/// Receives jobs from the channel and writes files to disk.
-/// Each worker opens its own reader for thread safety.
-/// Performs deduplication, entropy check, and decode validation.
 fn extraction_worker(
     rx: crossbeam_channel::Receiver<ExtractionJob>,
     files_recovered: Arc<AtomicU64>,
@@ -303,7 +252,6 @@ fn extraction_worker(
                 files_recovered.fetch_add(1, Ordering::Relaxed);
             }
             Ok(false) => {
-                // File was skipped (duplicate or validation failed)
                 files_skipped.fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
@@ -318,8 +266,6 @@ fn extraction_worker(
     }
 }
 
-/// Computes a partial hash for deduplication.
-/// Uses first + last HASH_SAMPLE_SIZE bytes for speed.
 fn compute_partial_hash(data: &[u8]) -> u64 {
     if data.len() <= HASH_SAMPLE_SIZE * 2 {
         xxh3_64(data)
@@ -331,8 +277,6 @@ fn compute_partial_hash(data: &[u8]) -> u64 {
     }
 }
 
-/// Calculates Shannon entropy of data (0.0 - 8.0 for bytes).
-/// Low entropy = repeated patterns/zeros, High entropy = random/encrypted.
 fn calculate_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -356,8 +300,6 @@ fn calculate_entropy(data: &[u8]) -> f64 {
     entropy
 }
 
-/// Samples entropy from multiple regions to detect corruption.
-/// Returns average entropy across samples.
 fn sample_entropy(data: &[u8]) -> f64 {
     if data.len() < ENTROPY_SAMPLE_SIZE {
         return calculate_entropy(data);
@@ -365,10 +307,8 @@ fn sample_entropy(data: &[u8]) -> f64 {
 
     let mut total_entropy = 0.0;
     let sample_positions = if data.len() < ENTROPY_SAMPLE_SIZE * ENTROPY_SAMPLE_COUNT {
-        // File too small for proper sampling, just sample what we can
         vec![0]
     } else {
-        // Sample at start, middle, and end
         let step = (data.len() - ENTROPY_SAMPLE_SIZE) / (ENTROPY_SAMPLE_COUNT - 1);
         (0..ENTROPY_SAMPLE_COUNT).map(|i| i * step).collect()
     };
@@ -381,8 +321,6 @@ fn sample_entropy(data: &[u8]) -> f64 {
     total_entropy / sample_positions.len() as f64
 }
 
-/// Validates that an image file decodes correctly.
-/// Returns true if the image is valid, false otherwise.
 fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -391,7 +329,6 @@ fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
 
     let reader = BufReader::new(file);
 
-    // Use image crate to attempt decode
     let format = match file_type {
         FileType::Jpeg => image::ImageFormat::Jpeg,
         FileType::Png => image::ImageFormat::Png,
@@ -404,13 +341,8 @@ fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
     }
 }
 
-/// Performs the actual file extraction with validation pipeline.
-/// Returns Ok(true) if file was saved, Ok(false) if skipped, Err on I/O error.
 fn save_file_job(job: &ExtractionJob, seen_hashes: &DashSet<u64>) -> anyhow::Result<bool> {
     let mut reader = DiskReader::new(&job.device_path)?;
-
-    // Read entire file into memory for validation
-    // (Files are already size-filtered to max 100MB in attempt_recovery)
     let mut file_data = vec![0u8; job.size as usize];
     let mut total_read = 0;
     let mut offset = job.start;
@@ -492,12 +424,8 @@ mod tests {
         });
         assert_eq!(manager.stack.len(), 0);
 
-        // Wait for async extraction to complete
         manager.wait_for_completion();
 
-        // The synthetic JPEG data is correctly rejected by validation
-        // (entropy check and decode validation fail on fake data).
-        // The test verifies stack-based matching works - file was processed.
         let total_processed = manager.files_recovered() + manager.files_skipped();
         assert_eq!(
             total_processed, 1,
@@ -559,11 +487,8 @@ mod tests {
         });
         assert_eq!(manager.stack.len(), 0);
 
-        // Wait for async extraction to complete
         manager.wait_for_completion();
 
-        // Both synthetic files are processed (validation correctly rejects fake data).
-        // This test verifies nested stack-based matching logic works correctly.
         let total_processed = manager.files_recovered() + manager.files_skipped();
         assert_eq!(total_processed, 2, "both files should have been processed");
     }

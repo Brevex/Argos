@@ -1,60 +1,14 @@
-//! Block reader implementation for physical disks and image files.
-
 use argos_core::{BlockSource, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// A read-only block source that reads from physical disks or disk image files.
-///
-/// `DiskReader` implements the `BlockSource` trait to provide random-access
-/// block reading from any file-like source including:
-/// - Physical disk devices (`/dev/sda`, `/dev/nvme0n1`, etc.)
-/// - Partition devices (`/dev/sda1`, etc.)
-/// - Disk image files (`.img`, `.raw`, etc.)
-///
-/// # Safety
-///
-/// This implementation only opens files in read-only mode and uses only safe Rust.
-/// No `unsafe` code is used.
-///
-/// # Example
-///
-/// ```ignore
-/// use argos_io::DiskReader;
-/// use argos_core::BlockSource;
-///
-/// // Open a disk device or image file
-/// let mut reader = DiskReader::new("/dev/sda")?;
-///
-/// // Read the first sector (512 bytes)
-/// let mut buffer = vec![0u8; 512];
-/// let bytes_read = reader.read_chunk(0, &mut buffer)?;
-/// ```
 pub struct DiskReader {
     file: File,
     size: u64,
 }
 
 impl DiskReader {
-    /// Creates a new `DiskReader` for the specified path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the disk device or image file to read from
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the `DiskReader` on success, or an error if:
-    /// - The file/device does not exist
-    /// - Permission is denied
-    /// - The file size cannot be determined
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let reader = DiskReader::new("/dev/sda")?;
-    /// ```
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)

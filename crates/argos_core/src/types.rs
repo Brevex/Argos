@@ -1,14 +1,3 @@
-//! Core type definitions for file format identification.
-//!
-//! This module provides strongly-typed enums to replace magic strings
-//! and ensure compile-time safety for file type handling.
-
-/// Represents a recoverable file format detected by signature scanning.
-///
-/// Using an enum instead of strings ensures:
-/// - Compile-time checking of all match arms
-/// - No typos in format identification
-/// - Zero-cost abstraction (enum variants are integers)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileType {
     Jpeg,
@@ -34,9 +23,6 @@ impl FileType {
         }
     }
 
-    /// Returns the size in bytes of the footer/trailer for this format.
-    /// Some formats like JPEG and PNG have specific end-of-file markers.
-    /// Returns 0 for formats without defined footers.
     #[must_use]
     pub const fn footer_size(&self) -> u64 {
         match self {
@@ -47,7 +33,6 @@ impl FileType {
         }
     }
 
-    /// Returns the magic bytes (header signature) for this format.
     #[must_use]
     pub const fn header_bytes(&self) -> &'static [u8] {
         match self {
@@ -61,7 +46,6 @@ impl FileType {
         }
     }
 
-    /// Returns the footer/trailer bytes for this format, if any.
     #[must_use]
     pub const fn footer_bytes(&self) -> &'static [u8] {
         match self {
@@ -72,7 +56,6 @@ impl FileType {
         }
     }
 
-    /// Returns the human-readable name of this format.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {

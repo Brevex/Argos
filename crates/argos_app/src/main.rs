@@ -1,7 +1,3 @@
-//! Argos - Forensic Image Recovery Tool
-//!
-//! A high-performance CLI tool for recovering images from disks on Linux.
-
 mod device_discovery;
 mod engine;
 mod recovery;
@@ -46,7 +42,6 @@ fn main() -> Result<()> {
 
     println!("\n🔮 Argos - Image Recovery Wizard\n");
 
-    // 1. Device Selection
     let selected_disk = interactive_device_selection()?;
     println!(
         "\n✅ Selected Device: {} ({})",
@@ -54,7 +49,6 @@ fn main() -> Result<()> {
         selected_disk.human_size()
     );
 
-    // 2. Output Selection
     println!();
     let output_path_str: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Where do you want to save the recovered files?")
@@ -63,7 +57,6 @@ fn main() -> Result<()> {
 
     let output_path = std::path::Path::new(&output_path_str);
 
-    // 3. Confirmation
     println!("\n📋 Operation Summary:");
     println!(
         "   • Target:  {} ({})",
@@ -83,7 +76,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // 4. Execution
     std::fs::create_dir_all(output_path)?;
     println!();
     engine::run_scan(&selected_disk.path, output_path, running)?;

@@ -1,8 +1,3 @@
-//! Device discovery module for Linux systems.
-//!
-//! Discovers block devices by reading from `/sys/block` for efficient
-//! and safe enumeration of physical disks.
-
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
@@ -45,9 +40,6 @@ impl DiskInfo {
     }
 }
 
-/// Discovers all block devices on the system.
-/// Reads from `/sys/block` to enumerate devices and filters out
-/// virtual devices like loop and ram devices.
 pub fn discover_disks() -> Result<Vec<DiskInfo>> {
     let sys_block = Path::new("/sys/block");
 

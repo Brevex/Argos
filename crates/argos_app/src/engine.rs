@@ -1,8 +1,3 @@
-//! Concurrent scanning engine for forensic image recovery.
-//!
-//! This module implements a producer-consumer pipeline that reads disk chunks
-//! in one thread and distributes them to multiple worker threads for scanning.
-
 use argos_core::{BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
 use argos_io::Reader;
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -22,10 +17,6 @@ const DATA_CHANNEL_CAPACITY: usize = 10;
 const RECYCLE_CHANNEL_CAPACITY: usize = DATA_CHANNEL_CAPACITY + 2;
 const EVENT_CHANNEL_CAPACITY: usize = 1000;
 
-/// A chunk of data read from the disk.
-///
-/// Uses `Arc<Vec<u8>>` for the data buffer to enable cheap cloning (O(1))
-/// when resending on channel timeout, avoiding expensive 4MB copies.
 #[derive(Debug, Clone)]
 pub struct DataChunk {
     pub offset: u64,
@@ -113,8 +104,6 @@ pub fn run_scan(
     let mut footers_found = 0u64;
     let mut workers_done = 0usize;
 
-    // BUG 2 FIX: Use recv_timeout instead of blocking iterator to allow Ctrl+C handling.
-    // The blocking `for event in event_rx` never checks `running`, so Ctrl+C is ignored.
     use crossbeam_channel::RecvTimeoutError;
     use std::time::Duration;
 
@@ -142,12 +131,11 @@ pub fn run_scan(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                // Check for shutdown signal (Ctrl+C) during timeout
                 if !running.load(Ordering::SeqCst) {
-                    break; // Graceful shutdown
+                    break;
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => break, // All senders dropped
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -224,7 +212,6 @@ fn producer_thread(
     }
     let total_size = reader.size();
 
-    // Number of chunks to prefetch ahead (reduces page fault latency)
     const PREFETCH_CHUNKS: usize = 2;
 
     let mut offset: u64 = 0;
@@ -254,16 +241,13 @@ fn producer_thread(
             data: Arc::new(buffer),
         };
 
-        // BUG 5 FIX: Check running BEFORE blocking on send for faster Ctrl+C response
         loop {
             if !running.load(Ordering::SeqCst) {
                 break 'outer;
             }
             match data_tx.send_timeout(chunk.clone(), Duration::from_millis(50)) {
                 Ok(_) => break,
-                Err(SendTimeoutError::Timeout(_)) => {
-                    // Continue loop, will check running on next iteration
-                }
+                Err(SendTimeoutError::Timeout(_)) => {}
                 Err(SendTimeoutError::Disconnected(_)) => break 'outer,
             }
         }
@@ -276,9 +260,6 @@ fn producer_thread(
 
         offset += advance as u64;
 
-        // BUG 1 FIX: Prevent infinite loop near EOF.
-        // When offset approaches total_size with small chunks, advance may not reach total_size.
-        // This redundant check ensures we exit even if the while condition is borderline.
         if offset >= total_size {
             break;
         }
@@ -296,7 +277,6 @@ fn producer_thread(
     Ok(())
 }
 
-/// Worker thread: receives data chunks and scans them for signatures.
 fn worker_thread(
     _worker_id: usize,
     data_rx: Receiver<DataChunk>,
@@ -306,14 +286,11 @@ fn worker_thread(
     let jpeg_scanner = JpegScanner::new();
     let png_scanner = PngScanner::new();
 
-    // Helper macro to scan with a concrete scanner type.
-    // This avoids dyn trait and enables zero-allocation callback methods.
     macro_rules! scan_with {
         ($scanner:expr, $chunk:expr, $event_tx:expr) => {{
             let chunk_offset = $chunk.offset;
             let ftype = $scanner.file_type();
 
-            // Zero-allocation header scanning
             $scanner.scan_headers_callback(&$chunk.data, |relative_offset| {
                 let absolute_offset = chunk_offset + relative_offset as u64;
                 let _ = $event_tx.send(ScanEvent::HeaderFound {
@@ -322,7 +299,6 @@ fn worker_thread(
                 });
             });
 
-            // Zero-allocation footer scanning
             $scanner.scan_footers_callback(&$chunk.data, |relative_offset| {
                 let absolute_offset = chunk_offset + relative_offset as u64;
                 let _ = $event_tx.send(ScanEvent::FooterFound {
@@ -333,9 +309,6 @@ fn worker_thread(
         }};
     }
 
-    // BUG 4 FIX: Workers exit via channel disconnect when producer closes data_tx.
-    // This is the correct pattern - no need to pass `running` to workers.
-    // When Ctrl+C is pressed, producer exits -> data_tx closes -> workers receive Disconnected.
     for chunk in data_rx {
         scan_with!(jpeg_scanner, chunk, event_tx);
         scan_with!(png_scanner, chunk, event_tx);
