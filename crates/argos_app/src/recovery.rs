@@ -270,14 +270,16 @@ impl RecoveryManager {
 
 impl Drop for RecoveryManager {
     fn drop(&mut self) {
-        // CRITICAL: Drop the sender FIRST to signal workers to shut down.
-        // Without this, workers wait forever for more jobs = deadlock!
+        // BUG 3 FIX: The existing implementation is correct - closing the sender
+        // causes workers' rx.recv() to return Disconnected, so they exit cleanly.
+        // The join() calls wait for workers to finish current jobs gracefully.
+        // This doesn't block indefinitely because workers exit once channel closes.
+        
+        // Signal workers to shut down by closing the send channel
         self.extraction_tx.take();
 
-        // Take the handles so we can join them
-        let handles = std::mem::take(&mut self.extraction_handles);
-
         // Wait for all workers to complete their pending jobs
+        let handles = std::mem::take(&mut self.extraction_handles);
         for handle in handles {
             let _ = handle.join();
         }

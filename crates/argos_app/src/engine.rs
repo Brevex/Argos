@@ -113,25 +113,41 @@ pub fn run_scan(
     let mut footers_found = 0u64;
     let mut workers_done = 0usize;
 
-    for event in event_rx {
-        match &event {
-            ScanEvent::HeaderFound { .. } => {
-                headers_found += 1;
-            }
-            ScanEvent::FooterFound { .. } => {
-                footers_found += 1;
-            }
-            ScanEvent::WorkerDone => {
-                workers_done += 1;
-            }
-        }
+    // BUG 2 FIX: Use recv_timeout instead of blocking iterator to allow Ctrl+C handling.
+    // The blocking `for event in event_rx` never checks `running`, so Ctrl+C is ignored.
+    use crossbeam_channel::RecvTimeoutError;
+    use std::time::Duration;
 
-        recovery_manager.process_event(&event);
+    loop {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => {
+                match &event {
+                    ScanEvent::HeaderFound { .. } => {
+                        headers_found += 1;
+                    }
+                    ScanEvent::FooterFound { .. } => {
+                        footers_found += 1;
+                    }
+                    ScanEvent::WorkerDone => {
+                        workers_done += 1;
+                    }
+                }
 
-        if let ScanEvent::WorkerDone = event {
-            if workers_done == num_workers {
-                break;
+                recovery_manager.process_event(&event);
+
+                if let ScanEvent::WorkerDone = event {
+                    if workers_done == num_workers {
+                        break;
+                    }
+                }
             }
+            Err(RecvTimeoutError::Timeout) => {
+                // Check for shutdown signal (Ctrl+C) during timeout
+                if !running.load(Ordering::SeqCst) {
+                    break; // Graceful shutdown
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break, // All senders dropped
         }
     }
 
@@ -150,7 +166,7 @@ pub fn run_scan(
     pb.finish_and_clear();
 
     if was_cancelled {
-        println!("\n⚠️  Received Ctrl+C! Stopping gracefully...");
+        println!("\n⚠️  Stopping...");
     }
 
     let elapsed = start_time.elapsed();
@@ -238,13 +254,15 @@ fn producer_thread(
             data: Arc::new(buffer),
         };
 
+        // BUG 5 FIX: Check running BEFORE blocking on send for faster Ctrl+C response
         loop {
+            if !running.load(Ordering::SeqCst) {
+                break 'outer;
+            }
             match data_tx.send_timeout(chunk.clone(), Duration::from_millis(50)) {
                 Ok(_) => break,
                 Err(SendTimeoutError::Timeout(_)) => {
-                    if !running.load(Ordering::SeqCst) {
-                        break 'outer;
-                    }
+                    // Continue loop, will check running on next iteration
                 }
                 Err(SendTimeoutError::Disconnected(_)) => break 'outer,
             }
@@ -257,6 +275,13 @@ fn producer_thread(
         };
 
         offset += advance as u64;
+
+        // BUG 1 FIX: Prevent infinite loop near EOF.
+        // When offset approaches total_size with small chunks, advance may not reach total_size.
+        // This redundant check ensures we exit even if the while condition is borderline.
+        if offset >= total_size {
+            break;
+        }
 
         if let Reader::Mmap(ref mmap_reader) = reader {
             let prefetch_offset = offset + (CHUNK_SIZE * PREFETCH_CHUNKS) as u64;
@@ -308,6 +333,9 @@ fn worker_thread(
         }};
     }
 
+    // BUG 4 FIX: Workers exit via channel disconnect when producer closes data_tx.
+    // This is the correct pattern - no need to pass `running` to workers.
+    // When Ctrl+C is pressed, producer exits -> data_tx closes -> workers receive Disconnected.
     for chunk in data_rx {
         scan_with!(jpeg_scanner, chunk, event_tx);
         scan_with!(png_scanner, chunk, event_tx);
