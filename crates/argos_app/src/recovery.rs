@@ -1,5 +1,10 @@
 use crate::engine::ScanEvent;
-use argos_core::{BlockSource, FileType};
+use argos_core::{
+    jpeg::{JpegParser, JpegValidator, ValidationResult},
+    png::{PngValidationResult, PngValidator},
+    statistics::{ImageClassification, ImageClassifier},
+    BlockSource, FileType,
+};
 use argos_io::DiskReader;
 use crossbeam_channel::{bounded, Sender};
 use dashmap::DashSet;
@@ -373,6 +378,24 @@ fn save_file_job(job: &ExtractionJob, seen_hashes: &DashSet<u64>) -> anyhow::Res
         return Ok(false);
     }
 
+    let is_valid = match job.file_type {
+        FileType::Jpeg => validate_jpeg_structure(&file_data),
+        FileType::Png => validate_png_structure(&file_data),
+        _ => true,
+    };
+
+    if !is_valid {
+        seen_hashes.remove(&hash);
+        return Ok(false);
+    }
+
+    if job.file_type == FileType::Jpeg {
+        if is_likely_thumbnail(&file_data) {
+            seen_hashes.remove(&hash);
+            return Ok(false);
+        }
+    }
+
     let file = File::create(&job.output_path)?;
     let mut writer = BufWriter::with_capacity(131_072, file);
     writer.write_all(&file_data)?;
@@ -384,7 +407,78 @@ fn save_file_job(job: &ExtractionJob, seen_hashes: &DashSet<u64>) -> anyhow::Res
         return Ok(false);
     }
 
+    if should_filter_as_graphic(&job.output_path, job.file_type) {
+        let _ = fs::remove_file(&job.output_path);
+        seen_hashes.remove(&hash);
+        return Ok(false);
+    }
+
     Ok(true)
+}
+
+fn validate_jpeg_structure(data: &[u8]) -> bool {
+    let validator = JpegValidator::new();
+    match validator.validate(data) {
+        ValidationResult::Valid(_) => true,
+        ValidationResult::Truncated { .. } => true,
+        ValidationResult::CorruptedAt { .. } => false,
+        ValidationResult::InvalidHeader => false,
+    }
+}
+
+fn validate_png_structure(data: &[u8]) -> bool {
+    let validator = PngValidator::new();
+    match validator.validate(data) {
+        PngValidationResult::Valid(_) => true,
+        PngValidationResult::RecoverableCrcErrors { .. } => true,
+        PngValidationResult::Truncated { .. } => true,
+        PngValidationResult::CorruptedAt { .. } => false,
+        PngValidationResult::InvalidHeader => false,
+    }
+}
+
+fn is_likely_thumbnail(data: &[u8]) -> bool {
+    let parser = JpegParser::new();
+    if let Ok(structure) = parser.parse(data) {
+        if structure.image_width > 0 && structure.image_height > 0 {
+            if structure.image_width <= 160 && structure.image_height <= 120 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn should_filter_as_graphic(path: &Path, file_type: FileType) -> bool {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let reader = BufReader::new(file);
+    let format = match file_type {
+        FileType::Jpeg => image::ImageFormat::Jpeg,
+        FileType::Png => image::ImageFormat::Png,
+        _ => return false,
+    };
+
+    let img = match image::load(reader, format) {
+        Ok(i) => i,
+        Err(_) => return false,
+    };
+
+    let rgb = img.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    let pixels = rgb.as_raw();
+
+    let classifier = ImageClassifier::new();
+    let stats = classifier.compute_statistics(pixels, width as usize, height as usize, 3);
+    let classification = classifier.classify(&stats, (width * height) as usize);
+
+    matches!(
+        classification,
+        ImageClassification::ArtificialGraphic | ImageClassification::Encrypted
+    )
 }
 
 #[cfg(test)]

@@ -1,5 +1,9 @@
+pub mod carving;
 mod error;
+pub mod jpeg;
+pub mod png;
 pub mod scanners;
+pub mod statistics;
 mod traits;
 mod types;
 
