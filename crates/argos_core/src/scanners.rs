@@ -1,5 +1,4 @@
-use crate::traits::FileScanner;
-use crate::types::FileType;
+use crate::{FileScanner, FileType};
 use memchr::memmem::Finder;
 
 #[derive(Debug, Clone)]

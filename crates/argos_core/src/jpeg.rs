@@ -1,10 +1,5 @@
-mod huffman;
-mod restart;
-
-pub use huffman::HuffmanDecoder;
-pub use restart::{RestartMarkerInfo, RestartMarkerScanner};
-
-use crate::error::{CoreError, Result};
+use crate::{CoreError, Result};
+use std::collections::HashMap;
 
 pub const SOI: [u8; 2] = [0xFF, 0xD8];
 pub const EOI: [u8; 2] = [0xFF, 0xD9];
@@ -12,39 +7,26 @@ pub const SOS: u8 = 0xDA;
 pub const DQT: u8 = 0xDB;
 pub const DHT: u8 = 0xC4;
 pub const SOF0: u8 = 0xC0;
-pub const SOF1: u8 = 0xC1;
 pub const SOF2: u8 = 0xC2;
-pub const SOF3: u8 = 0xC3;
 pub const DRI: u8 = 0xDD;
 pub const RST0: u8 = 0xD0;
-pub const RST1: u8 = 0xD1;
-pub const RST2: u8 = 0xD2;
-pub const RST3: u8 = 0xD3;
-pub const RST4: u8 = 0xD4;
-pub const RST5: u8 = 0xD5;
-pub const RST6: u8 = 0xD6;
 pub const RST7: u8 = 0xD7;
-pub const APP0: u8 = 0xE0;
-pub const APP1: u8 = 0xE1;
-pub const APP2: u8 = 0xE2;
-pub const COM: u8 = 0xFE;
 
 #[inline]
 pub const fn is_restart_marker(marker: u8) -> bool {
     marker >= RST0 && marker <= RST7
 }
+
 #[inline]
 pub const fn is_sof_marker(marker: u8) -> bool {
-    matches!(marker, SOF0 | SOF1 | SOF2 | SOF3 | 0xC5..=0xCF)
+    matches!(marker, SOF0 | 0xC1 | SOF2 | 0xC3 | 0xC5..=0xCF)
 }
-#[inline]
-pub const fn is_app_marker(marker: u8) -> bool {
-    marker >= 0xE0 && marker <= 0xEF
-}
+
 #[inline]
 pub const fn is_standalone_marker(marker: u8) -> bool {
     matches!(marker, 0xD8 | 0xD9) || is_restart_marker(marker) || marker == 0x01
 }
+
 #[inline]
 pub const fn restart_marker_index(marker: u8) -> Option<u8> {
     if is_restart_marker(marker) {
@@ -88,7 +70,7 @@ impl MarkerType {
     }
 
     #[inline]
-    pub fn to_byte(&self) -> u8 {
+    pub fn to_byte(self) -> u8 {
         match self {
             Self::Soi => 0xD8,
             Self::Eoi => 0xD9,
@@ -99,7 +81,7 @@ impl MarkerType {
             Self::Com => 0xFE,
             Self::Rst(n) => 0xD0 + n,
             Self::App(n) => 0xE0 + n,
-            Self::Sof(b) | Self::Other(b) => *b,
+            Self::Sof(b) | Self::Other(b) => b,
         }
     }
 }
@@ -126,8 +108,6 @@ impl JpegMarker {
 pub struct ThumbnailInfo {
     pub soi_offset: u64,
     pub eoi_offset: Option<u64>,
-    pub width: Option<u16>,
-    pub height: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -224,7 +204,7 @@ impl JpegParser {
                         structure.image_height = u16::from_be_bytes([data[pos + 5], data[pos + 6]]);
                         structure.image_width = u16::from_be_bytes([data[pos + 7], data[pos + 8]]);
                     }
-                    if marker_byte == 0xC2 {
+                    if marker_byte == SOF2 {
                         structure.is_progressive = true;
                     }
                 }
@@ -299,8 +279,6 @@ impl JpegParser {
                 let mut thumbnail = ThumbnailInfo {
                     soi_offset: i as u64,
                     eoi_offset: None,
-                    width: None,
-                    height: None,
                 };
                 for j in (i + 2)..segment_end.saturating_sub(1) {
                     if data[j] == 0xFF && data[j + 1] == 0xD9 {
@@ -365,17 +343,6 @@ impl ValidationResult {
                 ..
             } => Some(s),
             Self::InvalidHeader => None,
-        }
-    }
-
-    pub fn corruption_offset(&self) -> Option<u64> {
-        match self {
-            Self::Valid(_) => None,
-            Self::CorruptedAt { offset, .. } => Some(*offset),
-            Self::Truncated {
-                last_valid_offset, ..
-            } => Some(*last_valid_offset),
-            Self::InvalidHeader => Some(0),
         }
     }
 }
@@ -455,7 +422,6 @@ impl JpegValidator {
                     seen_soi = true;
                 }
                 MarkerType::Dqt => seen_dqt = true,
-                MarkerType::Dht => {}
                 MarkerType::Sof(_) => {
                     if !seen_dqt {
                         return Some((
@@ -508,6 +474,197 @@ impl JpegValidator {
 impl Default for JpegValidator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HuffmanTable {
+    max_bits: u8,
+    lookup: HashMap<u32, (u8, u8)>,
+}
+
+impl HuffmanTable {
+    pub fn from_dht_data(data: &[u8]) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        let counts = &data[0..16];
+        let total_symbols: usize = counts.iter().map(|&c| c as usize).sum();
+        if data.len() < 16 + total_symbols {
+            return None;
+        }
+        let symbols = &data[16..16 + total_symbols];
+        let mut lookup = HashMap::new();
+        let mut code: u32 = 0;
+        let mut symbol_idx = 0;
+        let mut max_bits = 0u8;
+
+        for bits in 1..=16u8 {
+            let count = counts[bits as usize - 1] as usize;
+            for _ in 0..count {
+                if symbol_idx >= symbols.len() {
+                    return None;
+                }
+                lookup.insert(code, (symbols[symbol_idx], bits));
+                symbol_idx += 1;
+                code += 1;
+                max_bits = bits;
+            }
+            code <<= 1;
+        }
+        Some(Self { max_bits, lookup })
+    }
+
+    pub fn decode(&self, bits: u32, available_bits: u8) -> Option<(u8, u8)> {
+        let max_check = self.max_bits.min(available_bits);
+        for len in 1..=max_check {
+            let mask = (1u32 << len) - 1;
+            let code = (bits >> (32 - len)) & mask;
+            if let Some(&(symbol, code_len)) = self.lookup.get(&code) {
+                if code_len == len {
+                    return Some((symbol, len));
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HuffmanDecoder {
+    dc_tables: [Option<HuffmanTable>; 4],
+    ac_tables: [Option<HuffmanTable>; 4],
+    dc_pred: [i16; 4],
+}
+
+impl HuffmanDecoder {
+    pub fn new() -> Self {
+        Self {
+            dc_tables: [None, None, None, None],
+            ac_tables: [None, None, None, None],
+            dc_pred: [0; 4],
+        }
+    }
+
+    pub fn load_table(&mut self, table_class: u8, table_id: u8, data: &[u8]) -> bool {
+        let table = match HuffmanTable::from_dht_data(data) {
+            Some(t) => t,
+            None => return false,
+        };
+        let id = (table_id & 0x03) as usize;
+        if table_class == 0 {
+            self.dc_tables[id] = Some(table);
+        } else {
+            self.ac_tables[id] = Some(table);
+        }
+        true
+    }
+
+    pub fn reset_dc_predictors(&mut self) {
+        self.dc_pred = [0; 4];
+    }
+
+    pub fn dc_continuity_score(head_dc: &[i16], tail_dc: &[i16]) -> f32 {
+        if head_dc.is_empty() || tail_dc.is_empty() {
+            return 0.0;
+        }
+        let compare_count = 8.min(head_dc.len()).min(tail_dc.len());
+        let head_end = &head_dc[head_dc.len() - compare_count..];
+        let tail_start = &tail_dc[..compare_count];
+        let total_diff: i32 = head_end
+            .iter()
+            .zip(tail_start.iter())
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .sum();
+        let avg_diff = total_diff as f32 / compare_count as f32;
+        1.0 - (avg_diff / 100.0).min(1.0)
+    }
+}
+
+impl Default for HuffmanDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestartMarkerInfo {
+    pub offset: usize,
+    pub rst_number: u8,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RestartMarkerScanner;
+
+impl RestartMarkerScanner {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn scan(&self, buffer: &[u8]) -> Vec<RestartMarkerInfo> {
+        let mut markers = Vec::new();
+        let mut i = 0;
+        while i < buffer.len().saturating_sub(1) {
+            if buffer[i] == 0xFF {
+                let marker = buffer[i + 1];
+                if marker == 0x00 {
+                    i += 2;
+                    continue;
+                }
+                if is_restart_marker(marker) {
+                    if let Some(num) = restart_marker_index(marker) {
+                        markers.push(RestartMarkerInfo {
+                            offset: i,
+                            rst_number: num,
+                        });
+                    }
+                    i += 2;
+                    continue;
+                }
+                if marker == 0xD9 {
+                    break;
+                }
+            }
+            i += 1;
+        }
+        markers
+    }
+
+    pub fn validate_sequence(&self, markers: &[RestartMarkerInfo]) -> bool {
+        if markers.is_empty() {
+            return true;
+        }
+        let mut expected = markers[0].rst_number;
+        for (i, marker) in markers.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            expected = (expected + 1) % 8;
+            if marker.rst_number != expected {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn junction_score(
+        &self,
+        head_markers: &[RestartMarkerInfo],
+        tail_markers: &[RestartMarkerInfo],
+    ) -> f32 {
+        if head_markers.is_empty() || tail_markers.is_empty() {
+            return 0.5;
+        }
+        let last_head = head_markers.last().unwrap();
+        let first_tail = tail_markers.first().unwrap();
+        let expected_next = (last_head.rst_number + 1) % 8;
+        if first_tail.rst_number == expected_next {
+            1.0
+        } else {
+            let diff = (first_tail.rst_number as i8 - expected_next as i8).abs() as u8;
+            let min_diff = diff.min(8 - diff);
+            1.0 - (min_diff as f32 / 4.0)
+        }
     }
 }
 
@@ -571,5 +728,24 @@ mod tests {
         assert!(is_restart_marker(RST0));
         assert!(is_restart_marker(RST7));
         assert!(!is_restart_marker(0xD8));
+    }
+
+    #[test]
+    fn test_dc_continuity_score() {
+        let head = vec![100, 101, 102, 103, 104];
+        let tail = vec![104, 105, 106, 107, 108];
+        let score = HuffmanDecoder::dc_continuity_score(&head, &tail);
+        assert!(score > 0.9);
+    }
+
+    #[test]
+    fn test_restart_scanner() {
+        let scanner = RestartMarkerScanner::new();
+        let data = vec![
+            0xFF, 0xD0, 0x00, 0x00, 0xFF, 0xD1, 0x00, 0x00, 0xFF, 0xD2, 0x00, 0x00,
+        ];
+        let markers = scanner.scan(&data);
+        assert_eq!(markers.len(), 3);
+        assert!(scanner.validate_sequence(&markers));
     }
 }

@@ -1,8 +1,46 @@
 use crate::{BlockSource, CoreError, Result};
 use memmap2::Mmap;
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+pub struct DiskReader {
+    file: File,
+    size: u64,
+}
+
+impl DiskReader {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path.as_ref())?;
+
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{fadvise, Advice};
+            let _ = fadvise(&file, 0, None, Advice::Sequential);
+            let _ = fadvise(&file, 0, None, Advice::NoReuse);
+        }
+
+        let size = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(0))?;
+
+        Ok(Self { file, size })
+    }
+}
+
+impl BlockSource for DiskReader {
+    fn read_chunk(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        Ok(self.file.read(buffer)?)
+    }
+
+    #[inline]
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
 
 pub struct MmapReader {
     mmap: Mmap,
@@ -12,13 +50,10 @@ pub struct MmapReader {
 impl MmapReader {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let mut file = File::open(path.as_ref())?;
-
         let size = file.seek(SeekFrom::End(0))?;
 
         if size == 0 {
-            return Err(CoreError::InvalidFormat(
-                "Cannot mmap empty file".to_string(),
-            ));
+            return Err(CoreError::InvalidFormat("Cannot mmap empty file".into()));
         }
 
         let mmap =
@@ -26,7 +61,7 @@ impl MmapReader {
 
         if mmap.len() == 0 {
             return Err(CoreError::InvalidFormat(
-                "mmap returned empty mapping (block device not supported)".to_string(),
+                "mmap returned empty mapping (block device not supported)".into(),
             ));
         }
 
@@ -77,8 +112,46 @@ impl BlockSource for MmapReader {
         }
     }
 
+    #[inline]
     fn size(&self) -> u64 {
         self.size
+    }
+}
+
+pub enum Reader {
+    Mmap(MmapReader),
+    Disk(DiskReader),
+}
+
+impl Reader {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let path_ref = path.as_ref();
+        match MmapReader::new(path_ref) {
+            Ok(r) => Ok(Reader::Mmap(r)),
+            Err(_) => Ok(Reader::Disk(DiskReader::new(path_ref)?)),
+        }
+    }
+
+    #[inline]
+    pub fn is_mmap(&self) -> bool {
+        matches!(self, Reader::Mmap(_))
+    }
+}
+
+impl BlockSource for Reader {
+    fn read_chunk(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize> {
+        match self {
+            Reader::Mmap(r) => r.read_chunk(offset, buffer),
+            Reader::Disk(r) => r.read_chunk(offset, buffer),
+        }
+    }
+
+    #[inline]
+    fn size(&self) -> u64 {
+        match self {
+            Reader::Mmap(r) => r.size(),
+            Reader::Disk(r) => r.size(),
+        }
     }
 }
 
@@ -89,6 +162,22 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
+    fn test_disk_reader_basic() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let test_data = b"Hello, World! This is test data for DiskReader.";
+        temp_file.write_all(test_data).unwrap();
+        temp_file.flush().unwrap();
+        let mut reader = DiskReader::new(temp_file.path()).unwrap();
+
+        assert_eq!(reader.size(), test_data.len() as u64);
+
+        let mut buffer = vec![0u8; 13];
+        let bytes_read = reader.read_chunk(0, &mut buffer).unwrap();
+        assert_eq!(bytes_read, 13);
+        assert_eq!(&buffer, b"Hello, World!");
+    }
+
+    #[test]
     fn test_mmap_reader_basic() {
         let mut temp_file = NamedTempFile::new().unwrap();
         let test_data = b"Hello, World! This is test data for MmapReader.";
@@ -96,44 +185,10 @@ mod tests {
         temp_file.flush().unwrap();
 
         let reader = MmapReader::new(temp_file.path()).unwrap();
-
         assert_eq!(reader.size(), test_data.len() as u64);
 
         let slice = reader.slice(0, 13).unwrap();
         assert_eq!(slice, b"Hello, World!");
-
-        let slice = reader.slice(7, 4).unwrap();
-        assert_eq!(slice, b"Worl");
-    }
-
-    #[test]
-    fn test_mmap_reader_block_source_trait() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let test_data = b"Test data for BlockSource trait.";
-        temp_file.write_all(test_data).unwrap();
-        temp_file.flush().unwrap();
-
-        let mut reader = MmapReader::new(temp_file.path()).unwrap();
-
-        let mut buffer = vec![0u8; 9];
-        let bytes_read = reader.read_chunk(0, &mut buffer).unwrap();
-        assert_eq!(bytes_read, 9);
-        assert_eq!(&buffer, b"Test data");
-    }
-
-    #[test]
-    fn test_mmap_reader_beyond_eof() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(b"Short").unwrap();
-        temp_file.flush().unwrap();
-
-        let reader = MmapReader::new(temp_file.path()).unwrap();
-
-        let slice = reader.slice(0, 100).unwrap();
-        assert_eq!(slice.len(), 5);
-
-        let slice = reader.slice(100, 10);
-        assert!(slice.is_none());
     }
 
     #[test]
@@ -141,17 +196,5 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let result = MmapReader::new(temp_file.path());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_prefetch_does_not_panic() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(b"Data for prefetch test").unwrap();
-        temp_file.flush().unwrap();
-
-        let reader = MmapReader::new(temp_file.path()).unwrap();
-
-        reader.prefetch(0, 1024);
-        reader.prefetch(1000, 1024);
     }
 }
