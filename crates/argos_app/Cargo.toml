@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 argos_core = { path = "../argos_core" }
-argos_io = { path = "../argos_io" }
 anyhow = "1.0.100"
 clap = { version = "4.5.54", features = ["derive"] }
 dialoguer = "0.12.0"

@@ -1,5 +1,6 @@
 pub mod carving;
 mod error;
+pub mod io;
 pub mod jpeg;
 pub mod png;
 pub mod scanners;
@@ -8,6 +9,7 @@ mod traits;
 mod types;
 
 pub use error::{CoreError, Result};
+pub use io::{DiskReader, MmapReader, Reader};
 pub use scanners::{JpegScanner, PngScanner};
 pub use traits::{BlockSource, FileScanner};
 pub use types::FileType;

@@ -1,11 +1,10 @@
 use crate::engine::ScanEvent;
 use argos_core::{
-    jpeg::{JpegParser, JpegValidator, ValidationResult},
-    png::{PngValidationResult, PngValidator},
-    statistics::{ImageClassification, ImageClassifier},
+    carving::{CarveDecision, SkipReason, SmartCarver, SmartCarverConfig},
+    io::DiskReader,
+    statistics::{compute_entropy, ImageClassification},
     BlockSource, FileType,
 };
-use argos_io::DiskReader;
 use crossbeam_channel::{bounded, Sender};
 use dashmap::DashSet;
 use std::fs::{self, File};
@@ -251,8 +250,17 @@ fn extraction_worker(
     files_skipped: Arc<AtomicU64>,
     seen_hashes: Arc<DashSet<u64>>,
 ) {
+    let smart_carver = SmartCarver::with_config(SmartCarverConfig {
+        structural_validation: true,
+        bifragment_carving: false,
+        statistical_filtering: true,
+        filter_thumbnails: true,
+        filter_graphics: true,
+        ..Default::default()
+    });
+
     for job in rx {
-        match save_file_job(&job, &seen_hashes) {
+        match save_file_job(&job, &seen_hashes, &smart_carver) {
             Ok(true) => {
                 files_recovered.fetch_add(1, Ordering::Relaxed);
             }
@@ -282,32 +290,9 @@ fn compute_partial_hash(data: &[u8]) -> u64 {
     }
 }
 
-fn calculate_entropy(data: &[u8]) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-
-    let mut byte_counts = [0u64; 256];
-    for &byte in data {
-        byte_counts[byte as usize] += 1;
-    }
-
-    let len = data.len() as f64;
-    let mut entropy = 0.0;
-
-    for &count in &byte_counts {
-        if count > 0 {
-            let p = count as f64 / len;
-            entropy -= p * p.log2();
-        }
-    }
-
-    entropy
-}
-
 fn sample_entropy(data: &[u8]) -> f64 {
     if data.len() < ENTROPY_SAMPLE_SIZE {
-        return calculate_entropy(data);
+        return compute_entropy(data);
     }
 
     let mut total_entropy = 0.0;
@@ -320,7 +305,7 @@ fn sample_entropy(data: &[u8]) -> f64 {
 
     for pos in &sample_positions {
         let end = (*pos + ENTROPY_SAMPLE_SIZE).min(data.len());
-        total_entropy += calculate_entropy(&data[*pos..end]);
+        total_entropy += compute_entropy(&data[*pos..end]);
     }
 
     total_entropy / sample_positions.len() as f64
@@ -346,7 +331,11 @@ fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
     }
 }
 
-fn save_file_job(job: &ExtractionJob, seen_hashes: &DashSet<u64>) -> anyhow::Result<bool> {
+fn save_file_job(
+    job: &ExtractionJob,
+    seen_hashes: &DashSet<u64>,
+    smart_carver: &SmartCarver,
+) -> anyhow::Result<bool> {
     let mut reader = DiskReader::new(&job.device_path)?;
     let mut file_data = vec![0u8; job.size as usize];
     let mut total_read = 0;
@@ -378,19 +367,29 @@ fn save_file_job(job: &ExtractionJob, seen_hashes: &DashSet<u64>) -> anyhow::Res
         return Ok(false);
     }
 
-    let is_valid = match job.file_type {
-        FileType::Jpeg => validate_jpeg_structure(&file_data),
-        FileType::Png => validate_png_structure(&file_data),
-        _ => true,
+    let analysis_result = match job.file_type {
+        FileType::Jpeg => smart_carver.analyze_jpeg(&file_data, job.start, &mut reader),
+        FileType::Png => smart_carver.analyze_png(&file_data, job.start),
+        _ => {
+            let file = File::create(&job.output_path)?;
+            let mut writer = BufWriter::with_capacity(131_072, file);
+            writer.write_all(&file_data)?;
+            writer.flush()?;
+            return Ok(true);
+        }
     };
 
-    if !is_valid {
-        seen_hashes.remove(&hash);
-        return Ok(false);
-    }
-
-    if job.file_type == FileType::Jpeg {
-        if is_likely_thumbnail(&file_data) {
+    match analysis_result.decision {
+        CarveDecision::Skip(SkipReason::InvalidStructure) => {
+            seen_hashes.remove(&hash);
+            return Ok(false);
+        }
+        CarveDecision::Skip(SkipReason::Thumbnail) => {
+            seen_hashes.remove(&hash);
+            return Ok(false);
+        }
+        CarveDecision::Extract | CarveDecision::ExtractPartial | CarveDecision::AttemptBgc => {}
+        CarveDecision::Skip(_) => {
             seen_hashes.remove(&hash);
             return Ok(false);
         }
@@ -407,49 +406,18 @@ fn save_file_job(job: &ExtractionJob, seen_hashes: &DashSet<u64>) -> anyhow::Res
         return Ok(false);
     }
 
-    if should_filter_as_graphic(&job.output_path, job.file_type) {
-        let _ = fs::remove_file(&job.output_path);
-        seen_hashes.remove(&hash);
-        return Ok(false);
+    if smart_carver.config().filter_graphics {
+        if should_filter_as_graphic(&job.output_path, job.file_type, smart_carver) {
+            let _ = fs::remove_file(&job.output_path);
+            seen_hashes.remove(&hash);
+            return Ok(false);
+        }
     }
 
     Ok(true)
 }
 
-fn validate_jpeg_structure(data: &[u8]) -> bool {
-    let validator = JpegValidator::new();
-    match validator.validate(data) {
-        ValidationResult::Valid(_) => true,
-        ValidationResult::Truncated { .. } => true,
-        ValidationResult::CorruptedAt { .. } => false,
-        ValidationResult::InvalidHeader => false,
-    }
-}
-
-fn validate_png_structure(data: &[u8]) -> bool {
-    let validator = PngValidator::new();
-    match validator.validate(data) {
-        PngValidationResult::Valid(_) => true,
-        PngValidationResult::RecoverableCrcErrors { .. } => true,
-        PngValidationResult::Truncated { .. } => true,
-        PngValidationResult::CorruptedAt { .. } => false,
-        PngValidationResult::InvalidHeader => false,
-    }
-}
-
-fn is_likely_thumbnail(data: &[u8]) -> bool {
-    let parser = JpegParser::new();
-    if let Ok(structure) = parser.parse(data) {
-        if structure.image_width > 0 && structure.image_height > 0 {
-            if structure.image_width <= 160 && structure.image_height <= 120 {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn should_filter_as_graphic(path: &Path, file_type: FileType) -> bool {
+fn should_filter_as_graphic(path: &Path, file_type: FileType, smart_carver: &SmartCarver) -> bool {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return false,
@@ -471,9 +439,8 @@ fn should_filter_as_graphic(path: &Path, file_type: FileType) -> bool {
     let (width, height) = rgb.dimensions();
     let pixels = rgb.as_raw();
 
-    let classifier = ImageClassifier::new();
-    let stats = classifier.compute_statistics(pixels, width as usize, height as usize, 3);
-    let classification = classifier.classify(&stats, (width * height) as usize);
+    let (classification, _stats) =
+        smart_carver.classify_image(pixels, width as usize, height as usize, 3);
 
     matches!(
         classification,

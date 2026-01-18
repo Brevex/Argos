@@ -2,10 +2,6 @@
 pub enum FileType {
     Jpeg,
     Png,
-    Tiff,
-    Bmp,
-    Gif,
-    WebP,
     Unknown,
 }
 
@@ -15,10 +11,6 @@ impl FileType {
         match self {
             Self::Jpeg => "jpg",
             Self::Png => "png",
-            Self::Tiff => "tiff",
-            Self::Bmp => "bmp",
-            Self::Gif => "gif",
-            Self::WebP => "webp",
             Self::Unknown => "bin",
         }
     }
@@ -28,8 +20,7 @@ impl FileType {
         match self {
             Self::Jpeg => 2,
             Self::Png => 8,
-            Self::Gif => 1,
-            _ => 0,
+            Self::Unknown => 0,
         }
     }
 
@@ -38,10 +29,6 @@ impl FileType {
         match self {
             Self::Jpeg => &[0xFF, 0xD8, 0xFF],
             Self::Png => &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
-            Self::Tiff => &[0x49, 0x49, 0x2A, 0x00],
-            Self::Bmp => &[0x42, 0x4D],
-            Self::Gif => &[0x47, 0x49, 0x46, 0x38],
-            Self::WebP => &[0x52, 0x49, 0x46, 0x46],
             Self::Unknown => &[],
         }
     }
@@ -51,8 +38,7 @@ impl FileType {
         match self {
             Self::Jpeg => &[0xFF, 0xD9],
             Self::Png => &[0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82],
-            Self::Gif => &[0x3B],
-            _ => &[],
+            Self::Unknown => &[],
         }
     }
 
@@ -61,10 +47,6 @@ impl FileType {
         match self {
             Self::Jpeg => "JPEG",
             Self::Png => "PNG",
-            Self::Tiff => "TIFF",
-            Self::Bmp => "BMP",
-            Self::Gif => "GIF",
-            Self::WebP => "WebP",
             Self::Unknown => "Unknown",
         }
     }
@@ -91,7 +73,7 @@ mod tests {
     fn test_footer_size() {
         assert_eq!(FileType::Jpeg.footer_size(), 2);
         assert_eq!(FileType::Png.footer_size(), 8);
-        assert_eq!(FileType::Bmp.footer_size(), 0);
+        assert_eq!(FileType::Unknown.footer_size(), 0);
     }
 
     #[test]

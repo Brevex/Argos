@@ -1,4 +1,4 @@
-use argos_core::{BlockSource, CoreError, Result};
+use crate::{BlockSource, CoreError, Result};
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};

@@ -1,20 +1,11 @@
-mod mmap_reader;
-mod reader;
+mod disk;
+mod mmap;
 
-pub use mmap_reader::MmapReader;
-pub use reader::DiskReader;
+pub use disk::DiskReader;
+pub use mmap::MmapReader;
 
-use argos_core::{BlockSource, Result};
+use crate::{BlockSource, Result};
 use std::path::Path;
-
-pub fn create_reader(path: impl AsRef<Path>) -> Result<Box<dyn BlockSource>> {
-    let path_ref = path.as_ref();
-
-    match MmapReader::new(path_ref) {
-        Ok(r) => Ok(Box::new(r)),
-        Err(_) => Ok(Box::new(DiskReader::new(path_ref)?)),
-    }
-}
 
 pub enum Reader {
     Mmap(MmapReader),

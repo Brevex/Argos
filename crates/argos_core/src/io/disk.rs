@@ -1,4 +1,4 @@
-use argos_core::{BlockSource, Result};
+use crate::{BlockSource, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

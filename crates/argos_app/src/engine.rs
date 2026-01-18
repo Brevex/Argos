@@ -1,5 +1,4 @@
-use argos_core::{BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
-use argos_io::Reader;
+use argos_core::{io::Reader, BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
