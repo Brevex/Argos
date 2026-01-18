@@ -1,4 +1,4 @@
-use argos_core::{io::Reader, BlockSource, FileScanner, FileType, JpegScanner, PngScanner};
+use argos_core::{io::Reader, BlockSource, FileType, SignatureScanner};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -235,7 +235,7 @@ fn producer_thread(
 
         buffer.truncate(bytes_read);
 
-        let chunk = DataChunk {
+        let mut chunk = DataChunk {
             offset,
             data: Arc::new(buffer),
         };
@@ -244,9 +244,11 @@ fn producer_thread(
             if !running.load(Ordering::SeqCst) {
                 break 'outer;
             }
-            match data_tx.send_timeout(chunk.clone(), Duration::from_millis(50)) {
+            match data_tx.send_timeout(chunk, Duration::from_millis(50)) {
                 Ok(_) => break,
-                Err(SendTimeoutError::Timeout(_)) => {}
+                Err(SendTimeoutError::Timeout(returned)) => {
+                    chunk = returned;
+                }
                 Err(SendTimeoutError::Disconnected(_)) => break 'outer,
             }
         }
@@ -282,8 +284,8 @@ fn worker_thread(
     recycle_tx: Sender<Vec<u8>>,
     event_tx: Sender<ScanEvent>,
 ) {
-    let jpeg_scanner = JpegScanner::new();
-    let png_scanner = PngScanner::new();
+    let jpeg_scanner = SignatureScanner::jpeg();
+    let png_scanner = SignatureScanner::png();
 
     macro_rules! scan_with {
         ($scanner:expr, $chunk:expr, $event_tx:expr) => {{

@@ -5,11 +5,11 @@ pub mod png;
 pub mod scanners;
 pub mod statistics;
 
-pub use carving::{CarveDecision, SkipReason, SmartCarveResult, SmartCarver, SmartCarverConfig};
+pub use carving::{CarveDecision, SkipReason, SmartCarveResult, SmartCarver, SmartCarverConfig, ValidationNote};
 pub use io::{DiskReader, MmapReader, Reader};
 pub use jpeg::{HuffmanDecoder, JpegParser, JpegValidator, RestartMarkerScanner, ValidationResult};
 pub use png::{PngParser, PngValidationResult, PngValidator};
-pub use scanners::{JpegScanner, PngScanner};
+pub use scanners::{JpegScanner, PngScanner, SignatureScanner};
 pub use statistics::{ImageClassification, ImageClassifier, ImageStatistics};
 
 use thiserror::Error;
@@ -105,32 +105,6 @@ impl std::fmt::Display for FileType {
 pub trait BlockSource {
     fn read_chunk(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize>;
     fn size(&self) -> u64;
-}
-
-pub trait FileScanner: Send + Sync {
-    fn scan_headers(&self, buffer: &[u8]) -> Vec<usize>;
-    fn scan_footers(&self, buffer: &[u8]) -> Vec<usize>;
-    fn file_type(&self) -> FileType;
-
-    #[inline]
-    fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
-    where
-        F: FnMut(usize),
-    {
-        for offset in self.scan_headers(buffer) {
-            callback(offset);
-        }
-    }
-
-    #[inline]
-    fn scan_footers_callback<F>(&self, buffer: &[u8], mut callback: F)
-    where
-        F: FnMut(usize),
-    {
-        for offset in self.scan_footers(buffer) {
-            callback(offset);
-        }
-    }
 }
 
 pub fn get_image_dimensions(data: &[u8]) -> Option<(usize, usize)> {

@@ -296,7 +296,8 @@ fn compute_horizontal_discontinuity(data: &[u8], width: usize, height: usize) ->
 }
 
 fn compute_color_diversity(data: &[u8], channels: usize) -> (f64, usize) {
-    let mut unique_colors = HashSet::new();
+    let mut color_seen = [0u64; 512];
+    
     let total_pixels = data.len() / channels;
     let sample_step = if total_pixels > 100000 {
         total_pixels / 100000
@@ -306,14 +307,16 @@ fn compute_color_diversity(data: &[u8], channels: usize) -> (f64, usize) {
 
     for i in (0..data.len()).step_by(channels * sample_step) {
         if i + 2 < data.len() {
-            let r = data[i] >> 3;
-            let g = data[i + 1] >> 3;
-            let b = data[i + 2] >> 3;
-            unique_colors.insert((r, g, b));
+            let r = (data[i] >> 3) as usize;
+            let g = (data[i + 1] >> 3) as usize;
+            let b = (data[i + 2] >> 3) as usize;
+            let index = (r << 10) | (g << 5) | b;
+            color_seen[index / 64] |= 1 << (index % 64);
         }
     }
-    let count = unique_colors.len();
-    (count as f64 / (32 * 32 * 32) as f64, count)
+    
+    let count: usize = color_seen.iter().map(|x| x.count_ones() as usize).sum();
+    (count as f64 / 32768.0, count)
 }
 
 #[cfg(test)]

@@ -39,7 +39,7 @@ struct ExtractionJob {
     start: u64,
     size: u64,
     output_path: PathBuf,
-    device_path: String,
+    device_path: Arc<str>,
     file_type: FileType,
 }
 
@@ -47,7 +47,7 @@ pub struct RecoveryManager {
     stack: Vec<Candidate>,
     reader: DiskReader,
     output_dir: PathBuf,
-    device_path: String,
+    device_path: Arc<str>,
     files_recovered: Arc<AtomicU64>,
     files_skipped: Arc<AtomicU64>,
     headers_pruned: Arc<AtomicU64>,
@@ -90,7 +90,7 @@ impl RecoveryManager {
             stack: Vec::new(),
             reader,
             output_dir: output_dir.to_path_buf(),
-            device_path: device_path.to_string(),
+            device_path: Arc::from(device_path),
             files_recovered,
             files_skipped,
             headers_pruned,
@@ -192,7 +192,7 @@ impl RecoveryManager {
             start: candidate.offset_start,
             size: file_size,
             output_path,
-            device_path: self.device_path.clone(),
+            device_path: Arc::clone(&self.device_path),
             file_type: ftype,
         };
 
@@ -259,8 +259,13 @@ fn extraction_worker(
         ..Default::default()
     });
 
+    let mut reusable_buffer = Vec::with_capacity(MAX_FILE_SIZE as usize);
+
     for job in rx {
-        match save_file_job(&job, &seen_hashes, &smart_carver) {
+        reusable_buffer.clear();
+        reusable_buffer.resize(job.size as usize, 0);
+        
+        match save_file_job_with_buffer(&job, &mut reusable_buffer, &seen_hashes, &smart_carver) {
             Ok(true) => {
                 files_recovered.fetch_add(1, Ordering::Relaxed);
             }
@@ -331,13 +336,13 @@ fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
     }
 }
 
-fn save_file_job(
+fn save_file_job_with_buffer(
     job: &ExtractionJob,
+    file_data: &mut Vec<u8>,
     seen_hashes: &DashSet<u64>,
     smart_carver: &SmartCarver,
 ) -> anyhow::Result<bool> {
-    let mut reader = DiskReader::new(&job.device_path)?;
-    let mut file_data = vec![0u8; job.size as usize];
+    let mut reader = DiskReader::new(&*job.device_path)?;
     let mut total_read = 0;
     let mut offset = job.start;
 
@@ -356,24 +361,24 @@ fn save_file_job(
 
     file_data.truncate(total_read);
 
-    let hash = compute_partial_hash(&file_data);
+    let hash = compute_partial_hash(file_data);
     if !seen_hashes.insert(hash) {
         return Ok(false);
     }
 
-    let entropy = sample_entropy(&file_data);
+    let entropy = sample_entropy(file_data);
     if entropy < MIN_ENTROPY || entropy > MAX_ENTROPY {
         seen_hashes.remove(&hash);
         return Ok(false);
     }
 
     let analysis_result = match job.file_type {
-        FileType::Jpeg => smart_carver.analyze_jpeg(&file_data, job.start, &mut reader),
-        FileType::Png => smart_carver.analyze_png(&file_data, job.start),
+        FileType::Jpeg => smart_carver.analyze_jpeg(file_data, job.start, &mut reader),
+        FileType::Png => smart_carver.analyze_png(file_data, job.start),
         _ => {
             let file = File::create(&job.output_path)?;
             let mut writer = BufWriter::with_capacity(131_072, file);
-            writer.write_all(&file_data)?;
+            writer.write_all(file_data)?;
             writer.flush()?;
             return Ok(true);
         }
@@ -397,7 +402,7 @@ fn save_file_job(
 
     let file = File::create(&job.output_path)?;
     let mut writer = BufWriter::with_capacity(131_072, file);
-    writer.write_all(&file_data)?;
+    writer.write_all(file_data)?;
     writer.flush()?;
 
     if !validate_image_decode(&job.output_path, job.file_type) {

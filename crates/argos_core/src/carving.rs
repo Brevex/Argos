@@ -67,6 +67,18 @@ pub enum SkipReason {
     Duplicate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationNote {
+    StructureValid,
+    CorruptionAt(u64),
+    BgcSuccessful,
+    BgcFailed,
+    Truncated,
+    ContainsExifThumbnail,
+    CrcErrors(usize),
+    ParseFailed,
+}
+
 #[derive(Debug, Clone)]
 pub struct FragmentCandidate {
     pub offset: u64,
@@ -155,7 +167,7 @@ pub struct SmartCarveResult {
     pub statistics: Option<ImageStatistics>,
     pub classification: Option<ImageClassification>,
     pub is_thumbnail: bool,
-    pub validation_notes: Vec<String>,
+    pub validation_notes: Vec<ValidationNote>,
 }
 
 impl SmartCarveResult {
@@ -392,33 +404,27 @@ impl SmartCarver {
             Ok(s) => s,
             Err(_) => {
                 result.decision = CarveDecision::Skip(SkipReason::InvalidStructure);
-                result
-                    .validation_notes
-                    .push("Failed to parse JPEG structure".into());
+                result.validation_notes.push(ValidationNote::ParseFailed);
                 return result;
             }
         };
 
         if self.config.filter_thumbnails && structure.thumbnail.is_some() {
             result.is_thumbnail = false;
-            result
-                .validation_notes
-                .push("Contains embedded Exif thumbnail".into());
+            result.validation_notes.push(ValidationNote::ContainsExifThumbnail);
         }
 
         if self.config.structural_validation {
             let validation = self.jpeg_validator.validate(data);
             match validation {
                 ValidationResult::Valid(_) => {
-                    result.validation_notes.push("Structure valid".into());
+                    result.validation_notes.push(ValidationNote::StructureValid);
                 }
                 ValidationResult::CorruptedAt {
                     offset: corrupt_off,
                     ..
                 } => {
-                    result
-                        .validation_notes
-                        .push(format!("Corruption detected at offset {}", corrupt_off));
+                    result.validation_notes.push(ValidationNote::CorruptionAt(corrupt_off));
                     if self.config.bifragment_carving {
                         result.decision = CarveDecision::AttemptBgc;
                         if let Some(bgc) = self.bgc_carver.carve_bifragment(data, offset, source) {
@@ -426,15 +432,11 @@ impl SmartCarver {
                                 result.bgc_result = Some(bgc.clone());
                                 result.size = bgc.total_size();
                                 result.decision = CarveDecision::Extract;
-                                result
-                                    .validation_notes
-                                    .push("Bifragment reconstruction successful".into());
+                                result.validation_notes.push(ValidationNote::BgcSuccessful);
                             }
                         } else {
                             result.decision = CarveDecision::ExtractPartial;
-                            result
-                                .validation_notes
-                                .push("BGC failed, extracting partial".into());
+                            result.validation_notes.push(ValidationNote::BgcFailed);
                         }
                     } else {
                         result.decision = CarveDecision::ExtractPartial;
@@ -442,9 +444,7 @@ impl SmartCarver {
                 }
                 ValidationResult::Truncated { .. } => {
                     result.decision = CarveDecision::ExtractPartial;
-                    result
-                        .validation_notes
-                        .push("File appears truncated".into());
+                    result.validation_notes.push(ValidationNote::Truncated);
                 }
                 ValidationResult::InvalidHeader => {
                     result.decision = CarveDecision::Skip(SkipReason::InvalidStructure);
@@ -465,32 +465,25 @@ impl SmartCarver {
         match self.png_validator.validate(data) {
             PngValidationResult::Valid(structure) => {
                 result.size = structure.valid_end_offset;
-                result.validation_notes.push("Structure valid".into());
+                result.validation_notes.push(ValidationNote::StructureValid);
             }
             PngValidationResult::RecoverableCrcErrors { structure, errors } => {
                 result.size = structure.valid_end_offset;
-                result.validation_notes.push(format!(
-                    "{} chunks with CRC errors (recoverable)",
-                    errors.len()
-                ));
+                result.validation_notes.push(ValidationNote::CrcErrors(errors.len()));
             }
             PngValidationResult::Truncated {
                 last_valid_offset, ..
             } => {
                 result.decision = CarveDecision::ExtractPartial;
                 result.size = last_valid_offset;
-                result
-                    .validation_notes
-                    .push("File appears truncated".into());
+                result.validation_notes.push(ValidationNote::Truncated);
             }
             PngValidationResult::CorruptedAt {
                 offset: corrupt_off,
                 ..
             } => {
                 result.decision = CarveDecision::ExtractPartial;
-                result
-                    .validation_notes
-                    .push(format!("Corruption at offset {}", corrupt_off));
+                result.validation_notes.push(ValidationNote::CorruptionAt(corrupt_off));
             }
             PngValidationResult::InvalidHeader => {
                 result.decision = CarveDecision::Skip(SkipReason::InvalidStructure);

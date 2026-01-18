@@ -1,46 +1,54 @@
-use crate::{FileScanner, FileType};
+use crate::FileType;
 use memchr::memmem::Finder;
 
 #[derive(Debug, Clone)]
-pub struct JpegScanner {
+pub struct SignatureScanner {
     header_finder: Finder<'static>,
     footer_finder: Finder<'static>,
+    file_type: FileType,
 }
 
-impl JpegScanner {
-    const HEADER: &'static [u8] = &[0xFF, 0xD8, 0xFF];
-    const FOOTER: &'static [u8] = &[0xFF, 0xD9];
-
+impl SignatureScanner {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn jpeg() -> Self {
+        const HEADER: &[u8] = &[0xFF, 0xD8, 0xFF];
+        const FOOTER: &[u8] = &[0xFF, 0xD9];
         Self {
-            header_finder: Finder::new(Self::HEADER),
-            footer_finder: Finder::new(Self::FOOTER),
+            header_finder: Finder::new(HEADER),
+            footer_finder: Finder::new(FOOTER),
+            file_type: FileType::Jpeg,
         }
     }
-}
 
-impl Default for JpegScanner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FileScanner for JpegScanner {
-    fn scan_headers(&self, buffer: &[u8]) -> Vec<usize> {
-        self.header_finder.find_iter(buffer).collect()
-    }
-
-    fn scan_footers(&self, buffer: &[u8]) -> Vec<usize> {
-        self.footer_finder.find_iter(buffer).collect()
-    }
-
-    fn file_type(&self) -> FileType {
-        FileType::Jpeg
+    #[must_use]
+    pub fn png() -> Self {
+        const HEADER: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        const FOOTER: &[u8] = &[0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
+        Self {
+            header_finder: Finder::new(HEADER),
+            footer_finder: Finder::new(FOOTER),
+            file_type: FileType::Png,
+        }
     }
 
     #[inline]
-    fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    #[must_use]
+    pub fn file_type(&self) -> FileType {
+        self.file_type
+    }
+
+    #[must_use]
+    pub fn scan_headers(&self, buffer: &[u8]) -> Vec<usize> {
+        self.header_finder.find_iter(buffer).collect()
+    }
+
+    #[must_use]
+    pub fn scan_footers(&self, buffer: &[u8]) -> Vec<usize> {
+        self.footer_finder.find_iter(buffer).collect()
+    }
+
+    #[inline]
+    pub fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
     where
         F: FnMut(usize),
     {
@@ -50,7 +58,7 @@ impl FileScanner for JpegScanner {
     }
 
     #[inline]
-    fn scan_footers_callback<F>(&self, buffer: &[u8], mut callback: F)
+    pub fn scan_footers_callback<F>(&self, buffer: &[u8], mut callback: F)
     where
         F: FnMut(usize),
     {
@@ -60,64 +68,8 @@ impl FileScanner for JpegScanner {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PngScanner {
-    header_finder: Finder<'static>,
-    footer_finder: Finder<'static>,
-}
-
-impl PngScanner {
-    const HEADER: &'static [u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-    const FOOTER: &'static [u8] = &[0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
-
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            header_finder: Finder::new(Self::HEADER),
-            footer_finder: Finder::new(Self::FOOTER),
-        }
-    }
-}
-
-impl Default for PngScanner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FileScanner for PngScanner {
-    fn scan_headers(&self, buffer: &[u8]) -> Vec<usize> {
-        self.header_finder.find_iter(buffer).collect()
-    }
-
-    fn scan_footers(&self, buffer: &[u8]) -> Vec<usize> {
-        self.footer_finder.find_iter(buffer).collect()
-    }
-
-    fn file_type(&self) -> FileType {
-        FileType::Png
-    }
-
-    #[inline]
-    fn scan_headers_callback<F>(&self, buffer: &[u8], mut callback: F)
-    where
-        F: FnMut(usize),
-    {
-        for offset in self.header_finder.find_iter(buffer) {
-            callback(offset);
-        }
-    }
-
-    #[inline]
-    fn scan_footers_callback<F>(&self, buffer: &[u8], mut callback: F)
-    where
-        F: FnMut(usize),
-    {
-        for offset in self.footer_finder.find_iter(buffer) {
-            callback(offset);
-        }
-    }
-}
+pub type JpegScanner = SignatureScanner;
+pub type PngScanner = SignatureScanner;
 
 #[cfg(test)]
 mod tests {
@@ -125,7 +77,7 @@ mod tests {
 
     #[test]
     fn jpeg_scan_headers_single_match() {
-        let scanner = JpegScanner::new();
+        let scanner = SignatureScanner::jpeg();
 
         let buffer: Vec<u8> = [
             &[0x00, 0x11, 0x22, 0x33, 0x44][..],
@@ -141,7 +93,7 @@ mod tests {
 
     #[test]
     fn jpeg_scan_footers_single_match() {
-        let scanner = JpegScanner::new();
+        let scanner = SignatureScanner::jpeg();
 
         let buffer: Vec<u8> = [
             &[0x00, 0x11, 0x22, 0x33][..],
@@ -156,7 +108,7 @@ mod tests {
 
     #[test]
     fn jpeg_scan_multiple_files() {
-        let scanner = JpegScanner::new();
+        let scanner = SignatureScanner::jpeg();
 
         let buffer: Vec<u8> = [
             &[0x00, 0x00][..],
@@ -180,7 +132,7 @@ mod tests {
 
     #[test]
     fn jpeg_scan_no_matches() {
-        let scanner = JpegScanner::new();
+        let scanner = SignatureScanner::jpeg();
         let buffer = vec![0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
         let headers = scanner.scan_headers(&buffer);
         let footers = scanner.scan_footers(&buffer);
@@ -191,7 +143,7 @@ mod tests {
 
     #[test]
     fn jpeg_scan_empty_buffer() {
-        let scanner = JpegScanner::new();
+        let scanner = SignatureScanner::jpeg();
 
         let headers = scanner.scan_headers(&[]);
         let footers = scanner.scan_footers(&[]);
@@ -202,13 +154,13 @@ mod tests {
 
     #[test]
     fn jpeg_file_type() {
-        let scanner = JpegScanner::new();
+        let scanner = SignatureScanner::jpeg();
         assert_eq!(scanner.file_type(), FileType::Jpeg);
     }
 
     #[test]
     fn png_scan_headers_single_match() {
-        let scanner = PngScanner::new();
+        let scanner = SignatureScanner::png();
 
         let buffer: Vec<u8> = [
             &[0x00, 0x11, 0x22][..],
@@ -223,7 +175,7 @@ mod tests {
 
     #[test]
     fn png_scan_footers_single_match() {
-        let scanner = PngScanner::new();
+        let scanner = SignatureScanner::png();
 
         let buffer: Vec<u8> = [
             &[0x00, 0x00, 0x00, 0x00][..],
@@ -238,7 +190,7 @@ mod tests {
 
     #[test]
     fn png_scan_multiple_files() {
-        let scanner = PngScanner::new();
+        let scanner = SignatureScanner::png();
 
         let buffer: Vec<u8> = [
             &[0x00][..],
@@ -261,7 +213,7 @@ mod tests {
 
     #[test]
     fn png_scan_no_matches() {
-        let scanner = PngScanner::new();
+        let scanner = SignatureScanner::png();
         let buffer = vec![0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
         let headers = scanner.scan_headers(&buffer);
         let footers = scanner.scan_footers(&buffer);
@@ -272,7 +224,7 @@ mod tests {
 
     #[test]
     fn png_scan_empty_buffer() {
-        let scanner = PngScanner::new();
+        let scanner = SignatureScanner::png();
 
         let headers = scanner.scan_headers(&[]);
         let footers = scanner.scan_footers(&[]);
@@ -283,13 +235,13 @@ mod tests {
 
     #[test]
     fn png_file_type() {
-        let scanner = PngScanner::new();
+        let scanner = SignatureScanner::png();
         assert_eq!(scanner.file_type(), FileType::Png);
     }
 
     #[test]
     fn jpeg_partial_header_not_matched() {
-        let scanner = JpegScanner::new();
+        let scanner = SignatureScanner::jpeg();
         let buffer = vec![0xFF, 0xD8, 0x00, 0x00];
         let headers = scanner.scan_headers(&buffer);
 
@@ -298,7 +250,7 @@ mod tests {
 
     #[test]
     fn png_partial_header_not_matched() {
-        let scanner = PngScanner::new();
+        let scanner = SignatureScanner::png();
         let buffer = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A];
         let headers = scanner.scan_headers(&buffer);
 
@@ -308,7 +260,27 @@ mod tests {
     #[test]
     fn scanners_are_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<JpegScanner>();
-        assert_send_sync::<PngScanner>();
+        assert_send_sync::<SignatureScanner>();
+    }
+
+    #[test]
+    fn callback_api_works() {
+        let scanner = SignatureScanner::jpeg();
+        let buffer: Vec<u8> = [
+            &[0x00][..],
+            &[0xFF, 0xD8, 0xFF][..],
+            &[0x00][..],
+            &[0xFF, 0xD9][..],
+        ]
+        .concat();
+
+        let mut headers = Vec::new();
+        let mut footers = Vec::new();
+
+        scanner.scan_headers_callback(&buffer, |off| headers.push(off));
+        scanner.scan_footers_callback(&buffer, |off| footers.push(off));
+
+        assert_eq!(headers, vec![1]);
+        assert_eq!(footers, vec![5]);
     }
 }
