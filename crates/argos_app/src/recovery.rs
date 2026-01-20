@@ -252,7 +252,7 @@ fn extraction_worker(
 ) {
     let smart_carver = SmartCarver::with_config(SmartCarverConfig {
         structural_validation: true,
-        bifragment_carving: false,
+        bifragment_carving: true,
         statistical_filtering: true,
         filter_thumbnails: true,
         filter_graphics: true,
@@ -264,7 +264,7 @@ fn extraction_worker(
     for job in rx {
         reusable_buffer.clear();
         reusable_buffer.resize(job.size as usize, 0);
-        
+
         match save_file_job_with_buffer(&job, &mut reusable_buffer, &seen_hashes, &smart_carver) {
             Ok(true) => {
                 files_recovered.fetch_add(1, Ordering::Relaxed);
@@ -330,10 +330,7 @@ fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
         _ => return true,
     };
 
-    match image::load(reader, format) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    image::load(reader, format).is_ok()
 }
 
 fn save_file_job_with_buffer(
@@ -367,7 +364,7 @@ fn save_file_job_with_buffer(
     }
 
     let entropy = sample_entropy(file_data);
-    if entropy < MIN_ENTROPY || entropy > MAX_ENTROPY {
+    if !(MIN_ENTROPY..=MAX_ENTROPY).contains(&entropy) {
         seen_hashes.remove(&hash);
         return Ok(false);
     }
@@ -402,8 +399,48 @@ fn save_file_job_with_buffer(
 
     let file = File::create(&job.output_path)?;
     let mut writer = BufWriter::with_capacity(131_072, file);
-    writer.write_all(file_data)?;
-    writer.flush()?;
+
+    if let Some(ref mf_result) = analysis_result.multi_fragment_result {
+        if mf_result.fragments.len() > 1 {
+            let mut frag_buffer = vec![0u8; EXTRACTION_BUFFER_SIZE];
+            for fragment in &mf_result.fragments {
+                let mut frag_offset = fragment.offset;
+                let mut remaining = fragment.size as usize;
+                while remaining > 0 {
+                    let to_read = remaining.min(EXTRACTION_BUFFER_SIZE);
+                    let bytes_read = reader.read_chunk(frag_offset, &mut frag_buffer[..to_read])?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    writer.write_all(&frag_buffer[..bytes_read])?;
+                    frag_offset += bytes_read as u64;
+                    remaining = remaining.saturating_sub(bytes_read);
+                }
+            }
+            writer.flush()?;
+        } else {
+            writer.write_all(file_data)?;
+            writer.flush()?;
+        }
+    } else if let Some(ref bgc_result) = analysis_result.bgc_result {
+        if bgc_result.is_fragmented {
+            writer.write_all(&file_data[..bgc_result.head_size as usize])?;
+            if let (Some(tail_offset), Some(tail_size)) =
+                (bgc_result.tail_offset, bgc_result.tail_size)
+            {
+                let mut tail_buffer = vec![0u8; tail_size as usize];
+                reader.read_chunk(tail_offset, &mut tail_buffer)?;
+                writer.write_all(&tail_buffer)?;
+            }
+            writer.flush()?;
+        } else {
+            writer.write_all(file_data)?;
+            writer.flush()?;
+        }
+    } else {
+        writer.write_all(file_data)?;
+        writer.flush()?;
+    }
 
     if !validate_image_decode(&job.output_path, job.file_type) {
         let _ = fs::remove_file(&job.output_path);
@@ -411,12 +448,12 @@ fn save_file_job_with_buffer(
         return Ok(false);
     }
 
-    if smart_carver.config().filter_graphics {
-        if should_filter_as_graphic(&job.output_path, job.file_type, smart_carver) {
-            let _ = fs::remove_file(&job.output_path);
-            seen_hashes.remove(&hash);
-            return Ok(false);
-        }
+    if smart_carver.config().filter_graphics
+        && should_filter_as_graphic(&job.output_path, job.file_type, smart_carver)
+    {
+        let _ = fs::remove_file(&job.output_path);
+        seen_hashes.remove(&hash);
+        return Ok(false);
     }
 
     Ok(true)

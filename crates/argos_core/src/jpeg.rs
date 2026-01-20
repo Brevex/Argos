@@ -36,6 +36,52 @@ pub const fn restart_marker_index(marker: u8) -> Option<u8> {
     }
 }
 
+/// Quick validation of JPEG header (checks first marker after SOI)
+///
+/// After SOI (0xFF 0xD8), valid JPEGs have a marker like APP0, DQT, DHT, SOF, etc.
+/// This eliminates false positives from random 0xFF 0xD8 sequences.
+///
+/// # Arguments
+/// * `data` - Data starting at the SOI marker (minimum 4 bytes needed)
+///
+/// # Returns
+/// * `true` if header looks valid
+/// * `false` if definitely not a valid JPEG
+#[inline]
+pub fn quick_validate_header(data: &[u8]) -> bool {
+    // Need at least: SOI (2) + marker prefix (2) = 4 bytes
+    if data.len() < 4 {
+        return false;
+    }
+
+    // Check SOI
+    if data[0] != 0xFF || data[1] != 0xD8 {
+        return false;
+    }
+
+    // Next byte must be 0xFF (marker prefix)
+    if data[2] != 0xFF {
+        return false;
+    }
+
+    // Check if the marker is valid for the start of a JPEG
+    let marker = data[3];
+    matches!(marker,
+        // APP markers (APP0-APP15) - most common
+        0xE0..=0xEF |
+        // Quantization table
+        0xDB |
+        // Huffman table
+        0xC4 |
+        // SOF markers (baseline, progressive, etc.)
+        0xC0..=0xC3 | 0xC5..=0xCF |
+        // Define restart interval
+        0xDD |
+        // Comment
+        0xFE
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerType {
     Soi,
@@ -62,8 +108,8 @@ impl MarkerType {
             0xC4 => Self::Dht,
             0xDD => Self::Dri,
             0xFE => Self::Com,
-            b if b >= 0xD0 && b <= 0xD7 => Self::Rst(b - 0xD0),
-            b if b >= 0xE0 && b <= 0xEF => Self::App(b - 0xE0),
+            b if (0xD0..=0xD7).contains(&b) => Self::Rst(b - 0xD0),
+            b if (0xE0..=0xEF).contains(&b) => Self::App(b - 0xE0),
             b if is_sof_marker(b) => Self::Sof(b),
             b => Self::Other(b),
         }
@@ -121,6 +167,8 @@ pub struct JpegStructure {
     pub thumbnail: Option<ThumbnailInfo>,
     pub corruption_point: Option<u64>,
     pub valid_end_offset: u64,
+    /// Number of corrupted segments that were skipped during tolerant parsing
+    pub skipped_segments: u32,
 }
 
 pub struct JpegParser;
@@ -210,6 +258,171 @@ impl JpegParser {
                 }
                 MarkerType::Sos => {
                     structure.sos_offset = Some(marker_offset);
+                    pos += 2 + length as usize;
+                    while pos < data.len() - 1 {
+                        if data[pos] == 0xFF && data[pos + 1] != 0x00 {
+                            let next = data[pos + 1];
+                            if next == 0xD9 {
+                                structure.markers.push(JpegMarker {
+                                    marker_type: MarkerType::Eoi,
+                                    offset: pos as u64,
+                                    length: 0,
+                                });
+                                structure.valid_end_offset = pos as u64 + 2;
+                                return Ok(structure);
+                            } else if is_restart_marker(next) {
+                                structure.markers.push(JpegMarker {
+                                    marker_type: MarkerType::Rst(next - 0xD0),
+                                    offset: pos as u64,
+                                    length: 0,
+                                });
+                                pos += 2;
+                            } else if next == 0xFF {
+                                pos += 1;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            pos += 1;
+                        }
+                    }
+                    continue;
+                }
+                MarkerType::Dri => {
+                    if length >= 4 && pos + 5 < data.len() {
+                        structure.restart_interval =
+                            u16::from_be_bytes([data[pos + 4], data[pos + 5]]);
+                    }
+                }
+                MarkerType::App(1) => {
+                    self.parse_app1_exif(data, pos + 4, length - 2, &mut structure);
+                }
+                _ => {}
+            }
+            pos += 2 + length as usize;
+        }
+
+        if structure.valid_end_offset == 0 {
+            structure.valid_end_offset = pos as u64;
+        }
+        Ok(structure)
+    }
+
+    /// Tolerant parsing that attempts to skip corrupted segments
+    ///
+    /// When a corrupted segment is encountered (invalid length), this parser
+    /// will scan forward looking for the next valid marker instead of stopping.
+    /// This allows recovering images with corrupted APP/COM segments.
+    pub fn parse_tolerant(&self, data: &[u8]) -> Result<JpegStructure> {
+        if data.len() < 4 {
+            return Err(CoreError::InvalidFormat("Data too short for JPEG".into()));
+        }
+        if data[0] != 0xFF || data[1] != 0xD8 {
+            return Err(CoreError::InvalidFormat("Missing JPEG SOI marker".into()));
+        }
+
+        let mut structure = JpegStructure::default();
+        structure.markers.push(JpegMarker {
+            marker_type: MarkerType::Soi,
+            offset: 0,
+            length: 0,
+        });
+        let mut pos: usize = 2;
+
+        while pos < data.len() - 1 {
+            if data[pos] != 0xFF {
+                pos += 1;
+                continue;
+            }
+            // Skip padding FFs
+            while pos < data.len() - 1 && data[pos + 1] == 0xFF {
+                pos += 1;
+            }
+            if pos >= data.len() - 1 {
+                break;
+            }
+
+            let marker_byte = data[pos + 1];
+            if marker_byte == 0x00 {
+                pos += 2;
+                continue;
+            }
+
+            let marker_type = MarkerType::from_byte(marker_byte);
+            let marker_offset = pos as u64;
+
+            // Standalone markers (no length field)
+            if is_standalone_marker(marker_byte) {
+                structure.markers.push(JpegMarker {
+                    marker_type,
+                    offset: marker_offset,
+                    length: 0,
+                });
+                if matches!(marker_type, MarkerType::Eoi) {
+                    structure.valid_end_offset = pos as u64 + 2;
+                    break;
+                }
+                pos += 2;
+                continue;
+            }
+
+            // Check if we can read the length
+            if pos + 3 >= data.len() {
+                structure.corruption_point = Some(pos as u64);
+                break;
+            }
+
+            let length = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
+
+            // Check if length is valid
+            if length < 2 || pos + 2 + length as usize > data.len() {
+                // TOLERANT: Try to find next valid marker instead of stopping
+                structure.skipped_segments += 1;
+                if structure.corruption_point.is_none() {
+                    structure.corruption_point = Some(pos as u64);
+                }
+
+                // Scan forward for next 0xFF followed by valid marker
+                pos += 2;
+                while pos < data.len() - 1 {
+                    if data[pos] == 0xFF && data[pos + 1] != 0x00 && data[pos + 1] != 0xFF {
+                        let next_marker = data[pos + 1];
+                        // Check if this looks like a valid marker to resume at
+                        if matches!(next_marker,
+                            0xC0..=0xCF | // SOF markers
+                            0xD0..=0xD9 | // RST, SOI, EOI
+                            0xDA..=0xDF | // SOS, DQT, DHT, etc
+                            0xE0..=0xEF | // APP markers
+                            0xFE           // COM
+                        ) {
+                            break; // Found a likely marker, resume parsing
+                        }
+                    }
+                    pos += 1;
+                }
+                continue;
+            }
+
+            structure.markers.push(JpegMarker {
+                marker_type,
+                offset: marker_offset,
+                length,
+            });
+
+            // Handle specific markers
+            match marker_type {
+                MarkerType::Sof(_) => {
+                    if pos + 9 <= data.len() {
+                        structure.image_height = u16::from_be_bytes([data[pos + 5], data[pos + 6]]);
+                        structure.image_width = u16::from_be_bytes([data[pos + 7], data[pos + 8]]);
+                    }
+                    if marker_byte == SOF2 {
+                        structure.is_progressive = true;
+                    }
+                }
+                MarkerType::Sos => {
+                    structure.sos_offset = Some(marker_offset);
+                    // After SOS, scan for EOI or RST markers only
                     pos += 2 + length as usize;
                     while pos < data.len() - 1 {
                         if data[pos] == 0xFF && data[pos + 1] != 0x00 {
@@ -530,6 +743,137 @@ impl HuffmanTable {
     }
 }
 
+/// Bit-level reader for JPEG entropy-coded data
+///
+/// Handles byte stuffing (0xFF 0x00 -> 0xFF) and provides
+/// methods to read individual bits or groups of bits.
+pub struct BitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    bit_buffer: u32,
+    bits_available: u8,
+}
+
+impl<'a> BitReader<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            bit_buffer: 0,
+            bits_available: 0,
+        }
+    }
+
+    /// Read next byte, handling byte stuffing
+    fn read_byte(&mut self) -> Option<u8> {
+        if self.pos >= self.data.len() {
+            return None;
+        }
+        let byte = self.data[self.pos];
+        self.pos += 1;
+
+        // Handle byte stuffing: 0xFF 0x00 -> 0xFF
+        if byte == 0xFF && self.pos < self.data.len() {
+            if self.data[self.pos] == 0x00 {
+                self.pos += 1; // Skip the stuffed 0x00
+            } else {
+                // Found a marker, stop reading
+                self.pos -= 1;
+                return None;
+            }
+        }
+        Some(byte)
+    }
+
+    /// Ensure we have at least `needed` bits in the buffer
+    fn fill_buffer(&mut self, needed: u8) {
+        while self.bits_available < needed {
+            if let Some(byte) = self.read_byte() {
+                self.bit_buffer = (self.bit_buffer << 8) | (byte as u32);
+                self.bits_available += 8;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Peek N bits without consuming them
+    pub fn peek_bits(&mut self, n: u8) -> Option<u32> {
+        if n == 0 || n > 24 {
+            return None;
+        }
+        self.fill_buffer(n);
+        if self.bits_available < n {
+            return None;
+        }
+        let shift = self.bits_available - n;
+        Some((self.bit_buffer >> shift) & ((1 << n) - 1))
+    }
+
+    /// Read and consume N bits
+    pub fn read_bits(&mut self, n: u8) -> Option<u32> {
+        let bits = self.peek_bits(n)?;
+        self.bits_available -= n;
+        Some(bits)
+    }
+
+    /// Decode a Huffman symbol
+    pub fn decode_huffman(&mut self, table: &HuffmanTable) -> Option<u8> {
+        self.fill_buffer(16);
+
+        // Try to find a matching code
+        for len in 1..=16u8 {
+            if len > self.bits_available {
+                break;
+            }
+            let shift = self.bits_available - len;
+            let code = (self.bit_buffer >> shift) & ((1 << len) - 1);
+
+            if let Some(&(symbol, code_len)) = table.lookup.get(&code) {
+                if code_len == len {
+                    self.bits_available -= len;
+                    return Some(symbol);
+                }
+            }
+        }
+        None
+    }
+
+    /// Decode a DC coefficient value given its size category
+    pub fn decode_value(&mut self, size: u8) -> Option<i16> {
+        if size == 0 {
+            return Some(0);
+        }
+        if size > 15 {
+            return None;
+        }
+
+        let bits = self.read_bits(size)?;
+
+        // Convert to signed value
+        let half = 1u32 << (size - 1);
+        if bits < half {
+            // Negative value
+            Some((bits as i16) - ((1 << size) - 1) as i16)
+        } else {
+            Some(bits as i16)
+        }
+    }
+
+    /// Current position in bytes
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// Check if we've reached the end or a marker
+    pub fn is_at_end(&self) -> bool {
+        self.pos >= self.data.len()
+            || (self.pos + 1 < self.data.len()
+                && self.data[self.pos] == 0xFF
+                && self.data[self.pos + 1] != 0x00)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HuffmanDecoder {
     dc_tables: [Option<HuffmanTable>; 4],
@@ -578,6 +922,109 @@ impl HuffmanDecoder {
             .sum();
         let avg_diff = total_diff as f32 / compare_count as f32;
         1.0 - (avg_diff / 100.0).min(1.0)
+    }
+
+    /// Extract DC coefficients from entropy-coded data
+    ///
+    /// This performs real Huffman decoding to extract the DC coefficients
+    /// from each MCU (Minimum Coded Unit). For fragment carving, we compare
+    /// the DC values at the end of one fragment with those at the start of
+    /// another to validate the stitch point.
+    ///
+    /// # Arguments
+    /// * `entropy_data` - The raw entropy-coded data (after SOS header)
+    /// * `components` - Number of color components (1 for grayscale, 3 for YCbCr)
+    /// * `max_mcus` - Maximum number of MCUs to decode
+    ///
+    /// # Returns
+    /// Vector of DC coefficients for the Y (luminance) component
+    pub fn extract_dc_coefficients(
+        &mut self,
+        entropy_data: &[u8],
+        components: u8,
+        max_mcus: usize,
+    ) -> Vec<i16> {
+        let mut dc_values = Vec::with_capacity(max_mcus);
+        let mut reader = BitReader::new(entropy_data);
+
+        // Default to table 0 for DC
+        let dc_table = match &self.dc_tables[0] {
+            Some(t) => t,
+            None => return dc_values,
+        };
+
+        // Reset DC predictors
+        self.dc_pred = [0; 4];
+
+        for _ in 0..max_mcus {
+            if reader.is_at_end() {
+                break;
+            }
+
+            // For each component in the MCU
+            for comp_idx in 0..(components as usize).min(4) {
+                // Decode DC coefficient
+                let dc_size = match reader.decode_huffman(dc_table) {
+                    Some(s) => s,
+                    None => break,
+                };
+
+                let dc_diff = match reader.decode_value(dc_size) {
+                    Some(v) => v,
+                    None => break,
+                };
+
+                // Apply DC prediction
+                self.dc_pred[comp_idx] = self.dc_pred[comp_idx].wrapping_add(dc_diff);
+
+                // Store Y component DC values (component 0)
+                if comp_idx == 0 {
+                    dc_values.push(self.dc_pred[0]);
+                }
+
+                // Skip AC coefficients (simplified: just skip to next DC)
+                // In a full decoder, we would decode all 63 AC coefficients
+                // For DC continuity validation, we only need the DC values
+                if let Some(ac_table) = &self.ac_tables[0] {
+                    let mut ac_count = 0;
+                    while ac_count < 63 {
+                        if let Some(symbol) = reader.decode_huffman(ac_table) {
+                            let run = symbol >> 4;
+                            let size = symbol & 0x0F;
+
+                            if size == 0 {
+                                if run == 0 {
+                                    break; // EOB - End of Block
+                                } else if run == 0x0F {
+                                    ac_count += 16; // ZRL - skip 16 zeros
+                                }
+                            } else {
+                                ac_count += run as usize + 1;
+                                let _ = reader.read_bits(size);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        dc_values
+    }
+
+    /// Validate a stitch point between two fragments using DC continuity
+    ///
+    /// Returns a score from 0.0 to 1.0, where higher means better match.
+    pub fn validate_stitch(&mut self, head_data: &[u8], tail_data: &[u8], components: u8) -> f32 {
+        // Extract DC values from the end of head fragment
+        let head_dc = self.extract_dc_coefficients(head_data, components, 64);
+
+        // Reset predictors and extract from tail
+        self.reset_dc_predictors();
+        let tail_dc = self.extract_dc_coefficients(tail_data, components, 64);
+
+        Self::dc_continuity_score(&head_dc, &tail_dc)
     }
 }
 
@@ -652,16 +1099,17 @@ impl RestartMarkerScanner {
         head_markers: &[RestartMarkerInfo],
         tail_markers: &[RestartMarkerInfo],
     ) -> f32 {
-        if head_markers.is_empty() || tail_markers.is_empty() {
+        // Use pattern matching instead of unwrap - no panic possible
+        let (Some(last_head), Some(first_tail)) = (head_markers.last(), tail_markers.first())
+        else {
             return 0.5;
-        }
-        let last_head = head_markers.last().unwrap();
-        let first_tail = tail_markers.first().unwrap();
+        };
+
         let expected_next = (last_head.rst_number + 1) % 8;
         if first_tail.rst_number == expected_next {
             1.0
         } else {
-            let diff = (first_tail.rst_number as i8 - expected_next as i8).abs() as u8;
+            let diff = (first_tail.rst_number as i8 - expected_next as i8).unsigned_abs();
             let min_diff = diff.min(8 - diff);
             1.0 - (min_diff as f32 / 4.0)
         }
@@ -747,5 +1195,35 @@ mod tests {
         let markers = scanner.scan(&data);
         assert_eq!(markers.len(), 3);
         assert!(scanner.validate_sequence(&markers));
+    }
+
+    #[test]
+    fn test_quick_validate_header_valid() {
+        // Valid JPEG starting with APP0 (JFIF)
+        let valid = [0xFF, 0xD8, 0xFF, 0xE0];
+        assert!(quick_validate_header(&valid));
+
+        // Valid JPEG starting with APP1 (EXIF)
+        let exif = [0xFF, 0xD8, 0xFF, 0xE1];
+        assert!(quick_validate_header(&exif));
+
+        // Valid JPEG starting with DQT
+        let dqt = [0xFF, 0xD8, 0xFF, 0xDB];
+        assert!(quick_validate_header(&dqt));
+    }
+
+    #[test]
+    fn test_quick_validate_header_invalid() {
+        // Not a JPEG at all
+        assert!(!quick_validate_header(&[0x00, 0x00, 0x00, 0x00]));
+
+        // SOI but invalid marker after
+        assert!(!quick_validate_header(&[0xFF, 0xD8, 0xFF, 0x00]));
+
+        // SOI but no 0xFF marker prefix
+        assert!(!quick_validate_header(&[0xFF, 0xD8, 0x00, 0xE0]));
+
+        // Too short
+        assert!(!quick_validate_header(&[0xFF, 0xD8]));
     }
 }

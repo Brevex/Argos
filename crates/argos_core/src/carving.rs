@@ -88,6 +88,47 @@ pub struct FragmentCandidate {
 }
 
 #[derive(Debug, Clone)]
+pub struct Fragment {
+    pub offset: u64,
+    pub size: u64,
+    pub entropy: f64,
+    pub huffman_valid: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiFragmentResult {
+    pub fragments: Vec<Fragment>,
+    pub total_size: u64,
+    pub overall_score: f32,
+    pub is_complete: bool,
+}
+
+impl MultiFragmentResult {
+    pub fn empty() -> Self {
+        Self {
+            fragments: Vec::new(),
+            total_size: 0,
+            overall_score: 0.0,
+            is_complete: false,
+        }
+    }
+
+    pub fn single(offset: u64, size: u64) -> Self {
+        Self {
+            fragments: vec![Fragment {
+                offset,
+                size,
+                entropy: 0.0,
+                huffman_valid: true,
+            }],
+            total_size: size,
+            overall_score: 1.0,
+            is_complete: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CarveResult {
     pub head_offset: u64,
     pub head_size: u64,
@@ -164,6 +205,7 @@ pub struct SmartCarveResult {
     pub offset: u64,
     pub size: u64,
     pub bgc_result: Option<CarveResult>,
+    pub multi_fragment_result: Option<MultiFragmentResult>,
     pub statistics: Option<ImageStatistics>,
     pub classification: Option<ImageClassification>,
     pub is_thumbnail: bool,
@@ -178,6 +220,7 @@ impl SmartCarveResult {
             offset,
             size,
             bgc_result: None,
+            multi_fragment_result: None,
             statistics: None,
             classification: None,
             is_thumbnail: false,
@@ -192,6 +235,7 @@ impl SmartCarveResult {
             offset,
             size: 0,
             bgc_result: None,
+            multi_fragment_result: None,
             statistics: None,
             classification: None,
             is_thumbnail: false,
@@ -200,9 +244,14 @@ impl SmartCarveResult {
     }
 }
 
+/// Buffer size for reading chunks during fragment search
+const CARVE_BUFFER_SIZE: usize = 64 * 1024;
+
 pub struct BifragmentCarver {
     config: BgcConfig,
     validator: JpegValidator,
+    /// Reusable buffer to avoid allocations in hot path
+    buffer: std::cell::RefCell<Vec<u8>>,
 }
 
 impl BifragmentCarver {
@@ -210,6 +259,7 @@ impl BifragmentCarver {
         Self {
             config: BgcConfig::default(),
             validator: JpegValidator::new(),
+            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
         }
     }
 
@@ -217,6 +267,7 @@ impl BifragmentCarver {
         Self {
             config,
             validator: JpegValidator::new(),
+            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
         }
     }
 
@@ -240,12 +291,11 @@ impl BifragmentCarver {
 
         let search_start = head_offset + head.len() as u64;
         let search_end = (search_start + self.config.max_gap).min(source.size());
-        let first_cluster = (search_start + self.config.cluster_size - 1)
-            / self.config.cluster_size
-            * self.config.cluster_size;
+        let first_cluster =
+            search_start.div_ceil(self.config.cluster_size) * self.config.cluster_size;
 
         let mut best_candidate: Option<(FragmentCandidate, Vec<u8>)> = None;
-        let mut buffer = vec![0u8; 64 * 1024];
+        let mut buffer = self.buffer.borrow_mut();
         let mut cluster_offset = first_cluster;
 
         while cluster_offset < search_end {
@@ -338,16 +388,215 @@ impl BifragmentCarver {
     }
 
     fn find_eoi(&self, data: &[u8]) -> Option<usize> {
-        for i in 0..data.len().saturating_sub(1) {
-            if data[i] == 0xFF && data[i + 1] == 0xD9 {
-                return Some(i);
-            }
-        }
-        None
+        (0..data.len().saturating_sub(1)).find(|&i| data[i] == 0xFF && data[i + 1] == 0xD9)
     }
 }
 
 impl Default for BifragmentCarver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiFragmentConfig {
+    pub cluster_size: u64,
+    pub max_gap: u64,
+    pub max_fragments: usize,
+    pub min_fragment_size: u64,
+    pub entropy_threshold: f64,
+    pub entropy_window: usize,
+    pub min_stitch_score: f32,
+}
+
+impl Default for MultiFragmentConfig {
+    fn default() -> Self {
+        Self {
+            cluster_size: 4096,
+            max_gap: 32 * 1024 * 1024,
+            max_fragments: 16,
+            min_fragment_size: 512,
+            entropy_threshold: 2.0,
+            entropy_window: 4096,
+            min_stitch_score: 0.5,
+        }
+    }
+}
+
+pub struct MultiFragmentCarver {
+    config: MultiFragmentConfig,
+    #[allow(dead_code)]
+    validator: JpegValidator,
+    rst_scanner: RestartMarkerScanner,
+    /// Reusable buffer to avoid allocations in hot path
+    buffer: std::cell::RefCell<Vec<u8>>,
+}
+
+impl MultiFragmentCarver {
+    pub fn new() -> Self {
+        Self {
+            config: MultiFragmentConfig::default(),
+            validator: JpegValidator::new(),
+            rst_scanner: RestartMarkerScanner::new(),
+            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
+        }
+    }
+
+    pub fn with_config(config: MultiFragmentConfig) -> Self {
+        Self {
+            config,
+            validator: JpegValidator::new(),
+            rst_scanner: RestartMarkerScanner::new(),
+            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
+        }
+    }
+
+    pub fn carve<S: BlockSource>(
+        &self,
+        head_data: &[u8],
+        head_offset: u64,
+        corruption_point: u64,
+        source: &mut S,
+    ) -> MultiFragmentResult {
+        if corruption_point <= head_offset || head_data.is_empty() {
+            return MultiFragmentResult::single(head_offset, head_data.len() as u64);
+        }
+
+        let head_valid_size = corruption_point
+            .saturating_sub(head_offset)
+            .min(head_data.len() as u64);
+
+        if head_valid_size == 0 {
+            return MultiFragmentResult::single(head_offset, head_data.len() as u64);
+        }
+
+        let head_entropy =
+            crate::statistics::compute_entropy(&head_data[..head_valid_size as usize]);
+
+        let mut fragments = vec![Fragment {
+            offset: head_offset,
+            size: head_valid_size,
+            entropy: head_entropy,
+            huffman_valid: true,
+        }];
+
+        let mut total_size = head_valid_size;
+        let mut current_search_start = head_offset + head_data.len() as u64;
+        let mut overall_score = 1.0f32;
+        let mut is_complete = false;
+
+        let head_rst = self
+            .rst_scanner
+            .scan(&head_data[..head_valid_size as usize]);
+
+        for _ in 0..self.config.max_fragments {
+            let search_end = (current_search_start + self.config.max_gap).min(source.size());
+            let first_cluster =
+                current_search_start.div_ceil(self.config.cluster_size) * self.config.cluster_size;
+
+            let mut best_candidate: Option<(Fragment, f32, bool)> = None;
+            let mut buffer = self.buffer.borrow_mut();
+            let mut cluster_offset = first_cluster;
+
+            while cluster_offset < search_end {
+                let read_size = buffer.len().min((search_end - cluster_offset) as usize);
+                let bytes_read = match source.read_chunk(cluster_offset, &mut buffer[..read_size]) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if bytes_read == 0 {
+                    break;
+                }
+
+                let chunk = &buffer[..bytes_read];
+
+                if let Some(boundary) = crate::statistics::detect_entropy_boundary(
+                    chunk,
+                    self.config.entropy_window,
+                    self.config.entropy_threshold,
+                ) {
+                    let frag_size = boundary as u64;
+                    if frag_size >= self.config.min_fragment_size {
+                        let chunk_entropy = crate::statistics::compute_entropy(&chunk[..boundary]);
+                        let tail_rst = self.rst_scanner.scan(&chunk[..boundary]);
+                        let rst_score = self.rst_scanner.junction_score(&head_rst, &tail_rst);
+
+                        let score = rst_score * 0.8 + 0.2;
+                        if score >= self.config.min_stitch_score {
+                            let candidate = Fragment {
+                                offset: cluster_offset,
+                                size: frag_size,
+                                entropy: chunk_entropy,
+                                huffman_valid: true,
+                            };
+                            let dominated = best_candidate
+                                .as_ref()
+                                .map(|(_, s, _)| score > *s)
+                                .unwrap_or(true);
+                            if dominated {
+                                best_candidate = Some((candidate, score, false));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(eoi_pos) = self.find_eoi(chunk) {
+                    let frag_size = (eoi_pos + 2) as u64;
+                    let chunk_entropy = crate::statistics::compute_entropy(&chunk[..eoi_pos + 2]);
+                    let tail_rst = self.rst_scanner.scan(&chunk[..eoi_pos]);
+                    let rst_score = self.rst_scanner.junction_score(&head_rst, &tail_rst);
+
+                    let score = rst_score * 0.9 + 0.1;
+                    if score >= self.config.min_stitch_score {
+                        let candidate = Fragment {
+                            offset: cluster_offset,
+                            size: frag_size,
+                            entropy: chunk_entropy,
+                            huffman_valid: true,
+                        };
+                        let dominated = best_candidate
+                            .as_ref()
+                            .map(|(_, s, _)| score > *s)
+                            .unwrap_or(true);
+                        if dominated {
+                            best_candidate = Some((candidate, score, true));
+                        }
+                    }
+                }
+
+                cluster_offset += self.config.cluster_size;
+            }
+
+            match best_candidate {
+                Some((fragment, score, found_eoi)) => {
+                    total_size += fragment.size;
+                    overall_score *= score;
+                    current_search_start = fragment.offset + fragment.size;
+                    fragments.push(fragment);
+
+                    if found_eoi {
+                        is_complete = true;
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        MultiFragmentResult {
+            fragments,
+            total_size,
+            overall_score,
+            is_complete,
+        }
+    }
+
+    fn find_eoi(&self, data: &[u8]) -> Option<usize> {
+        (0..data.len().saturating_sub(1)).find(|&i| data[i] == 0xFF && data[i + 1] == 0xD9)
+    }
+}
+
+impl Default for MultiFragmentCarver {
     fn default() -> Self {
         Self::new()
     }
@@ -359,6 +608,7 @@ pub struct SmartCarver {
     jpeg_parser: JpegParser,
     png_validator: PngValidator,
     bgc_carver: BifragmentCarver,
+    multi_fragment_carver: MultiFragmentCarver,
     classifier: ImageClassifier,
     #[allow(dead_code)]
     rst_scanner: RestartMarkerScanner,
@@ -376,11 +626,18 @@ impl SmartCarver {
             min_confidence: config.min_confidence,
             ..Default::default()
         };
+        let mf_config = MultiFragmentConfig {
+            cluster_size: config.cluster_size,
+            max_gap: config.max_gap,
+            min_stitch_score: config.min_confidence,
+            ..Default::default()
+        };
         Self {
             jpeg_validator: JpegValidator::new(),
             jpeg_parser: JpegParser::new(),
             png_validator: PngValidator::new(),
             bgc_carver: BifragmentCarver::with_config(bgc_config),
+            multi_fragment_carver: MultiFragmentCarver::with_config(mf_config),
             classifier: ImageClassifier::new(),
             rst_scanner: RestartMarkerScanner::new(),
             config,
@@ -411,7 +668,9 @@ impl SmartCarver {
 
         if self.config.filter_thumbnails && structure.thumbnail.is_some() {
             result.is_thumbnail = false;
-            result.validation_notes.push(ValidationNote::ContainsExifThumbnail);
+            result
+                .validation_notes
+                .push(ValidationNote::ContainsExifThumbnail);
         }
 
         if self.config.structural_validation {
@@ -424,15 +683,30 @@ impl SmartCarver {
                     offset: corrupt_off,
                     ..
                 } => {
-                    result.validation_notes.push(ValidationNote::CorruptionAt(corrupt_off));
+                    result
+                        .validation_notes
+                        .push(ValidationNote::CorruptionAt(corrupt_off));
                     if self.config.bifragment_carving {
                         result.decision = CarveDecision::AttemptBgc;
-                        if let Some(bgc) = self.bgc_carver.carve_bifragment(data, offset, source) {
+                        let mf_result =
+                            self.multi_fragment_carver
+                                .carve(data, offset, corrupt_off, source);
+                        if mf_result.fragments.len() > 1 {
+                            result.size = mf_result.total_size;
+                            result.multi_fragment_result = Some(mf_result);
+                            result.decision = CarveDecision::Extract;
+                            result.validation_notes.push(ValidationNote::BgcSuccessful);
+                        } else if let Some(bgc) =
+                            self.bgc_carver.carve_bifragment(data, offset, source)
+                        {
                             if bgc.is_fragmented {
                                 result.bgc_result = Some(bgc.clone());
                                 result.size = bgc.total_size();
                                 result.decision = CarveDecision::Extract;
                                 result.validation_notes.push(ValidationNote::BgcSuccessful);
+                            } else {
+                                result.decision = CarveDecision::ExtractPartial;
+                                result.validation_notes.push(ValidationNote::BgcFailed);
                             }
                         } else {
                             result.decision = CarveDecision::ExtractPartial;
@@ -469,7 +743,9 @@ impl SmartCarver {
             }
             PngValidationResult::RecoverableCrcErrors { structure, errors } => {
                 result.size = structure.valid_end_offset;
-                result.validation_notes.push(ValidationNote::CrcErrors(errors.len()));
+                result
+                    .validation_notes
+                    .push(ValidationNote::CrcErrors(errors.len()));
             }
             PngValidationResult::Truncated {
                 last_valid_offset, ..
@@ -483,7 +759,9 @@ impl SmartCarver {
                 ..
             } => {
                 result.decision = CarveDecision::ExtractPartial;
-                result.validation_notes.push(ValidationNote::CorruptionAt(corrupt_off));
+                result
+                    .validation_notes
+                    .push(ValidationNote::CorruptionAt(corrupt_off));
             }
             PngValidationResult::InvalidHeader => {
                 result.decision = CarveDecision::Skip(SkipReason::InvalidStructure);

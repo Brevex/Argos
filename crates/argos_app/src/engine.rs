@@ -54,7 +54,7 @@ pub fn run_scan(
     pb.set_style(
         ProgressStyle::default_bar()
             .template("[{elapsed_precise}] [{bar:50.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            .unwrap()
+            .expect("invalid progress bar template - this is a bug")
             .progress_chars("##-"),
     );
 
@@ -320,6 +320,251 @@ fn worker_thread(
     }
 
     let _ = event_tx.send(ScanEvent::WorkerDone);
+}
+
+// ============================================================================
+// MULTI-PASS SCAN ENGINE
+// ============================================================================
+
+use crate::signature_index::SignatureIndex;
+
+/// Maximum file size to consider (100MB)
+const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// Minimum file size to avoid thumbnails
+const MIN_FILE_SIZE: u64 = 64 * 1024;
+
+/// Multi-pass scan for improved fragment correlation
+///
+/// Pass 1: Collect all signatures (headers/footers)
+/// Pass 2: Match contiguous files (header → footer pairs)
+/// Pass 3: Fragment carving for orphan headers
+pub fn run_multipass_scan(
+    device_path: &str,
+    output_dir: &Path,
+    running: Arc<AtomicBool>,
+) -> EngineResult<()> {
+    let start_time = Instant::now();
+
+    let reader = Reader::new(device_path)?;
+    let device_size = reader.size();
+    drop(reader);
+
+    println!("[MultiPass] Starting multi-pass scan on: {}", device_path);
+    println!(
+        "[MultiPass] Device size: {}",
+        format_size(device_size, BINARY)
+    );
+
+    // ========== PASS 1: Signature Collection ==========
+    println!("\n[Pass 1/3] Collecting signatures...");
+
+    let mut index = SignatureIndex::with_capacity(device_size);
+    let pass1_start = Instant::now();
+
+    {
+        let pb = ProgressBar::new(device_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[Pass 1] [{bar:40.green/black}] {bytes}/{total_bytes}")
+                .expect("invalid template")
+                .progress_chars("=>-"),
+        );
+
+        collect_signatures(device_path, &mut index, &pb, &running)?;
+        pb.finish_and_clear();
+    }
+
+    if !running.load(Ordering::SeqCst) {
+        println!("\n⚠️  Scan cancelled during Pass 1");
+        return Ok(());
+    }
+
+    index.finalize();
+    let stats = index.stats();
+    println!(
+        "[Pass 1] Complete in {:.1}s - {}",
+        pass1_start.elapsed().as_secs_f64(),
+        stats
+    );
+
+    // ========== PASS 2: Contiguous Matching ==========
+    println!("\n[Pass 2/3] Matching contiguous files...");
+    let pass2_start = Instant::now();
+
+    let jpeg_candidates: Vec<_> = index.jpeg_candidates(MAX_FILE_SIZE).collect();
+    let png_candidates: Vec<_> = index.png_candidates(MAX_FILE_SIZE).collect();
+    let total_candidates = jpeg_candidates.len() + png_candidates.len();
+
+    println!(
+        "[Pass 2] Found {} potential contiguous files",
+        total_candidates
+    );
+
+    let mut recovery_manager = crate::recovery::RecoveryManager::new(device_path, output_dir)?;
+    let mut recovered = 0u64;
+    let mut skipped = 0u64;
+
+    {
+        let pb = ProgressBar::new(total_candidates as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[Pass 2] [{bar:40.yellow/black}] {pos}/{len} candidates")
+                .expect("invalid template")
+                .progress_chars("=>-"),
+        );
+
+        for candidate in jpeg_candidates.iter().chain(png_candidates.iter()) {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let size = candidate.estimated_size();
+            if size < MIN_FILE_SIZE || size > MAX_FILE_SIZE {
+                skipped += 1;
+                pb.inc(1);
+                continue;
+            }
+
+            // Send as events to recovery manager (reusing existing infrastructure)
+            recovery_manager.process_event(&ScanEvent::HeaderFound {
+                offset: candidate.header_offset,
+                ftype: candidate.file_type,
+            });
+            recovery_manager.process_event(&ScanEvent::FooterFound {
+                offset: candidate.footer_offset,
+                ftype: candidate.file_type,
+            });
+
+            recovered += 1;
+            pb.inc(1);
+        }
+
+        pb.finish_and_clear();
+    }
+
+    println!(
+        "[Pass 2] Complete in {:.1}s - {} candidates processed, {} skipped",
+        pass2_start.elapsed().as_secs_f64(),
+        recovered,
+        skipped
+    );
+
+    // ========== PASS 3: Fragment Carving (Orphan Headers) ==========
+    println!("\n[Pass 3/3] Fragment carving for orphan headers...");
+    let pass3_start = Instant::now();
+
+    let jpeg_orphans = index.orphan_headers(FileType::Jpeg, MAX_FILE_SIZE);
+    let png_orphans = index.orphan_headers(FileType::Png, MAX_FILE_SIZE);
+    let total_orphans = jpeg_orphans.len() + png_orphans.len();
+
+    println!(
+        "[Pass 3] Found {} orphan headers for fragment carving",
+        total_orphans
+    );
+
+    // TODO: Implement fragment carving for orphans
+    // This will be integrated with SmartCarver.analyze_jpeg/analyze_png
+    // For now, we just count them
+
+    println!(
+        "[Pass 3] Complete in {:.1}s - {} orphans identified (carving pending)",
+        pass3_start.elapsed().as_secs_f64(),
+        total_orphans
+    );
+
+    // ========== Summary ==========
+    let elapsed = start_time.elapsed();
+
+    println!("\n╔════════════════════════════════════════╗");
+    println!("║     === Multi-Pass Scan Complete ===   ║");
+    println!("╠════════════════════════════════════════╣");
+    println!(
+        "║ Total Time:         {:>18} ║",
+        format!("{:.1}s", elapsed.as_secs_f64())
+    );
+    println!("║ JPEG Headers:       {:>18} ║", stats.jpeg_headers);
+    println!("║ JPEG Footers:       {:>18} ║", stats.jpeg_footers);
+    println!("║ PNG Headers:        {:>18} ║", stats.png_headers);
+    println!("║ PNG Footers:        {:>18} ║", stats.png_footers);
+    println!("║ Contiguous Files:   {:>18} ║", recovered);
+    println!("║ Orphan Headers:     {:>18} ║", total_orphans);
+    println!(
+        "║ Files Recovered:    {:>18} ║",
+        recovery_manager.files_recovered()
+    );
+    println!("╚════════════════════════════════════════╝");
+
+    Ok(())
+}
+
+/// Pass 1: Collect all signatures from device
+fn collect_signatures(
+    device_path: &str,
+    index: &mut SignatureIndex,
+    pb: &ProgressBar,
+    running: &AtomicBool,
+) -> EngineResult<()> {
+    let mut reader = Reader::new(device_path)?;
+    let total_size = reader.size();
+
+    let jpeg_scanner = SignatureScanner::jpeg();
+    let png_scanner = SignatureScanner::png();
+
+    let mut buffer = vec![0u8; CHUNK_SIZE];
+    let mut offset: u64 = 0;
+
+    while offset < total_size {
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let bytes_read = reader.read_chunk(offset, &mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let chunk = &buffer[..bytes_read];
+
+        // Scan for JPEG signatures with early validation
+        jpeg_scanner.scan_headers_callback(chunk, |rel_offset| {
+            // Quick validate before adding - eliminates false positives
+            if rel_offset + 4 <= bytes_read {
+                let header_data = &chunk[rel_offset..];
+                if argos_core::jpeg::quick_validate_header(header_data) {
+                    index.add_header(offset + rel_offset as u64, FileType::Jpeg);
+                }
+            }
+        });
+        jpeg_scanner.scan_footers_callback(chunk, |rel_offset| {
+            index.add_footer(offset + rel_offset as u64, FileType::Jpeg);
+        });
+
+        // Scan for PNG signatures with early validation
+        png_scanner.scan_headers_callback(chunk, |rel_offset| {
+            // Quick validate before adding - eliminates false positives
+            if rel_offset + 16 <= bytes_read {
+                let header_data = &chunk[rel_offset..];
+                if argos_core::png::quick_validate_header(header_data) {
+                    index.add_header(offset + rel_offset as u64, FileType::Png);
+                }
+            }
+        });
+        png_scanner.scan_footers_callback(chunk, |rel_offset| {
+            index.add_footer(offset + rel_offset as u64, FileType::Png);
+        });
+
+        // Advance with overlap to catch signatures at boundaries
+        let advance = if bytes_read >= OVERLAP {
+            bytes_read - OVERLAP
+        } else {
+            bytes_read
+        };
+
+        offset += advance as u64;
+        pb.set_position(offset.min(total_size));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

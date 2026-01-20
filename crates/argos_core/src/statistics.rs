@@ -119,12 +119,11 @@ impl ImageClassifier {
         if stats.horizontal_discontinuity > self.config.max_discontinuity {
             return ImageClassification::Corrupted;
         }
-        if stats.entropy < self.config.min_photo_entropy
-            || stats.color_diversity < self.config.min_color_diversity
+        if (stats.entropy < self.config.min_photo_entropy
+            || stats.color_diversity < self.config.min_color_diversity)
+            && stats.kurtosis < self.config.min_photo_kurtosis
         {
-            if stats.kurtosis < self.config.min_photo_kurtosis {
-                return ImageClassification::ArtificialGraphic;
-            }
+            return ImageClassification::ArtificialGraphic;
         }
         if stats.local_entropy_variance < 0.5 && stats.entropy < 6.0 {
             return ImageClassification::ArtificialGraphic;
@@ -297,7 +296,7 @@ fn compute_horizontal_discontinuity(data: &[u8], width: usize, height: usize) ->
 
 fn compute_color_diversity(data: &[u8], channels: usize) -> (f64, usize) {
     let mut color_seen = [0u64; 512];
-    
+
     let total_pixels = data.len() / channels;
     let sample_step = if total_pixels > 100000 {
         total_pixels / 100000
@@ -314,9 +313,35 @@ fn compute_color_diversity(data: &[u8], channels: usize) -> (f64, usize) {
             color_seen[index / 64] |= 1 << (index % 64);
         }
     }
-    
+
     let count: usize = color_seen.iter().map(|x| x.count_ones() as usize).sum();
     (count as f64 / 32768.0, count)
+}
+
+pub fn compute_entropy_delta(data: &[u8], window_size: usize) -> Vec<f64> {
+    if data.len() < window_size * 2 {
+        return Vec::new();
+    }
+    let mut deltas = Vec::with_capacity(data.len() / window_size);
+    let mut prev_entropy = compute_entropy(&data[..window_size]);
+    let mut offset = window_size;
+    while offset + window_size <= data.len() {
+        let current_entropy = compute_entropy(&data[offset..offset + window_size]);
+        deltas.push(prev_entropy - current_entropy);
+        prev_entropy = current_entropy;
+        offset += window_size;
+    }
+    deltas
+}
+
+pub fn detect_entropy_boundary(data: &[u8], window_size: usize, threshold: f64) -> Option<usize> {
+    let deltas = compute_entropy_delta(data, window_size);
+    for (i, delta) in deltas.iter().enumerate() {
+        if *delta > threshold {
+            return Some((i + 1) * window_size);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

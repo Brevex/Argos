@@ -5,12 +5,18 @@ pub mod png;
 pub mod scanners;
 pub mod statistics;
 
-pub use carving::{CarveDecision, SkipReason, SmartCarveResult, SmartCarver, SmartCarverConfig, ValidationNote};
+pub use carving::{
+    CarveDecision, Fragment, MultiFragmentCarver, MultiFragmentConfig, MultiFragmentResult,
+    SkipReason, SmartCarveResult, SmartCarver, SmartCarverConfig, ValidationNote,
+};
 pub use io::{DiskReader, MmapReader, Reader};
 pub use jpeg::{HuffmanDecoder, JpegParser, JpegValidator, RestartMarkerScanner, ValidationResult};
-pub use png::{PngParser, PngValidationResult, PngValidator};
+pub use png::{PngFragmentCarver, PngParser, PngValidationResult, PngValidator};
 pub use scanners::{JpegScanner, PngScanner, SignatureScanner};
-pub use statistics::{ImageClassification, ImageClassifier, ImageStatistics};
+pub use statistics::{
+    compute_entropy_delta, detect_entropy_boundary, ImageClassification, ImageClassifier,
+    ImageStatistics,
+};
 
 use thiserror::Error;
 

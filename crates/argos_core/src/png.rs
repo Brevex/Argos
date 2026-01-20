@@ -14,6 +14,40 @@ pub const SRGB: [u8; 4] = *b"sRGB";
 pub const ICCP: [u8; 4] = *b"iCCP";
 pub const MIN_PNG_SIZE: usize = 8 + 25 + 12;
 
+/// Quick validation of PNG header (checks IHDR chunk after signature)
+///
+/// After the 8-byte PNG signature, valid PNGs must have an IHDR chunk:
+/// - 4 bytes length (must be 13 = 0x0000000D)
+/// - 4 bytes type (must be "IHDR")
+///
+/// # Arguments
+/// * `data` - Data starting at PNG signature (minimum 16 bytes needed)
+///
+/// # Returns
+/// * `true` if header looks valid
+/// * `false` if definitely not a valid PNG
+#[inline]
+pub fn quick_validate_header(data: &[u8]) -> bool {
+    // Need: signature (8) + IHDR length (4) + IHDR type (4) = 16 bytes
+    if data.len() < 16 {
+        return false;
+    }
+
+    // Check PNG signature
+    if &data[0..8] != PNG_SIGNATURE {
+        return false;
+    }
+
+    // IHDR length must be 13 (big-endian)
+    let ihdr_length = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    if ihdr_length != 13 {
+        return false;
+    }
+
+    // Chunk type must be "IHDR"
+    &data[12..16] == IHDR
+}
+
 const CRC_TABLE: [u32; 256] = generate_crc_table();
 
 const fn generate_crc_table() -> [u32; 256] {
@@ -476,6 +510,237 @@ impl Default for PngValidator {
     }
 }
 
+use crate::carving::{Fragment, MultiFragmentResult};
+use crate::BlockSource;
+
+pub struct PngFragmentCarver {
+    cluster_size: u64,
+    max_gap: u64,
+    max_fragments: usize,
+}
+
+impl PngFragmentCarver {
+    pub fn new() -> Self {
+        Self {
+            cluster_size: 4096,
+            max_gap: 32 * 1024 * 1024,
+            max_fragments: 16,
+        }
+    }
+
+    pub fn carve<S: BlockSource>(
+        &self,
+        head_data: &[u8],
+        head_offset: u64,
+        corruption_point: u64,
+        source: &mut S,
+    ) -> MultiFragmentResult {
+        let head_valid_size = corruption_point - head_offset;
+        let mut fragments = vec![Fragment {
+            offset: head_offset,
+            size: head_valid_size,
+            entropy: 0.0,
+            huffman_valid: true,
+        }];
+
+        let mut total_size = head_valid_size;
+        let mut current_search_start = head_offset + head_data.len() as u64;
+        let mut overall_score = 1.0f32;
+        let mut is_complete = false;
+
+        for _ in 0..self.max_fragments {
+            let search_end = (current_search_start + self.max_gap).min(source.size());
+            let first_cluster =
+                current_search_start.div_ceil(self.cluster_size) * self.cluster_size;
+
+            let mut buffer = vec![0u8; 64 * 1024];
+            let mut cluster_offset = first_cluster;
+            let mut best_candidate: Option<(Fragment, bool)> = None;
+
+            while cluster_offset < search_end {
+                let read_size = buffer.len().min((search_end - cluster_offset) as usize);
+                let bytes_read = match source.read_chunk(cluster_offset, &mut buffer[..read_size]) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if bytes_read == 0 {
+                    break;
+                }
+
+                let chunk = &buffer[..bytes_read];
+
+                if let Some((chunk_start, chunk_len, is_iend)) = self.find_valid_chunk(chunk) {
+                    let frag_size = chunk_start as u64 + chunk_len + 12;
+                    let candidate = Fragment {
+                        offset: cluster_offset,
+                        size: frag_size,
+                        entropy: 0.0,
+                        huffman_valid: true,
+                    };
+                    best_candidate = Some((candidate, is_iend));
+                    break;
+                }
+
+                cluster_offset += self.cluster_size;
+            }
+
+            match best_candidate {
+                Some((fragment, found_iend)) => {
+                    total_size += fragment.size;
+                    overall_score *= 0.9;
+                    current_search_start = fragment.offset + fragment.size;
+                    fragments.push(fragment);
+
+                    if found_iend {
+                        is_complete = true;
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        MultiFragmentResult {
+            fragments,
+            total_size,
+            overall_score,
+            is_complete,
+        }
+    }
+
+    fn find_valid_chunk(&self, data: &[u8]) -> Option<(usize, u64, bool)> {
+        for i in 0..data.len().saturating_sub(12) {
+            if i + 8 > data.len() {
+                break;
+            }
+            let length = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+            if length > 0x7FFFFFFF {
+                continue;
+            }
+            let chunk_type = &data[i + 4..i + 8];
+            if !self.is_valid_chunk_type(chunk_type) {
+                continue;
+            }
+            let total_chunk_size = 12 + length as usize;
+            if i + total_chunk_size <= data.len() {
+                let is_iend = chunk_type == b"IEND";
+                return Some((i, length as u64, is_iend));
+            }
+        }
+        None
+    }
+
+    fn is_valid_chunk_type(&self, chunk_type: &[u8]) -> bool {
+        if chunk_type.len() != 4 {
+            return false;
+        }
+        chunk_type.iter().all(|&b| b.is_ascii_alphabetic())
+    }
+}
+
+/// IDAT Stream Recovery
+///
+/// Attempts to decompress PNG IDAT data even when corrupted,
+/// recovering as many scanlines as possible.
+pub struct IdatRecovery {
+    /// Decompressed image data
+    pub decompressed: Vec<u8>,
+    /// Number of complete scanlines recovered
+    pub scanlines_recovered: u32,
+    /// Whether decompression completed successfully
+    pub complete: bool,
+    /// Error message if decompression failed
+    pub error: Option<String>,
+}
+
+impl IdatRecovery {
+    /// Attempt to decompress IDAT data
+    ///
+    /// Will decompress as much as possible even if the stream is corrupted.
+    ///
+    /// # Arguments
+    /// * `idat_data` - Concatenated IDAT chunk data (without chunk headers)
+    /// * `ihdr` - IHDR data for calculating scanline size
+    pub fn recover(idat_data: &[u8], ihdr: &IhdrData) -> Self {
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+
+        let mut result = Self {
+            decompressed: Vec::new(),
+            scanlines_recovered: 0,
+            complete: false,
+            error: None,
+        };
+
+        // Calculate bytes per scanline (including filter byte)
+        let bytes_per_pixel = ihdr.bytes_per_pixel();
+        let scanline_bytes = 1 + (ihdr.width as usize * bytes_per_pixel);
+
+        // Try to decompress
+        let mut decoder = ZlibDecoder::new(idat_data);
+        let mut buffer = vec![0u8; scanline_bytes * 16]; // Read in chunks
+
+        loop {
+            match decoder.read(&mut buffer) {
+                Ok(0) => {
+                    // Successful end of stream
+                    result.complete = true;
+                    break;
+                }
+                Ok(n) => {
+                    result.decompressed.extend_from_slice(&buffer[..n]);
+                }
+                Err(e) => {
+                    // Decompression error - save what we have
+                    result.error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+
+        // Calculate how many complete scanlines we got
+        if scanline_bytes > 0 {
+            result.scanlines_recovered = (result.decompressed.len() / scanline_bytes) as u32;
+        }
+
+        result
+    }
+
+    /// Check if we recovered enough data to create a partial image
+    pub fn is_recoverable(&self) -> bool {
+        self.scanlines_recovered >= 10 // At least 10 scanlines
+    }
+
+    /// Calculate recovery percentage
+    pub fn recovery_percentage(&self, total_height: u32) -> f32 {
+        if total_height == 0 {
+            return 0.0;
+        }
+        (self.scanlines_recovered as f32 / total_height as f32) * 100.0
+    }
+}
+
+impl IhdrData {
+    /// Calculate bytes per pixel based on color type and bit depth
+    pub fn bytes_per_pixel(&self) -> usize {
+        let channels = match self.color_type {
+            0 => 1, // Grayscale
+            2 => 3, // RGB
+            3 => 1, // Indexed
+            4 => 2, // Grayscale + Alpha
+            6 => 4, // RGBA
+            _ => 1,
+        };
+        ((self.bit_depth as usize * channels) + 7) / 8
+    }
+}
+
+impl Default for PngFragmentCarver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,5 +832,31 @@ mod tests {
             ..valid
         }
         .is_valid());
+    }
+
+    #[test]
+    fn test_quick_validate_header_valid() {
+        // Valid PNG with IHDR length=13
+        let mut valid = Vec::new();
+        valid.extend_from_slice(&PNG_SIGNATURE);
+        valid.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D]); // length = 13
+        valid.extend_from_slice(&IHDR);
+        assert!(quick_validate_header(&valid));
+    }
+
+    #[test]
+    fn test_quick_validate_header_invalid() {
+        // Wrong signature
+        assert!(!quick_validate_header(&[0x00; 16]));
+
+        // Wrong IHDR length
+        let mut wrong_len = Vec::new();
+        wrong_len.extend_from_slice(&PNG_SIGNATURE);
+        wrong_len.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]); // wrong length
+        wrong_len.extend_from_slice(&IHDR);
+        assert!(!quick_validate_header(&wrong_len));
+
+        // Too short
+        assert!(!quick_validate_header(&PNG_SIGNATURE));
     }
 }

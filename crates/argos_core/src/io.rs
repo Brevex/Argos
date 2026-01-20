@@ -59,7 +59,7 @@ impl MmapReader {
         let mmap =
             unsafe { Mmap::map(&file) }.map_err(|e| CoreError::Io(std::io::Error::other(e)))?;
 
-        if mmap.len() == 0 {
+        if mmap.is_empty() {
             return Err(CoreError::InvalidFormat(
                 "mmap returned empty mapping (block device not supported)".into(),
             ));

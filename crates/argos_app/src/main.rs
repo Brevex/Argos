@@ -1,6 +1,7 @@
 mod device_discovery;
 mod engine;
 mod recovery;
+mod signature_index;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -14,9 +15,15 @@ use device_discovery::{discover_disks, DiskInfo};
 #[command(name = "argos")]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Start scanning for images
     #[arg(short, long, default_value_t = false)]
     scan: bool,
 
+    /// Use multi-pass scan engine (better for fragmented files)
+    #[arg(short, long, default_value_t = false)]
+    multipass: bool,
+
+    /// Verbose output
     #[arg(short, long, default_value_t = false)]
     verbose: bool,
 }
@@ -78,7 +85,13 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(output_path)?;
     println!();
-    engine::run_scan(&selected_disk.path, output_path, running)?;
+
+    if args.multipass {
+        println!("🔬 Using multi-pass scan engine\n");
+        engine::run_multipass_scan(&selected_disk.path, output_path, running)?;
+    } else {
+        engine::run_scan(&selected_disk.path, output_path, running)?;
+    }
 
     Ok(())
 }
