@@ -36,48 +36,33 @@ pub const fn restart_marker_index(marker: u8) -> Option<u8> {
     }
 }
 
-/// Quick validation of JPEG header (checks first marker after SOI)
-///
-/// After SOI (0xFF 0xD8), valid JPEGs have a marker like APP0, DQT, DHT, SOF, etc.
-/// This eliminates false positives from random 0xFF 0xD8 sequences.
-///
-/// # Arguments
-/// * `data` - Data starting at the SOI marker (minimum 4 bytes needed)
-///
-/// # Returns
-/// * `true` if header looks valid
-/// * `false` if definitely not a valid JPEG
 #[inline]
 pub fn quick_validate_header(data: &[u8]) -> bool {
-    // Need at least: SOI (2) + marker prefix (2) = 4 bytes
     if data.len() < 4 {
         return false;
     }
 
-    // Check SOI
     if data[0] != 0xFF || data[1] != 0xD8 {
         return false;
     }
 
-    // Next byte must be 0xFF (marker prefix)
     if data[2] != 0xFF {
         return false;
     }
 
-    // Check if the marker is valid for the start of a JPEG
     let marker = data[3];
     matches!(marker,
-        // APP markers (APP0-APP15) - most common
+
         0xE0..=0xEF |
-        // Quantization table
+
         0xDB |
-        // Huffman table
+
         0xC4 |
-        // SOF markers (baseline, progressive, etc.)
+
         0xC0..=0xC3 | 0xC5..=0xCF |
-        // Define restart interval
+
         0xDD |
-        // Comment
+
         0xFE
     )
 }
@@ -167,7 +152,7 @@ pub struct JpegStructure {
     pub thumbnail: Option<ThumbnailInfo>,
     pub corruption_point: Option<u64>,
     pub valid_end_offset: u64,
-    /// Number of corrupted segments that were skipped during tolerant parsing
+
     pub skipped_segments: u32,
 }
 
@@ -308,11 +293,6 @@ impl JpegParser {
         Ok(structure)
     }
 
-    /// Tolerant parsing that attempts to skip corrupted segments
-    ///
-    /// When a corrupted segment is encountered (invalid length), this parser
-    /// will scan forward looking for the next valid marker instead of stopping.
-    /// This allows recovering images with corrupted APP/COM segments.
     pub fn parse_tolerant(&self, data: &[u8]) -> Result<JpegStructure> {
         if data.len() < 4 {
             return Err(CoreError::InvalidFormat("Data too short for JPEG".into()));
@@ -334,7 +314,7 @@ impl JpegParser {
                 pos += 1;
                 continue;
             }
-            // Skip padding FFs
+
             while pos < data.len() - 1 && data[pos + 1] == 0xFF {
                 pos += 1;
             }
@@ -351,7 +331,6 @@ impl JpegParser {
             let marker_type = MarkerType::from_byte(marker_byte);
             let marker_offset = pos as u64;
 
-            // Standalone markers (no length field)
             if is_standalone_marker(marker_byte) {
                 structure.markers.push(JpegMarker {
                     marker_type,
@@ -366,7 +345,6 @@ impl JpegParser {
                 continue;
             }
 
-            // Check if we can read the length
             if pos + 3 >= data.len() {
                 structure.corruption_point = Some(pos as u64);
                 break;
@@ -374,28 +352,25 @@ impl JpegParser {
 
             let length = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
 
-            // Check if length is valid
             if length < 2 || pos + 2 + length as usize > data.len() {
-                // TOLERANT: Try to find next valid marker instead of stopping
                 structure.skipped_segments += 1;
                 if structure.corruption_point.is_none() {
                     structure.corruption_point = Some(pos as u64);
                 }
 
-                // Scan forward for next 0xFF followed by valid marker
                 pos += 2;
                 while pos < data.len() - 1 {
                     if data[pos] == 0xFF && data[pos + 1] != 0x00 && data[pos + 1] != 0xFF {
                         let next_marker = data[pos + 1];
-                        // Check if this looks like a valid marker to resume at
+
                         if matches!(next_marker,
-                            0xC0..=0xCF | // SOF markers
-                            0xD0..=0xD9 | // RST, SOI, EOI
-                            0xDA..=0xDF | // SOS, DQT, DHT, etc
-                            0xE0..=0xEF | // APP markers
-                            0xFE           // COM
+                            0xC0..=0xCF |
+                            0xD0..=0xD9 |
+                            0xDA..=0xDF |
+                            0xE0..=0xEF |
+                            0xFE
                         ) {
-                            break; // Found a likely marker, resume parsing
+                            break;
                         }
                     }
                     pos += 1;
@@ -409,7 +384,6 @@ impl JpegParser {
                 length,
             });
 
-            // Handle specific markers
             match marker_type {
                 MarkerType::Sof(_) => {
                     if pos + 9 <= data.len() {
@@ -422,7 +396,7 @@ impl JpegParser {
                 }
                 MarkerType::Sos => {
                     structure.sos_offset = Some(marker_offset);
-                    // After SOS, scan for EOI or RST markers only
+
                     pos += 2 + length as usize;
                     while pos < data.len() - 1 {
                         if data[pos] == 0xFF && data[pos + 1] != 0x00 {
@@ -743,10 +717,6 @@ impl HuffmanTable {
     }
 }
 
-/// Bit-level reader for JPEG entropy-coded data
-///
-/// Handles byte stuffing (0xFF 0x00 -> 0xFF) and provides
-/// methods to read individual bits or groups of bits.
 pub struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -924,20 +894,6 @@ impl HuffmanDecoder {
         1.0 - (avg_diff / 100.0).min(1.0)
     }
 
-    /// Extract DC coefficients from entropy-coded data
-    ///
-    /// This performs real Huffman decoding to extract the DC coefficients
-    /// from each MCU (Minimum Coded Unit). For fragment carving, we compare
-    /// the DC values at the end of one fragment with those at the start of
-    /// another to validate the stitch point.
-    ///
-    /// # Arguments
-    /// * `entropy_data` - The raw entropy-coded data (after SOS header)
-    /// * `components` - Number of color components (1 for grayscale, 3 for YCbCr)
-    /// * `max_mcus` - Maximum number of MCUs to decode
-    ///
-    /// # Returns
-    /// Vector of DC coefficients for the Y (luminance) component
     pub fn extract_dc_coefficients(
         &mut self,
         entropy_data: &[u8],
@@ -947,13 +903,11 @@ impl HuffmanDecoder {
         let mut dc_values = Vec::with_capacity(max_mcus);
         let mut reader = BitReader::new(entropy_data);
 
-        // Default to table 0 for DC
         let dc_table = match &self.dc_tables[0] {
             Some(t) => t,
             None => return dc_values,
         };
 
-        // Reset DC predictors
         self.dc_pred = [0; 4];
 
         for _ in 0..max_mcus {
@@ -961,9 +915,7 @@ impl HuffmanDecoder {
                 break;
             }
 
-            // For each component in the MCU
             for comp_idx in 0..(components as usize).min(4) {
-                // Decode DC coefficient
                 let dc_size = match reader.decode_huffman(dc_table) {
                     Some(s) => s,
                     None => break,
@@ -974,17 +926,12 @@ impl HuffmanDecoder {
                     None => break,
                 };
 
-                // Apply DC prediction
                 self.dc_pred[comp_idx] = self.dc_pred[comp_idx].wrapping_add(dc_diff);
 
-                // Store Y component DC values (component 0)
                 if comp_idx == 0 {
                     dc_values.push(self.dc_pred[0]);
                 }
 
-                // Skip AC coefficients (simplified: just skip to next DC)
-                // In a full decoder, we would decode all 63 AC coefficients
-                // For DC continuity validation, we only need the DC values
                 if let Some(ac_table) = &self.ac_tables[0] {
                     let mut ac_count = 0;
                     while ac_count < 63 {
@@ -994,9 +941,9 @@ impl HuffmanDecoder {
 
                             if size == 0 {
                                 if run == 0 {
-                                    break; // EOB - End of Block
+                                    break;
                                 } else if run == 0x0F {
-                                    ac_count += 16; // ZRL - skip 16 zeros
+                                    ac_count += 16;
                                 }
                             } else {
                                 ac_count += run as usize + 1;
@@ -1013,14 +960,9 @@ impl HuffmanDecoder {
         dc_values
     }
 
-    /// Validate a stitch point between two fragments using DC continuity
-    ///
-    /// Returns a score from 0.0 to 1.0, where higher means better match.
     pub fn validate_stitch(&mut self, head_data: &[u8], tail_data: &[u8], components: u8) -> f32 {
-        // Extract DC values from the end of head fragment
         let head_dc = self.extract_dc_coefficients(head_data, components, 64);
 
-        // Reset predictors and extract from tail
         self.reset_dc_predictors();
         let tail_dc = self.extract_dc_coefficients(tail_data, components, 64);
 
@@ -1099,7 +1041,6 @@ impl RestartMarkerScanner {
         head_markers: &[RestartMarkerInfo],
         tail_markers: &[RestartMarkerInfo],
     ) -> f32 {
-        // Use pattern matching instead of unwrap - no panic possible
         let (Some(last_head), Some(first_tail)) = (head_markers.last(), tail_markers.first())
         else {
             return 0.5;
@@ -1199,31 +1140,24 @@ mod tests {
 
     #[test]
     fn test_quick_validate_header_valid() {
-        // Valid JPEG starting with APP0 (JFIF)
         let valid = [0xFF, 0xD8, 0xFF, 0xE0];
         assert!(quick_validate_header(&valid));
 
-        // Valid JPEG starting with APP1 (EXIF)
         let exif = [0xFF, 0xD8, 0xFF, 0xE1];
         assert!(quick_validate_header(&exif));
 
-        // Valid JPEG starting with DQT
         let dqt = [0xFF, 0xD8, 0xFF, 0xDB];
         assert!(quick_validate_header(&dqt));
     }
 
     #[test]
     fn test_quick_validate_header_invalid() {
-        // Not a JPEG at all
         assert!(!quick_validate_header(&[0x00, 0x00, 0x00, 0x00]));
 
-        // SOI but invalid marker after
         assert!(!quick_validate_header(&[0xFF, 0xD8, 0xFF, 0x00]));
 
-        // SOI but no 0xFF marker prefix
         assert!(!quick_validate_header(&[0xFF, 0xD8, 0x00, 0xE0]));
 
-        // Too short
         assert!(!quick_validate_header(&[0xFF, 0xD8]));
     }
 }

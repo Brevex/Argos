@@ -15,15 +15,12 @@ use device_discovery::{discover_disks, DiskInfo};
 #[command(name = "argos")]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Start scanning for images
     #[arg(short, long, default_value_t = false)]
     scan: bool,
 
-    /// Use multi-pass scan engine (better for fragmented files)
     #[arg(short, long, default_value_t = false)]
     multipass: bool,
 
-    /// Verbose output
     #[arg(short, long, default_value_t = false)]
     verbose: bool,
 }

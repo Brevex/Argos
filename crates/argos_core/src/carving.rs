@@ -244,13 +244,12 @@ impl SmartCarveResult {
     }
 }
 
-/// Buffer size for reading chunks during fragment search
 const CARVE_BUFFER_SIZE: usize = 64 * 1024;
 
 pub struct BifragmentCarver {
     config: BgcConfig,
     validator: JpegValidator,
-    /// Reusable buffer to avoid allocations in hot path
+
     buffer: std::cell::RefCell<Vec<u8>>,
 }
 
@@ -428,7 +427,7 @@ pub struct MultiFragmentCarver {
     #[allow(dead_code)]
     validator: JpegValidator,
     rst_scanner: RestartMarkerScanner,
-    /// Reusable buffer to avoid allocations in hot path
+
     buffer: std::cell::RefCell<Vec<u8>>,
 }
 

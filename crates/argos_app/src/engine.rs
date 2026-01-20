@@ -13,7 +13,7 @@ use crate::recovery::RecoveryManager;
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const OVERLAP: usize = 4 * 1024;
 const DATA_CHANNEL_CAPACITY: usize = 10;
-const RECYCLE_CHANNEL_CAPACITY: usize = DATA_CHANNEL_CAPACITY + 2;
+
 const EVENT_CHANNEL_CAPACITY: usize = 1000;
 
 #[derive(Debug, Clone)]
@@ -61,7 +61,7 @@ pub fn run_scan(
     let (data_tx, data_rx): (Sender<DataChunk>, Receiver<DataChunk>) =
         bounded(DATA_CHANNEL_CAPACITY);
     let (recycle_tx, recycle_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
-        bounded(RECYCLE_CHANNEL_CAPACITY);
+        crossbeam_channel::unbounded();
     let (event_tx, event_rx): (Sender<ScanEvent>, Receiver<ScanEvent>) =
         bounded(EVENT_CHANNEL_CAPACITY);
     let device_path_owned = device_path.to_string();
@@ -322,22 +322,12 @@ fn worker_thread(
     let _ = event_tx.send(ScanEvent::WorkerDone);
 }
 
-// ============================================================================
-// MULTI-PASS SCAN ENGINE
-// ============================================================================
-
 use crate::signature_index::SignatureIndex;
 
-/// Maximum file size to consider (100MB)
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
-/// Minimum file size to avoid thumbnails
+
 const MIN_FILE_SIZE: u64 = 64 * 1024;
 
-/// Multi-pass scan for improved fragment correlation
-///
-/// Pass 1: Collect all signatures (headers/footers)
-/// Pass 2: Match contiguous files (header → footer pairs)
-/// Pass 3: Fragment carving for orphan headers
 pub fn run_multipass_scan(
     device_path: &str,
     output_dir: &Path,
@@ -355,7 +345,6 @@ pub fn run_multipass_scan(
         format_size(device_size, BINARY)
     );
 
-    // ========== PASS 1: Signature Collection ==========
     println!("\n[Pass 1/3] Collecting signatures...");
 
     let mut index = SignatureIndex::with_capacity(device_size);
@@ -387,7 +376,6 @@ pub fn run_multipass_scan(
         stats
     );
 
-    // ========== PASS 2: Contiguous Matching ==========
     println!("\n[Pass 2/3] Matching contiguous files...");
     let pass2_start = Instant::now();
 
@@ -425,7 +413,6 @@ pub fn run_multipass_scan(
                 continue;
             }
 
-            // Send as events to recovery manager (reusing existing infrastructure)
             recovery_manager.process_event(&ScanEvent::HeaderFound {
                 offset: candidate.header_offset,
                 ftype: candidate.file_type,
@@ -449,7 +436,6 @@ pub fn run_multipass_scan(
         skipped
     );
 
-    // ========== PASS 3: Fragment Carving (Orphan Headers) ==========
     println!("\n[Pass 3/3] Fragment carving for orphan headers...");
     let pass3_start = Instant::now();
 
@@ -462,17 +448,12 @@ pub fn run_multipass_scan(
         total_orphans
     );
 
-    // TODO: Implement fragment carving for orphans
-    // This will be integrated with SmartCarver.analyze_jpeg/analyze_png
-    // For now, we just count them
-
     println!(
         "[Pass 3] Complete in {:.1}s - {} orphans identified (carving pending)",
         pass3_start.elapsed().as_secs_f64(),
         total_orphans
     );
 
-    // ========== Summary ==========
     let elapsed = start_time.elapsed();
 
     println!("\n╔════════════════════════════════════════╗");
@@ -497,7 +478,6 @@ pub fn run_multipass_scan(
     Ok(())
 }
 
-/// Pass 1: Collect all signatures from device
 fn collect_signatures(
     device_path: &str,
     index: &mut SignatureIndex,
@@ -525,9 +505,7 @@ fn collect_signatures(
 
         let chunk = &buffer[..bytes_read];
 
-        // Scan for JPEG signatures with early validation
         jpeg_scanner.scan_headers_callback(chunk, |rel_offset| {
-            // Quick validate before adding - eliminates false positives
             if rel_offset + 4 <= bytes_read {
                 let header_data = &chunk[rel_offset..];
                 if argos_core::jpeg::quick_validate_header(header_data) {
@@ -539,9 +517,7 @@ fn collect_signatures(
             index.add_footer(offset + rel_offset as u64, FileType::Jpeg);
         });
 
-        // Scan for PNG signatures with early validation
         png_scanner.scan_headers_callback(chunk, |rel_offset| {
-            // Quick validate before adding - eliminates false positives
             if rel_offset + 16 <= bytes_read {
                 let header_data = &chunk[rel_offset..];
                 if argos_core::png::quick_validate_header(header_data) {
@@ -553,7 +529,6 @@ fn collect_signatures(
             index.add_footer(offset + rel_offset as u64, FileType::Png);
         });
 
-        // Advance with overlap to catch signatures at boundaries
         let advance = if bytes_read >= OVERLAP {
             bytes_read - OVERLAP
         } else {
@@ -610,5 +585,112 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let result = run_scan(temp_file.path().to_str().unwrap(), temp_dir.path(), running);
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod stress_tests {
+    use crate::engine::{DataChunk, ScanEvent, DATA_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY};
+    use crossbeam_channel::{bounded, Receiver, Sender};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_deadlock_scenario() {
+        let num_workers = 8;
+        let total_chunks = 1000;
+        let running = Arc::new(AtomicBool::new(true));
+
+        let (data_tx, data_rx): (Sender<DataChunk>, Receiver<DataChunk>) =
+            bounded(DATA_CHANNEL_CAPACITY);
+
+        let (recycle_tx, recycle_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+            crossbeam_channel::unbounded();
+
+        let (event_tx, event_rx): (Sender<ScanEvent>, Receiver<ScanEvent>) =
+            bounded(EVENT_CHANNEL_CAPACITY);
+
+        let producer_running = running.clone();
+        let producer_handle = std::thread::spawn(move || {
+            let mut _sent_count = 0;
+            for i in 0..total_chunks {
+                let buffer = match recycle_rx.try_recv() {
+                    Ok(mut buf) => {
+                        buf.resize(1024, 0);
+                        buf
+                    }
+                    Err(_) => vec![0u8; 1024],
+                };
+
+                let chunk = DataChunk {
+                    offset: i as u64 * 1024,
+                    data: Arc::new(buffer),
+                };
+
+                let mut chunk_to_send = chunk;
+                loop {
+                    match data_tx.send_timeout(chunk_to_send, Duration::from_millis(10)) {
+                        Ok(_) => break,
+                        Err(crossbeam_channel::SendTimeoutError::Timeout(returned)) => {
+                            chunk_to_send = returned;
+                            if !producer_running.load(Ordering::SeqCst) {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                _sent_count += 1;
+            }
+        });
+
+        let mut worker_handles = Vec::new();
+        for _ in 0..num_workers {
+            let rx = data_rx.clone();
+            let recycle_tx = recycle_tx.clone();
+            let tx = event_tx.clone();
+
+            worker_handles.push(std::thread::spawn(move || {
+                for chunk in rx {
+                    std::thread::sleep(Duration::from_millis(1));
+
+                    if let Ok(vec) = Arc::try_unwrap(chunk.data) {
+                        let _ = recycle_tx.send(vec);
+                    }
+                }
+                let _ = tx.send(ScanEvent::WorkerDone);
+            }));
+        }
+
+        drop(data_rx);
+        drop(recycle_tx);
+        drop(event_tx);
+
+        let mut workers_done = 0;
+        let start = Instant::now();
+
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(ScanEvent::WorkerDone) => {
+                    workers_done += 1;
+                    if workers_done == num_workers {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if start.elapsed() > Duration::from_secs(10) {
+                        panic!("TEST TIMED OUT due to deadlock!");
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        producer_handle.join().unwrap();
+        for h in worker_handles {
+            h.join().unwrap();
+        }
     }
 }

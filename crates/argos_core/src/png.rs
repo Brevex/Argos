@@ -14,37 +14,21 @@ pub const SRGB: [u8; 4] = *b"sRGB";
 pub const ICCP: [u8; 4] = *b"iCCP";
 pub const MIN_PNG_SIZE: usize = 8 + 25 + 12;
 
-/// Quick validation of PNG header (checks IHDR chunk after signature)
-///
-/// After the 8-byte PNG signature, valid PNGs must have an IHDR chunk:
-/// - 4 bytes length (must be 13 = 0x0000000D)
-/// - 4 bytes type (must be "IHDR")
-///
-/// # Arguments
-/// * `data` - Data starting at PNG signature (minimum 16 bytes needed)
-///
-/// # Returns
-/// * `true` if header looks valid
-/// * `false` if definitely not a valid PNG
 #[inline]
 pub fn quick_validate_header(data: &[u8]) -> bool {
-    // Need: signature (8) + IHDR length (4) + IHDR type (4) = 16 bytes
     if data.len() < 16 {
         return false;
     }
 
-    // Check PNG signature
     if &data[0..8] != PNG_SIGNATURE {
         return false;
     }
 
-    // IHDR length must be 13 (big-endian)
     let ihdr_length = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     if ihdr_length != 13 {
         return false;
     }
 
-    // Chunk type must be "IHDR"
     &data[12..16] == IHDR
 }
 
@@ -638,29 +622,17 @@ impl PngFragmentCarver {
     }
 }
 
-/// IDAT Stream Recovery
-///
-/// Attempts to decompress PNG IDAT data even when corrupted,
-/// recovering as many scanlines as possible.
 pub struct IdatRecovery {
-    /// Decompressed image data
     pub decompressed: Vec<u8>,
-    /// Number of complete scanlines recovered
+
     pub scanlines_recovered: u32,
-    /// Whether decompression completed successfully
+
     pub complete: bool,
-    /// Error message if decompression failed
+
     pub error: Option<String>,
 }
 
 impl IdatRecovery {
-    /// Attempt to decompress IDAT data
-    ///
-    /// Will decompress as much as possible even if the stream is corrupted.
-    ///
-    /// # Arguments
-    /// * `idat_data` - Concatenated IDAT chunk data (without chunk headers)
-    /// * `ihdr` - IHDR data for calculating scanline size
     pub fn recover(idat_data: &[u8], ihdr: &IhdrData) -> Self {
         use flate2::read::ZlibDecoder;
         use std::io::Read;
@@ -672,18 +644,15 @@ impl IdatRecovery {
             error: None,
         };
 
-        // Calculate bytes per scanline (including filter byte)
         let bytes_per_pixel = ihdr.bytes_per_pixel();
         let scanline_bytes = 1 + (ihdr.width as usize * bytes_per_pixel);
 
-        // Try to decompress
         let mut decoder = ZlibDecoder::new(idat_data);
-        let mut buffer = vec![0u8; scanline_bytes * 16]; // Read in chunks
+        let mut buffer = vec![0u8; scanline_bytes * 16];
 
         loop {
             match decoder.read(&mut buffer) {
                 Ok(0) => {
-                    // Successful end of stream
                     result.complete = true;
                     break;
                 }
@@ -691,14 +660,12 @@ impl IdatRecovery {
                     result.decompressed.extend_from_slice(&buffer[..n]);
                 }
                 Err(e) => {
-                    // Decompression error - save what we have
                     result.error = Some(e.to_string());
                     break;
                 }
             }
         }
 
-        // Calculate how many complete scanlines we got
         if scanline_bytes > 0 {
             result.scanlines_recovered = (result.decompressed.len() / scanline_bytes) as u32;
         }
@@ -706,12 +673,10 @@ impl IdatRecovery {
         result
     }
 
-    /// Check if we recovered enough data to create a partial image
     pub fn is_recoverable(&self) -> bool {
-        self.scanlines_recovered >= 10 // At least 10 scanlines
+        self.scanlines_recovered >= 10
     }
 
-    /// Calculate recovery percentage
     pub fn recovery_percentage(&self, total_height: u32) -> f32 {
         if total_height == 0 {
             return 0.0;
@@ -721,14 +686,13 @@ impl IdatRecovery {
 }
 
 impl IhdrData {
-    /// Calculate bytes per pixel based on color type and bit depth
     pub fn bytes_per_pixel(&self) -> usize {
         let channels = match self.color_type {
-            0 => 1, // Grayscale
-            2 => 3, // RGB
-            3 => 1, // Indexed
-            4 => 2, // Grayscale + Alpha
-            6 => 4, // RGBA
+            0 => 1,
+            2 => 3,
+            3 => 1,
+            4 => 2,
+            6 => 4,
             _ => 1,
         };
         ((self.bit_depth as usize * channels) + 7) / 8
@@ -836,27 +800,23 @@ mod tests {
 
     #[test]
     fn test_quick_validate_header_valid() {
-        // Valid PNG with IHDR length=13
         let mut valid = Vec::new();
         valid.extend_from_slice(&PNG_SIGNATURE);
-        valid.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D]); // length = 13
+        valid.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D]);
         valid.extend_from_slice(&IHDR);
         assert!(quick_validate_header(&valid));
     }
 
     #[test]
     fn test_quick_validate_header_invalid() {
-        // Wrong signature
         assert!(!quick_validate_header(&[0x00; 16]));
 
-        // Wrong IHDR length
         let mut wrong_len = Vec::new();
         wrong_len.extend_from_slice(&PNG_SIGNATURE);
-        wrong_len.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]); // wrong length
+        wrong_len.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
         wrong_len.extend_from_slice(&IHDR);
         assert!(!quick_validate_header(&wrong_len));
 
-        // Too short
         assert!(!quick_validate_header(&PNG_SIGNATURE));
     }
 }

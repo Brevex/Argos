@@ -1,40 +1,28 @@
-//! Signature Index for Multi-Pass Carving
-//!
-//! This module provides data structures for collecting and correlating
-//! file signatures (headers and footers) across a storage device.
-
 use argos_core::FileType;
 
-/// Stores all detected signatures organized by type for efficient correlation
 #[derive(Debug, Default)]
 pub struct SignatureIndex {
-    /// Headers indexed by file type, sorted by offset (BTreeMap for ordered iteration)
     jpeg_headers: Vec<u64>,
     png_headers: Vec<u64>,
 
-    /// Footers indexed by file type, sorted by offset
     jpeg_footers: Vec<u64>,
     png_footers: Vec<u64>,
 
-    /// Whether the index has been finalized (sorted)
     finalized: bool,
 }
 
 impl SignatureIndex {
-    /// Pre-allocate based on expected device size
-    /// Heuristic: ~1 image per 10MB on average
     pub fn with_capacity(device_size: u64) -> Self {
         let estimated_images = (device_size / (10 * 1024 * 1024)).max(1000) as usize;
         Self {
             jpeg_headers: Vec::with_capacity(estimated_images),
-            png_headers: Vec::with_capacity(estimated_images / 4), // PNGs less common
+            png_headers: Vec::with_capacity(estimated_images / 4),
             jpeg_footers: Vec::with_capacity(estimated_images),
             png_footers: Vec::with_capacity(estimated_images / 4),
             finalized: false,
         }
     }
 
-    /// Add a header signature (must call finalize() after all additions)
     #[inline]
     pub fn add_header(&mut self, offset: u64, file_type: FileType) {
         debug_assert!(!self.finalized, "Cannot add to finalized index");
@@ -45,7 +33,6 @@ impl SignatureIndex {
         }
     }
 
-    /// Add a footer signature (must call finalize() after all additions)
     #[inline]
     pub fn add_footer(&mut self, offset: u64, file_type: FileType) {
         debug_assert!(!self.finalized, "Cannot add to finalized index");
@@ -56,7 +43,6 @@ impl SignatureIndex {
         }
     }
 
-    /// Sort all vectors for binary search. Must be called after Pass 1.
     pub fn finalize(&mut self) {
         self.jpeg_headers.sort_unstable();
         self.png_headers.sort_unstable();
@@ -65,7 +51,6 @@ impl SignatureIndex {
         self.finalized = true;
     }
 
-    /// Get headers for a specific file type (sorted by offset)
     pub fn headers(&self, file_type: FileType) -> &[u64] {
         debug_assert!(self.finalized, "Index must be finalized before querying");
         match file_type {
@@ -75,7 +60,6 @@ impl SignatureIndex {
         }
     }
 
-    /// Get footers for a specific file type (sorted by offset)
     pub fn footers(&self, file_type: FileType) -> &[u64] {
         debug_assert!(self.finalized, "Index must be finalized before querying");
         match file_type {
@@ -85,18 +69,15 @@ impl SignatureIndex {
         }
     }
 
-    /// Find the first footer after a given header offset
-    /// Returns None if no footer exists after the header
     pub fn find_next_footer(&self, header_offset: u64, file_type: FileType) -> Option<u64> {
         let footers = self.footers(file_type);
-        // Binary search for the first footer > header_offset
+
         match footers.binary_search(&header_offset) {
-            Ok(idx) => footers.get(idx + 1).copied(), // Exact match, get next
-            Err(idx) => footers.get(idx).copied(),    // First greater
+            Ok(idx) => footers.get(idx + 1).copied(),
+            Err(idx) => footers.get(idx).copied(),
         }
     }
 
-    /// Find the closest footer to a header within a maximum distance
     pub fn find_closest_footer(
         &self,
         header_offset: u64,
@@ -111,7 +92,6 @@ impl SignatureIndex {
         }
     }
 
-    /// Statistics for logging
     pub fn stats(&self) -> IndexStats {
         IndexStats {
             jpeg_headers: self.jpeg_headers.len(),
@@ -121,7 +101,6 @@ impl SignatureIndex {
         }
     }
 
-    /// Iterate over all JPEG headers with their potential matching footers
     pub fn jpeg_candidates(&self, max_file_size: u64) -> impl Iterator<Item = FileCandidate> + '_ {
         self.jpeg_headers.iter().filter_map(move |&header| {
             self.find_closest_footer(header, FileType::Jpeg, max_file_size)
@@ -145,7 +124,6 @@ impl SignatureIndex {
         })
     }
 
-    /// Get orphan headers (headers without a matching footer within max distance)
     pub fn orphan_headers(&self, file_type: FileType, max_file_size: u64) -> Vec<u64> {
         self.headers(file_type)
             .iter()
@@ -158,7 +136,6 @@ impl SignatureIndex {
     }
 }
 
-/// A matched header-footer pair representing a potential file
 #[derive(Debug, Clone, Copy)]
 pub struct FileCandidate {
     pub header_offset: u64,
@@ -167,7 +144,6 @@ pub struct FileCandidate {
 }
 
 impl FileCandidate {
-    /// Estimated file size (footer offset - header offset + footer size)
     #[inline]
     pub fn estimated_size(&self) -> u64 {
         self.footer_offset
@@ -176,7 +152,6 @@ impl FileCandidate {
     }
 }
 
-/// Statistics about the signature index
 #[derive(Debug, Clone, Copy)]
 pub struct IndexStats {
     pub jpeg_headers: usize,
@@ -220,18 +195,16 @@ mod tests {
         let mut index = SignatureIndex::default();
 
         index.add_header(100, FileType::Jpeg);
-        index.add_footer(200, FileType::Jpeg); // 100 bytes away
-        index.add_footer(50000, FileType::Jpeg); // 49900 bytes away
+        index.add_footer(200, FileType::Jpeg);
+        index.add_footer(50000, FileType::Jpeg);
 
         index.finalize();
 
-        // Should find footer at 200 (within 1000 bytes)
         assert_eq!(
             index.find_closest_footer(100, FileType::Jpeg, 1000),
             Some(200)
         );
 
-        // Should not find footer if max distance is too small
         assert_eq!(index.find_closest_footer(100, FileType::Jpeg, 50), None);
     }
 
@@ -257,7 +230,7 @@ mod tests {
         let mut index = SignatureIndex::default();
 
         index.add_header(100, FileType::Jpeg);
-        index.add_header(50000, FileType::Jpeg); // No footer within range
+        index.add_header(50000, FileType::Jpeg);
         index.add_footer(500, FileType::Jpeg);
 
         index.finalize();
