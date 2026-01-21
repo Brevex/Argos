@@ -23,6 +23,10 @@ ctrlc = "3.5.1"
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 dashmap = "6.1.0"
+sha2 = "0.10.9"
+chrono = "0.4.43"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 
 [dev-dependencies]
 tempfile = "3.24.0"

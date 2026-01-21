@@ -5,8 +5,11 @@ use argos_core::{
     statistics::{compute_entropy, ImageClassification},
     BlockSource, FileType,
 };
+use chrono::Utc;
 use crossbeam_channel::{bounded, Sender};
 use dashmap::DashSet;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -41,6 +44,19 @@ struct ExtractionJob {
     output_path: PathBuf,
     device_path: Arc<str>,
     file_type: FileType,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainOfCustody {
+    filename: String,
+    source_offset: String,
+    source_offset_decimal: u64,
+    file_size: u64,
+    sha256_hash: String,
+    recovery_timestamp: String,
+    file_type: String,
+    is_fragmented: bool,
+    fragment_count: usize,
 }
 
 pub struct RecoveryManager {
@@ -149,21 +165,19 @@ impl RecoveryManager {
             return;
         }
 
-        let mut header_buf = vec![0u8; 4096];
-        let header_read = match self
+        let header_read_size = 4096.min(file_size as usize);
+        let header_buf_cow = match self
             .reader
-            .read_chunk(candidate.offset_start, &mut header_buf)
+            .read_chunk(candidate.offset_start, header_read_size)
         {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!(
-                    "[Recovery] Failed to read header at offset {}: {}",
-                    candidate.offset_start, e
-                );
+            Ok(cow) if !cow.is_empty() => cow,
+            _ => {
                 self.files_skipped.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
+        let header_buf = &header_buf_cow;
+        let header_read = header_buf.len();
 
         if header_read > 0 {
             if let Some((width, height)) =
@@ -263,7 +277,7 @@ fn extraction_worker(
 
     for job in rx {
         reusable_buffer.clear();
-        reusable_buffer.resize(job.size as usize, 0);
+        reusable_buffer.reserve(job.size as usize);
 
         match save_file_job_with_buffer(&job, &mut reusable_buffer, &seen_hashes, &smart_carver) {
             Ok(true) => {
@@ -332,31 +346,47 @@ fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
 
     image::load(reader, format).is_ok()
 }
-
 fn save_file_job_with_buffer(
     job: &ExtractionJob,
     file_data: &mut Vec<u8>,
     seen_hashes: &DashSet<u64>,
     smart_carver: &SmartCarver,
 ) -> anyhow::Result<bool> {
-    let mut reader = DiskReader::new(&*job.device_path)?;
+    let reader = DiskReader::new(&*job.device_path)?;
     let mut total_read = 0;
     let mut offset = job.start;
 
+    file_data.clear();
+    file_data.reserve(job.size as usize);
+
     while total_read < job.size as usize {
         let to_read = std::cmp::min(job.size as usize - total_read, EXTRACTION_BUFFER_SIZE);
-        let bytes_read =
-            reader.read_chunk(offset, &mut file_data[total_read..total_read + to_read])?;
 
-        if bytes_read == 0 {
+        let chunk_cow = match reader.read_chunk(offset, to_read) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[Recovery] I/O error reading at offset 0x{:016X}: {} - filling with zeros",
+                    offset, e
+                );
+                let zeros = vec![0u8; to_read];
+                file_data.extend_from_slice(&zeros);
+                total_read += to_read;
+                offset += to_read as u64;
+                continue;
+            }
+        };
+
+        if chunk_cow.is_empty() {
             break;
         }
+
+        let bytes_read = chunk_cow.len();
+        file_data.extend_from_slice(&chunk_cow);
 
         total_read += bytes_read;
         offset += bytes_read as u64;
     }
-
-    file_data.truncate(total_read);
 
     let hash = compute_partial_hash(file_data);
     if !seen_hashes.insert(hash) {
@@ -370,13 +400,25 @@ fn save_file_job_with_buffer(
     }
 
     let analysis_result = match job.file_type {
-        FileType::Jpeg => smart_carver.analyze_jpeg(file_data, job.start, &mut reader),
+        FileType::Jpeg => smart_carver.analyze_jpeg(file_data, job.start, &reader),
         FileType::Png => smart_carver.analyze_png(file_data, job.start),
         _ => {
+            let sha256_hash = compute_sha256(file_data);
             let file = File::create(&job.output_path)?;
             let mut writer = BufWriter::with_capacity(131_072, file);
             writer.write_all(file_data)?;
             writer.flush()?;
+
+            write_chain_of_custody(
+                &job.output_path,
+                job.start,
+                file_data.len() as u64,
+                &sha256_hash,
+                job.file_type,
+                false,
+                1,
+            )?;
+
             return Ok(true);
         }
     };
@@ -397,50 +439,91 @@ fn save_file_job_with_buffer(
         }
     }
 
+    let mut hasher = Sha256::new();
     let file = File::create(&job.output_path)?;
     let mut writer = BufWriter::with_capacity(131_072, file);
+    let mut total_written: u64 = 0;
+    let mut is_fragmented = false;
+    let mut fragment_count = 1usize;
 
     if let Some(ref mf_result) = analysis_result.multi_fragment_result {
         if mf_result.fragments.len() > 1 {
-            let mut frag_buffer = vec![0u8; EXTRACTION_BUFFER_SIZE];
+            is_fragmented = true;
+            fragment_count = mf_result.fragments.len();
+
             for fragment in &mf_result.fragments {
                 let mut frag_offset = fragment.offset;
                 let mut remaining = fragment.size as usize;
                 while remaining > 0 {
                     let to_read = remaining.min(EXTRACTION_BUFFER_SIZE);
-                    let bytes_read = reader.read_chunk(frag_offset, &mut frag_buffer[..to_read])?;
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    writer.write_all(&frag_buffer[..bytes_read])?;
+                    let chunk_cow = match reader.read_chunk(frag_offset, to_read) {
+                        Ok(c) if !c.is_empty() => c,
+                        Ok(_) => break,
+                        Err(e) => {
+                            eprintln!(
+                                "[Recovery] Fragment read error at 0x{:016X}: {}",
+                                frag_offset, e
+                            );
+                            break;
+                        }
+                    };
+                    let bytes_read = chunk_cow.len();
+                    hasher.update(&chunk_cow);
+                    writer.write_all(&chunk_cow)?;
+                    total_written += bytes_read as u64;
                     frag_offset += bytes_read as u64;
                     remaining = remaining.saturating_sub(bytes_read);
                 }
             }
             writer.flush()?;
         } else {
+            hasher.update(file_data.as_slice());
             writer.write_all(file_data)?;
             writer.flush()?;
+            total_written = file_data.len() as u64;
         }
     } else if let Some(ref bgc_result) = analysis_result.bgc_result {
         if bgc_result.is_fragmented {
-            writer.write_all(&file_data[..bgc_result.head_size as usize])?;
+            is_fragmented = true;
+            fragment_count = 2;
+
+            let head_data = &file_data[..bgc_result.head_size as usize];
+            hasher.update(head_data);
+            writer.write_all(head_data)?;
+            total_written += head_data.len() as u64;
+
             if let (Some(tail_offset), Some(tail_size)) =
                 (bgc_result.tail_offset, bgc_result.tail_size)
             {
-                let mut tail_buffer = vec![0u8; tail_size as usize];
-                reader.read_chunk(tail_offset, &mut tail_buffer)?;
-                writer.write_all(&tail_buffer)?;
+                match reader.read_chunk(tail_offset, tail_size as usize) {
+                    Ok(chunk_cow) => {
+                        hasher.update(&chunk_cow);
+                        writer.write_all(&chunk_cow)?;
+                        total_written += chunk_cow.len() as u64;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[Recovery] Tail read error at 0x{:016X}: {}",
+                            tail_offset, e
+                        );
+                    }
+                }
             }
             writer.flush()?;
         } else {
+            hasher.update(file_data.as_slice());
             writer.write_all(file_data)?;
             writer.flush()?;
+            total_written = file_data.len() as u64;
         }
     } else {
+        hasher.update(file_data.as_slice());
         writer.write_all(file_data)?;
         writer.flush()?;
+        total_written = file_data.len() as u64;
     }
+
+    let sha256_hash = format!("{:x}", hasher.finalize());
 
     if !validate_image_decode(&job.output_path, job.file_type) {
         let _ = fs::remove_file(&job.output_path);
@@ -456,7 +539,64 @@ fn save_file_job_with_buffer(
         return Ok(false);
     }
 
+    write_chain_of_custody(
+        &job.output_path,
+        job.start,
+        total_written,
+        &sha256_hash,
+        job.file_type,
+        is_fragmented,
+        fragment_count,
+    )?;
+
     Ok(true)
+}
+
+fn write_chain_of_custody(
+    image_path: &Path,
+    source_offset: u64,
+    file_size: u64,
+    sha256_hash: &str,
+    file_type: FileType,
+    is_fragmented: bool,
+    fragment_count: usize,
+) -> anyhow::Result<()> {
+    let filename = image_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let custody = ChainOfCustody {
+        filename: filename.clone(),
+        source_offset: format!("0x{:016X}", source_offset),
+        source_offset_decimal: source_offset,
+        file_size,
+        sha256_hash: sha256_hash.to_string(),
+        recovery_timestamp: Utc::now().to_rfc3339(),
+        file_type: file_type.name().to_string(),
+        is_fragmented,
+        fragment_count,
+    };
+
+    let sidecar_path = image_path.with_extension(format!(
+        "{}.custody.json",
+        image_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+    ));
+
+    let json = serde_json::to_string_pretty(&custody)?;
+    fs::write(&sidecar_path, json)?;
+
+    Ok(())
+}
+
+fn compute_sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
 }
 
 fn should_filter_as_graphic(path: &Path, file_type: FileType, smart_carver: &SmartCarver) -> bool {

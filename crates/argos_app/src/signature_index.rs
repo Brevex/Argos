@@ -112,7 +112,6 @@ impl SignatureIndex {
         })
     }
 
-    /// Iterate over all PNG headers with their potential matching footers
     pub fn png_candidates(&self, max_file_size: u64) -> impl Iterator<Item = FileCandidate> + '_ {
         self.png_headers.iter().filter_map(move |&header| {
             self.find_closest_footer(header, FileType::Png, max_file_size)

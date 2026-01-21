@@ -9,7 +9,11 @@ pub use carving::{
     CarveDecision, Fragment, MultiFragmentCarver, MultiFragmentConfig, MultiFragmentResult,
     SkipReason, SmartCarveResult, SmartCarver, SmartCarverConfig, ValidationNote,
 };
-pub use io::{DiskReader, MmapReader, Reader};
+#[cfg(target_os = "linux")]
+pub use io::DirectReader;
+pub use io::{
+    allocate_aligned_buffer, BlockSource, DiskReader, MmapReader, Reader, ZeroCopySource, PAGE_SIZE,
+};
 pub use jpeg::{HuffmanDecoder, JpegParser, JpegValidator, RestartMarkerScanner, ValidationResult};
 pub use png::{PngFragmentCarver, PngParser, PngValidationResult, PngValidator};
 pub use scanners::{JpegScanner, PngScanner, SignatureScanner};
@@ -106,11 +110,6 @@ impl std::fmt::Display for FileType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
     }
-}
-
-pub trait BlockSource {
-    fn read_chunk(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize>;
-    fn size(&self) -> u64;
 }
 
 pub fn get_image_dimensions(data: &[u8]) -> Option<(usize, usize)> {

@@ -1,4 +1,4 @@
-use argos_core::{io::Reader, BlockSource, FileType, SignatureScanner};
+use argos_core::{io::Reader, BlockSource, FileType, SignatureScanner, ZeroCopySource};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -11,7 +11,7 @@ use std::time::Instant;
 use crate::recovery::RecoveryManager;
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
-const OVERLAP: usize = 4 * 1024;
+const OVERLAP: usize = 256;
 const DATA_CHANNEL_CAPACITY: usize = 10;
 
 const EVENT_CHANNEL_CAPACITY: usize = 1000;
@@ -43,7 +43,7 @@ pub fn run_scan(
 
     let device_size = {
         let reader = Reader::new(device_path)?;
-        reader.size()
+        ZeroCopySource::size(&reader)
     };
 
     println!("[Engine] Starting scan on: {}", device_path);
@@ -201,37 +201,73 @@ fn producer_thread(
     pb: Arc<ProgressBar>,
     running: Arc<AtomicBool>,
 ) -> EngineResult<()> {
+    use argos_core::ZeroCopySource;
     use crossbeam_channel::SendTimeoutError;
     use std::time::Duration;
 
-    let mut reader = Reader::new(device_path)?;
+    let reader = Reader::new(device_path)?;
     let is_mmap = reader.is_mmap();
+
+    #[cfg(target_os = "linux")]
+    let is_direct = reader.is_direct();
+    #[cfg(not(target_os = "linux"))]
+    let is_direct = false;
+
     if is_mmap {
         eprintln!("[Producer] Using memory-mapped I/O (zero-copy)");
+    } else if is_direct {
+        eprintln!("[Producer] Using O_DIRECT I/O (bypassing page cache)");
+    } else {
+        eprintln!("[Producer] Using standard I/O with buffer recycling");
     }
-    let total_size = reader.size();
 
+    let total_size = ZeroCopySource::size(&reader);
     const PREFETCH_CHUNKS: usize = 2;
 
     let mut offset: u64 = 0;
+    let mut recycled_count: u64 = 0;
+    let mut allocated_count: u64 = 0;
 
     'outer: while offset < total_size {
-        let mut buffer = match recycle_rx.try_recv() {
-            Ok(mut buf) => {
-                if buf.capacity() < CHUNK_SIZE {
-                    buf.reserve(CHUNK_SIZE - buf.len());
-                }
-                buf.resize(CHUNK_SIZE, 0);
-                buf
-            }
-            Err(_) => vec![0u8; CHUNK_SIZE],
-        };
-
-        let bytes_read = reader.read_chunk(offset, &mut buffer)?;
-
-        if bytes_read == 0 {
+        if !running.load(Ordering::SeqCst) {
             break;
         }
+
+        let mut buffer = match recycle_rx.try_recv() {
+            Ok(mut buf) => {
+                if is_direct && (buf.as_ptr() as usize % argos_core::PAGE_SIZE != 0) {
+                    allocated_count += 1;
+                    argos_core::allocate_aligned_buffer(CHUNK_SIZE)
+                } else {
+                    recycled_count += 1;
+                    buf.clear();
+                    buf.reserve(CHUNK_SIZE);
+                    buf.resize(CHUNK_SIZE, 0);
+                    buf
+                }
+            }
+            Err(_) => {
+                allocated_count += 1;
+                if is_direct {
+                    argos_core::allocate_aligned_buffer(CHUNK_SIZE)
+                } else {
+                    vec![0u8; CHUNK_SIZE]
+                }
+            }
+        };
+
+        let bytes_read = match reader.read_into(offset, &mut buffer) {
+            Ok(n) if n > 0 => n,
+            Ok(_) => break,
+            Err(e) => {
+                eprintln!(
+                    "[Producer] I/O error at offset 0x{:016X}: {} - skipping sector",
+                    offset, e
+                );
+                offset += 512;
+                continue;
+            }
+        };
 
         buffer.truncate(bytes_read);
 
@@ -273,6 +309,15 @@ fn producer_thread(
         }
 
         pb.set_position(offset.min(total_size));
+    }
+
+    let total_buffers = recycled_count + allocated_count;
+    if total_buffers > 0 {
+        let recycle_rate = (recycled_count as f64 / total_buffers as f64) * 100.0;
+        eprintln!(
+            "[Producer] Buffer stats: {} recycled, {} allocated ({:.1}% reuse rate)",
+            recycled_count, allocated_count, recycle_rate
+        );
     }
 
     Ok(())
@@ -336,7 +381,7 @@ pub fn run_multipass_scan(
     let start_time = Instant::now();
 
     let reader = Reader::new(device_path)?;
-    let device_size = reader.size();
+    let device_size = ZeroCopySource::size(&reader);
     drop(reader);
 
     println!("[MultiPass] Starting multi-pass scan on: {}", device_path);
@@ -484,13 +529,12 @@ fn collect_signatures(
     pb: &ProgressBar,
     running: &AtomicBool,
 ) -> EngineResult<()> {
-    let mut reader = Reader::new(device_path)?;
-    let total_size = reader.size();
+    let reader = Reader::new(device_path)?;
+    let total_size = ZeroCopySource::size(&reader);
 
     let jpeg_scanner = SignatureScanner::jpeg();
     let png_scanner = SignatureScanner::png();
 
-    let mut buffer = vec![0u8; CHUNK_SIZE];
     let mut offset: u64 = 0;
 
     while offset < total_size {
@@ -498,12 +542,17 @@ fn collect_signatures(
             break;
         }
 
-        let bytes_read = reader.read_chunk(offset, &mut buffer)?;
-        if bytes_read == 0 {
+        let chunk_cow = match reader.read_chunk(offset, CHUNK_SIZE) {
+            Ok(c) => c,
+            Err(_) => break,
+        };
+
+        if chunk_cow.is_empty() {
             break;
         }
 
-        let chunk = &buffer[..bytes_read];
+        let chunk = &chunk_cow;
+        let bytes_read = chunk.len();
 
         jpeg_scanner.scan_headers_callback(chunk, |rel_offset| {
             if rel_offset + 4 <= bytes_read {

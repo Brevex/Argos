@@ -734,7 +734,6 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Read next byte, handling byte stuffing
     fn read_byte(&mut self) -> Option<u8> {
         if self.pos >= self.data.len() {
             return None;
@@ -742,12 +741,10 @@ impl<'a> BitReader<'a> {
         let byte = self.data[self.pos];
         self.pos += 1;
 
-        // Handle byte stuffing: 0xFF 0x00 -> 0xFF
         if byte == 0xFF && self.pos < self.data.len() {
             if self.data[self.pos] == 0x00 {
-                self.pos += 1; // Skip the stuffed 0x00
+                self.pos += 1;
             } else {
-                // Found a marker, stop reading
                 self.pos -= 1;
                 return None;
             }
@@ -755,7 +752,6 @@ impl<'a> BitReader<'a> {
         Some(byte)
     }
 
-    /// Ensure we have at least `needed` bits in the buffer
     fn fill_buffer(&mut self, needed: u8) {
         while self.bits_available < needed {
             if let Some(byte) = self.read_byte() {
@@ -767,7 +763,6 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Peek N bits without consuming them
     pub fn peek_bits(&mut self, n: u8) -> Option<u32> {
         if n == 0 || n > 24 {
             return None;
@@ -780,18 +775,15 @@ impl<'a> BitReader<'a> {
         Some((self.bit_buffer >> shift) & ((1 << n) - 1))
     }
 
-    /// Read and consume N bits
     pub fn read_bits(&mut self, n: u8) -> Option<u32> {
         let bits = self.peek_bits(n)?;
         self.bits_available -= n;
         Some(bits)
     }
 
-    /// Decode a Huffman symbol
     pub fn decode_huffman(&mut self, table: &HuffmanTable) -> Option<u8> {
         self.fill_buffer(16);
 
-        // Try to find a matching code
         for len in 1..=16u8 {
             if len > self.bits_available {
                 break;
@@ -809,7 +801,6 @@ impl<'a> BitReader<'a> {
         None
     }
 
-    /// Decode a DC coefficient value given its size category
     pub fn decode_value(&mut self, size: u8) -> Option<i16> {
         if size == 0 {
             return Some(0);
@@ -820,22 +811,17 @@ impl<'a> BitReader<'a> {
 
         let bits = self.read_bits(size)?;
 
-        // Convert to signed value
         let half = 1u32 << (size - 1);
         if bits < half {
-            // Negative value
             Some((bits as i16) - ((1 << size) - 1) as i16)
         } else {
             Some(bits as i16)
         }
     }
 
-    /// Current position in bytes
     pub fn position(&self) -> usize {
         self.pos
     }
-
-    /// Check if we've reached the end or a marker
     pub fn is_at_end(&self) -> bool {
         self.pos >= self.data.len()
             || (self.pos + 1 < self.data.len()

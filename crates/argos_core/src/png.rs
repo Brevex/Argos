@@ -517,7 +517,7 @@ impl PngFragmentCarver {
         head_data: &[u8],
         head_offset: u64,
         corruption_point: u64,
-        source: &mut S,
+        source: &S,
     ) -> MultiFragmentResult {
         let head_valid_size = corruption_point - head_offset;
         let mut fragments = vec![Fragment {
@@ -537,21 +537,18 @@ impl PngFragmentCarver {
             let first_cluster =
                 current_search_start.div_ceil(self.cluster_size) * self.cluster_size;
 
-            let mut buffer = vec![0u8; 64 * 1024];
             let mut cluster_offset = first_cluster;
             let mut best_candidate: Option<(Fragment, bool)> = None;
+            let read_window = 64 * 1024;
 
             while cluster_offset < search_end {
-                let read_size = buffer.len().min((search_end - cluster_offset) as usize);
-                let bytes_read = match source.read_chunk(cluster_offset, &mut buffer[..read_size]) {
-                    Ok(n) => n,
-                    Err(_) => break,
+                let read_size = read_window.min((search_end - cluster_offset) as usize);
+                let chunk_cow = match source.read_chunk(cluster_offset, read_size) {
+                    Ok(c) if !c.is_empty() => c,
+                    _ => break,
                 };
-                if bytes_read == 0 {
-                    break;
-                }
 
-                let chunk = &buffer[..bytes_read];
+                let chunk = &chunk_cow;
 
                 if let Some((chunk_start, chunk_len, is_iend)) = self.find_valid_chunk(chunk) {
                     let frag_size = chunk_start as u64 + chunk_len + 12;

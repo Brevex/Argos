@@ -244,13 +244,9 @@ impl SmartCarveResult {
     }
 }
 
-const CARVE_BUFFER_SIZE: usize = 64 * 1024;
-
 pub struct BifragmentCarver {
     config: BgcConfig,
     validator: JpegValidator,
-
-    buffer: std::cell::RefCell<Vec<u8>>,
 }
 
 impl BifragmentCarver {
@@ -258,7 +254,6 @@ impl BifragmentCarver {
         Self {
             config: BgcConfig::default(),
             validator: JpegValidator::new(),
-            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
         }
     }
 
@@ -266,7 +261,6 @@ impl BifragmentCarver {
         Self {
             config,
             validator: JpegValidator::new(),
-            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
         }
     }
 
@@ -274,7 +268,7 @@ impl BifragmentCarver {
         &self,
         head: &[u8],
         head_offset: u64,
-        source: &mut S,
+        source: &S,
     ) -> Option<CarveResult> {
         let validation = self.validator.validate(head);
         let corruption_offset = match &validation {
@@ -294,30 +288,26 @@ impl BifragmentCarver {
             search_start.div_ceil(self.config.cluster_size) * self.config.cluster_size;
 
         let mut best_candidate: Option<(FragmentCandidate, Vec<u8>)> = None;
-        let mut buffer = self.buffer.borrow_mut();
         let mut cluster_offset = first_cluster;
 
-        while cluster_offset < search_end {
-            let read_size = buffer.len().min((search_end - cluster_offset) as usize);
-            let bytes_read = source
-                .read_chunk(cluster_offset, &mut buffer[..read_size])
-                .ok()?;
-            if bytes_read == 0 {
-                break;
-            }
+        let read_window = 64 * 1024;
 
-            if let Some(candidate) = self.try_stitch(
-                head,
-                &buffer[..bytes_read],
-                corruption_offset as usize,
-                cluster_offset,
-            ) {
+        while cluster_offset < search_end {
+            let read_size = read_window.min((search_end - cluster_offset) as usize);
+            let chunk_cow = match source.read_chunk(cluster_offset, read_size) {
+                Ok(c) if !c.is_empty() => c,
+                _ => break,
+            };
+
+            if let Some(candidate) =
+                self.try_stitch(head, &chunk_cow, corruption_offset as usize, cluster_offset)
+            {
                 let dominated = best_candidate
                     .as_ref()
                     .map(|(c, _)| candidate.confidence > c.confidence)
                     .unwrap_or(true);
                 if dominated && candidate.confidence >= self.config.min_confidence {
-                    best_candidate = Some((candidate, buffer[..bytes_read].to_vec()));
+                    best_candidate = Some((candidate, chunk_cow.to_vec()));
                 }
             }
             cluster_offset += self.config.cluster_size;
@@ -335,18 +325,93 @@ impl BifragmentCarver {
     }
 
     pub fn validate_stitch(&self, head: &[u8], tail: &[u8]) -> StitchValidation {
+        use crate::jpeg::HuffmanDecoder;
+
         let mut combined = Vec::with_capacity(head.len() + tail.len());
         combined.extend_from_slice(head);
         combined.extend_from_slice(tail);
 
-        match self.validator.validate(&combined) {
-            ValidationResult::Valid(_) => StitchValidation {
-                is_valid: true,
-                dc_continuity_score: 1.0,
-                huffman_valid: true,
-                visual_discontinuity: false,
-                overall_score: 1.0,
-            },
+        let validation = self.validator.validate(&combined);
+
+        match validation {
+            ValidationResult::Valid(structure) => {
+                let components = if structure.image_width > 0 && structure.image_height > 0 {
+                    3
+                } else {
+                    1
+                };
+                let mut decoder = HuffmanDecoder::new();
+                let mut pos = 0;
+
+                while pos < combined.len() - 4 {
+                    if combined[pos] == 0xFF && combined[pos + 1] == 0xC4 {
+                        let len =
+                            u16::from_be_bytes([combined[pos + 2], combined[pos + 3]]) as usize;
+                        if pos + 2 + len <= combined.len() && len > 2 {
+                            let info = combined[pos + 4];
+                            let tclass = info >> 4;
+                            let tid = info & 0x0F;
+                            decoder.load_table(tclass, tid, &combined[pos + 5..pos + 2 + len]);
+                        }
+                        pos += 2 + len;
+                    } else {
+                        pos += 1;
+                    }
+                }
+
+                if let Some(sos_offset) = structure.sos_offset {
+                    let sos_offset = sos_offset as usize;
+                    let len_bytes = [combined[sos_offset + 2], combined[sos_offset + 3]];
+                    let sos_len = u16::from_be_bytes(len_bytes) as usize;
+                    let entropy_start = sos_offset + 2 + sos_len;
+
+                    if entropy_start < combined.len() {
+                        if let Some(head_sos) = crate::scanners::SignatureScanner::jpeg()
+                            .scan_headers(head)
+                            .iter()
+                            .find(|&&off| head[off + 1] == 0xDA)
+                        {
+                            let h_len =
+                                u16::from_be_bytes([head[*head_sos + 2], head[*head_sos + 3]])
+                                    as usize;
+                            let h_start = head_sos + 2 + h_len;
+                            if h_start < head.len() {
+                                let head_entropy = &head[h_start..];
+                                let tail_entropy = tail;
+
+                                let dc_score =
+                                    decoder.validate_stitch(head_entropy, tail_entropy, components);
+
+                                if dc_score < 0.4 {
+                                    return StitchValidation {
+                                        is_valid: false,
+                                        dc_continuity_score: dc_score,
+                                        huffman_valid: true, // it decoded ok
+                                        visual_discontinuity: true,
+                                        overall_score: dc_score * 0.5,
+                                    };
+                                }
+
+                                return StitchValidation {
+                                    is_valid: true,
+                                    dc_continuity_score: dc_score,
+                                    huffman_valid: true,
+                                    visual_discontinuity: false,
+                                    overall_score: (0.5 + dc_score * 0.5),
+                                };
+                            }
+                        }
+                    }
+                }
+
+                StitchValidation {
+                    is_valid: true,
+                    dc_continuity_score: 1.0,
+                    huffman_valid: true,
+                    visual_discontinuity: false,
+                    overall_score: 1.0,
+                }
+            }
             ValidationResult::CorruptedAt { .. } => StitchValidation::failed(),
             ValidationResult::Truncated { .. } => StitchValidation {
                 is_valid: false,
@@ -374,7 +439,7 @@ impl BifragmentCarver {
         let tail_part = &tail[..eoi_pos + 2];
         let stitch_result = self.validate_stitch(head_part, tail_part);
 
-        if stitch_result.is_valid || stitch_result.overall_score > 0.5 {
+        if stitch_result.is_valid || stitch_result.overall_score > 0.6 {
             Some(FragmentCandidate {
                 offset: tail_offset,
                 size: (eoi_pos + 2) as u64,
@@ -427,8 +492,6 @@ pub struct MultiFragmentCarver {
     #[allow(dead_code)]
     validator: JpegValidator,
     rst_scanner: RestartMarkerScanner,
-
-    buffer: std::cell::RefCell<Vec<u8>>,
 }
 
 impl MultiFragmentCarver {
@@ -437,7 +500,6 @@ impl MultiFragmentCarver {
             config: MultiFragmentConfig::default(),
             validator: JpegValidator::new(),
             rst_scanner: RestartMarkerScanner::new(),
-            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
         }
     }
 
@@ -446,7 +508,6 @@ impl MultiFragmentCarver {
             config,
             validator: JpegValidator::new(),
             rst_scanner: RestartMarkerScanner::new(),
-            buffer: std::cell::RefCell::new(vec![0u8; CARVE_BUFFER_SIZE]),
         }
     }
 
@@ -455,7 +516,7 @@ impl MultiFragmentCarver {
         head_data: &[u8],
         head_offset: u64,
         corruption_point: u64,
-        source: &mut S,
+        source: &S,
     ) -> MultiFragmentResult {
         if corruption_point <= head_offset || head_data.is_empty() {
             return MultiFragmentResult::single(head_offset, head_data.len() as u64);
@@ -494,20 +555,17 @@ impl MultiFragmentCarver {
                 current_search_start.div_ceil(self.config.cluster_size) * self.config.cluster_size;
 
             let mut best_candidate: Option<(Fragment, f32, bool)> = None;
-            let mut buffer = self.buffer.borrow_mut();
             let mut cluster_offset = first_cluster;
+            let read_window = 64 * 1024;
 
             while cluster_offset < search_end {
-                let read_size = buffer.len().min((search_end - cluster_offset) as usize);
-                let bytes_read = match source.read_chunk(cluster_offset, &mut buffer[..read_size]) {
-                    Ok(n) => n,
-                    Err(_) => break,
+                let read_size = read_window.min((search_end - cluster_offset) as usize);
+                let chunk_cow = match source.read_chunk(cluster_offset, read_size) {
+                    Ok(c) if !c.is_empty() => c,
+                    _ => break,
                 };
-                if bytes_read == 0 {
-                    break;
-                }
 
-                let chunk = &buffer[..bytes_read];
+                let chunk = &chunk_cow;
 
                 if let Some(boundary) = crate::statistics::detect_entropy_boundary(
                     chunk,
@@ -652,7 +710,7 @@ impl SmartCarver {
         &self,
         data: &[u8],
         offset: u64,
-        source: &mut S,
+        source: &S,
     ) -> SmartCarveResult {
         let mut result = SmartCarveResult::extract(FileType::Jpeg, offset, data.len() as u64);
 
