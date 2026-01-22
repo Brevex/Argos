@@ -71,10 +71,11 @@ pub struct RecoveryManager {
     seen_hashes: Arc<DashSet<u64>>,
     extraction_tx: Option<Sender<ExtractionJob>>,
     extraction_handles: Vec<JoinHandle<()>>,
+    config: crate::engine::UnsafeConfig,
 }
 
 impl RecoveryManager {
-    pub fn new(device_path: &str, output_dir: &Path) -> anyhow::Result<Self> {
+    pub fn new(device_path: &str, output_dir: &Path, config: crate::engine::UnsafeConfig) -> anyhow::Result<Self> {
         fs::create_dir_all(output_dir)?;
         let reader = DiskReader::new(device_path)?;
 
@@ -95,7 +96,7 @@ impl RecoveryManager {
             let handle = thread::Builder::new()
                 .name(format!("extraction-{}", worker_id))
                 .spawn(move || {
-                    extraction_worker(rx, recovered, skipped, hashes);
+                    extraction_worker(rx, recovered, skipped, hashes, config);
                 })
                 .expect("failed to spawn extraction worker");
 
@@ -113,6 +114,7 @@ impl RecoveryManager {
             seen_hashes,
             extraction_tx: Some(tx),
             extraction_handles: handles,
+            config,
         })
     }
 
@@ -263,15 +265,29 @@ fn extraction_worker(
     files_recovered: Arc<AtomicU64>,
     files_skipped: Arc<AtomicU64>,
     seen_hashes: Arc<DashSet<u64>>,
+    config: crate::engine::UnsafeConfig,
 ) {
+    // When unsafe_mode is on, disable strict filtering
     let smart_carver = SmartCarver::with_config(SmartCarverConfig {
-        structural_validation: true,
+        structural_validation: !config.unsafe_mode,
         bifragment_carving: true,
-        statistical_filtering: true,
-        filter_thumbnails: true,
-        filter_graphics: true,
+        statistical_filtering: !config.unsafe_mode,
+        filter_thumbnails: !config.unsafe_mode,
+        filter_graphics: !config.unsafe_mode,
         ..Default::default()
     });
+
+    // Open debug log file if debug mode is enabled
+    let mut debug_file = if config.debug {
+        Some(std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/argos_debug.log")
+            .ok()
+            .map(|f| std::io::BufWriter::new(f)))
+    } else {
+        None
+    };
 
     let mut reusable_buffer = Vec::with_capacity(MAX_FILE_SIZE as usize);
 
@@ -279,7 +295,7 @@ fn extraction_worker(
         reusable_buffer.clear();
         reusable_buffer.reserve(job.size as usize);
 
-        match save_file_job_with_buffer(&job, &mut reusable_buffer, &seen_hashes, &smart_carver) {
+        match save_file_job_with_buffer(&job, &mut reusable_buffer, &seen_hashes, &smart_carver, config, &mut debug_file) {
             Ok(true) => {
                 files_recovered.fetch_add(1, Ordering::Relaxed);
             }
@@ -351,7 +367,19 @@ fn save_file_job_with_buffer(
     file_data: &mut Vec<u8>,
     seen_hashes: &DashSet<u64>,
     smart_carver: &SmartCarver,
+    config: crate::engine::UnsafeConfig,
+    debug_file: &mut Option<Option<std::io::BufWriter<File>>>,
 ) -> anyhow::Result<bool> {
+    // Helper macro for debug logging to file
+    macro_rules! debug_log {
+        ($($arg:tt)*) => {
+            if let Some(Some(ref mut file)) = debug_file {
+                let _ = writeln!(file, $($arg)*);
+                let _ = file.flush();
+            }
+        };
+    }
+
     let reader = DiskReader::new(&*job.device_path)?;
     let mut total_read = 0;
     let mut offset = job.start;
@@ -388,13 +416,30 @@ fn save_file_job_with_buffer(
 
     let hash = compute_partial_hash(file_data);
     if !seen_hashes.insert(hash) {
+        debug_log!("[SKIP] 0x{:016X} {} - Reason: Duplicate (hash collision)", job.start, job.file_type);
         return Ok(false);
     }
 
     let entropy = sample_entropy(file_data);
-    if !(MIN_ENTROPY..=MAX_ENTROPY).contains(&entropy) {
+    // In unsafe mode, bypass entropy filter
+    if !config.unsafe_mode && !(MIN_ENTROPY..=MAX_ENTROPY).contains(&entropy) {
+        let reason = if entropy < MIN_ENTROPY { "EntropyTooLow" } else { "EntropyTooHigh" };
+        debug_log!(
+            "[SKIP] 0x{:016X} {} - Reason: {} (entropy={:.3}, min={:.1}, max={:.2})",
+            job.start, job.file_type, reason, entropy, MIN_ENTROPY, MAX_ENTROPY
+        );
         seen_hashes.remove(&hash);
         return Ok(false);
+    }
+
+    // DEBUG: Log first bytes to understand parse failures
+    if config.debug && file_data.len() >= 4 {
+        let header_bytes: Vec<String> = file_data.iter().take(16).map(|b| format!("{:02X}", b)).collect();
+        let has_soi = file_data.len() >= 2 && file_data[0] == 0xFF && file_data[1] == 0xD8;
+        debug_log!(
+            "[DEBUG] 0x{:016X} {} - size={}, has_SOI={}, first_16_bytes=[{}]",
+            job.start, job.file_type, file_data.len(), has_soi, header_bytes.join(" ")
+        );
     }
 
     let analysis_result = match job.file_type {
@@ -422,19 +467,24 @@ fn save_file_job_with_buffer(
     };
 
     match analysis_result.decision {
-        CarveDecision::Skip(SkipReason::InvalidStructure) => {
-            seen_hashes.remove(&hash);
-            return Ok(false);
-        }
-        CarveDecision::Skip(SkipReason::Thumbnail) => {
-            seen_hashes.remove(&hash);
-            return Ok(false);
+        CarveDecision::Skip(ref reason) => {
+            // In unsafe mode, only reject InvalidStructure (must have header+footer)
+            let should_reject = match reason {
+                SkipReason::InvalidStructure => true,
+                _ => !config.unsafe_mode,
+            };
+            
+            if should_reject {
+                debug_log!(
+                    "[SKIP] 0x{:016X} {} - Reason: {:?}, validation_notes={:?}",
+                    job.start, job.file_type, reason, analysis_result.validation_notes
+                );
+                seen_hashes.remove(&hash);
+                return Ok(false);
+            }
+            // If unsafe mode and not InvalidStructure, continue to extraction
         }
         CarveDecision::Extract | CarveDecision::ExtractPartial | CarveDecision::AttemptBgc => {}
-        CarveDecision::Skip(_) => {
-            seen_hashes.remove(&hash);
-            return Ok(false);
-        }
     }
 
     let mut hasher = Sha256::new();
@@ -655,7 +705,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path()).unwrap();
+            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
 
         manager.process_event(&ScanEvent::HeaderFound {
             offset: 100,
@@ -706,7 +756,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path()).unwrap();
+            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
 
         manager.process_event(&ScanEvent::HeaderFound {
             offset: 100,
@@ -744,7 +794,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path()).unwrap();
+            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
 
         manager.process_event(&ScanEvent::FooterFound {
             offset: 100,
@@ -761,7 +811,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path()).unwrap();
+            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
 
         manager.process_event(&ScanEvent::HeaderFound {
             offset: 0,

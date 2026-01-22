@@ -23,6 +23,14 @@ struct Args {
 
     #[arg(short, long, default_value_t = false)]
     verbose: bool,
+
+    /// Unsafe mode: bypass entropy, resolution, and decode validation filters
+    #[arg(long, default_value_t = false)]
+    unsafe_mode: bool,
+
+    /// Debug mode: print detailed skip reasons to stderr
+    #[arg(long, default_value_t = false)]
+    debug: bool,
 }
 
 fn main() -> Result<()> {
@@ -83,11 +91,16 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(output_path)?;
     println!();
 
+    let config = engine::UnsafeConfig {
+        unsafe_mode: args.unsafe_mode,
+        debug: args.debug,
+    };
+
     if args.multipass {
         println!("🔬 Using multi-pass scan engine\n");
-        engine::run_multipass_scan(&selected_disk.path, output_path, running)?;
+        engine::run_multipass_scan(&selected_disk.path, output_path, running, config)?;
     } else {
-        engine::run_scan(&selected_disk.path, output_path, running)?;
+        engine::run_scan(&selected_disk.path, output_path, running, config)?;
     }
 
     Ok(())

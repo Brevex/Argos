@@ -16,6 +16,15 @@ const DATA_CHANNEL_CAPACITY: usize = 10;
 
 const EVENT_CHANNEL_CAPACITY: usize = 1000;
 
+/// Configuration for unsafe/debug modes that bypass strict validation
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnsafeConfig {
+    /// Bypass entropy, resolution, and decode validation filters
+    pub unsafe_mode: bool,
+    /// Print detailed skip reasons to stderr  
+    pub debug: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct DataChunk {
     pub offset: u64,
@@ -37,6 +46,7 @@ pub fn run_scan(
     device_path: &str,
     output_dir: &Path,
     running: Arc<AtomicBool>,
+    config: UnsafeConfig,
 ) -> EngineResult<()> {
     let start_time = Instant::now();
     let num_workers = num_cpus::get();
@@ -49,6 +59,12 @@ pub fn run_scan(
     println!("[Engine] Starting scan on: {}", device_path);
     println!("[Engine] Device size: {}", format_size(device_size, BINARY));
     println!("[Engine] Using {} worker threads", num_workers);
+    if config.unsafe_mode {
+        println!("[Engine] ⚠️  UNSAFE MODE: bypassing validation filters");
+    }
+    if config.debug {
+        println!("[Engine] 🔍 DEBUG MODE: detailed skip reasons enabled");
+    }
 
     let pb = Arc::new(ProgressBar::new(device_size));
     pb.set_style(
@@ -97,7 +113,7 @@ pub fn run_scan(
     drop(recycle_tx);
     drop(event_tx);
 
-    let mut recovery_manager = RecoveryManager::new(device_path, output_dir)?;
+    let mut recovery_manager = RecoveryManager::new(device_path, output_dir, config)?;
 
     let mut headers_found = 0u64;
     let mut footers_found = 0u64;
@@ -377,6 +393,7 @@ pub fn run_multipass_scan(
     device_path: &str,
     output_dir: &Path,
     running: Arc<AtomicBool>,
+    config: UnsafeConfig,
 ) -> EngineResult<()> {
     let start_time = Instant::now();
 
@@ -389,6 +406,12 @@ pub fn run_multipass_scan(
         "[MultiPass] Device size: {}",
         format_size(device_size, BINARY)
     );
+    if config.unsafe_mode {
+        println!("[MultiPass] ⚠️  UNSAFE MODE: bypassing validation filters");
+    }
+    if config.debug {
+        println!("[MultiPass] 🔍 DEBUG MODE: detailed skip reasons enabled");
+    }
 
     println!("\n[Pass 1/3] Collecting signatures...");
 
@@ -433,7 +456,7 @@ pub fn run_multipass_scan(
         total_candidates
     );
 
-    let mut recovery_manager = crate::recovery::RecoveryManager::new(device_path, output_dir)?;
+    let mut recovery_manager = crate::recovery::RecoveryManager::new(device_path, output_dir, config)?;
     let mut recovered = 0u64;
     let mut skipped = 0u64;
 
@@ -620,7 +643,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         let running = Arc::new(AtomicBool::new(true));
-        let result = run_scan(temp_file.path().to_str().unwrap(), temp_dir.path(), running);
+        let result = run_scan(temp_file.path().to_str().unwrap(), temp_dir.path(), running, UnsafeConfig::default());
         assert!(result.is_ok());
     }
 
@@ -629,7 +652,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let temp_dir = tempfile::TempDir::new().unwrap();
         let running = Arc::new(AtomicBool::new(true));
-        let result = run_scan(temp_file.path().to_str().unwrap(), temp_dir.path(), running);
+        let result = run_scan(temp_file.path().to_str().unwrap(), temp_dir.path(), running, UnsafeConfig::default());
         assert!(result.is_ok());
     }
 }
