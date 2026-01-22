@@ -495,7 +495,7 @@ impl Default for PngValidator {
 }
 
 use crate::carving::{Fragment, MultiFragmentResult};
-use crate::BlockSource;
+use crate::ZeroCopySource;
 
 pub struct PngFragmentCarver {
     cluster_size: u64,
@@ -512,7 +512,7 @@ impl PngFragmentCarver {
         }
     }
 
-    pub fn carve<S: BlockSource>(
+    pub fn carve<S: ZeroCopySource>(
         &self,
         head_data: &[u8],
         head_offset: u64,
@@ -543,12 +543,14 @@ impl PngFragmentCarver {
 
             while cluster_offset < search_end {
                 let read_size = read_window.min((search_end - cluster_offset) as usize);
-                let chunk_cow = match source.read_chunk(cluster_offset, read_size) {
-                    Ok(c) if !c.is_empty() => c,
+                let mut buffer = vec![0u8; read_size];
+                let bytes_read = match source.read_into(cluster_offset, &mut buffer) {
+                    Ok(n) if n > 0 => n,
                     _ => break,
                 };
+                buffer.truncate(bytes_read);
 
-                let chunk = &chunk_cow;
+                let chunk = &buffer;
 
                 if let Some((chunk_start, chunk_len, is_iend)) = self.find_valid_chunk(chunk) {
                     let frag_size = chunk_start as u64 + chunk_len + 12;

@@ -11,9 +11,7 @@ pub use carving::{
 };
 #[cfg(target_os = "linux")]
 pub use io::DirectReader;
-pub use io::{
-    allocate_aligned_buffer, BlockSource, DiskReader, MmapReader, Reader, ZeroCopySource, PAGE_SIZE,
-};
+pub use io::{allocate_aligned_buffer, DiskReader, MmapReader, Reader, ZeroCopySource, PAGE_SIZE};
 pub use jpeg::{HuffmanDecoder, JpegParser, JpegValidator, RestartMarkerScanner, ValidationResult};
 pub use png::{PngFragmentCarver, PngParser, PngValidationResult, PngValidator};
 pub use scanners::{JpegScanner, PngScanner, SignatureScanner};

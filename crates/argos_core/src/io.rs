@@ -1,6 +1,6 @@
 use crate::{CoreError, Result};
 use memmap2::Mmap;
-use std::borrow::Cow;
+
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
@@ -290,7 +290,7 @@ impl Reader {
             Ok(r) => return Ok(Reader::Mmap(r)),
             Err(_) => {}
         }
-        
+
         #[cfg(target_os = "linux")]
         if is_block_device(path_ref) {
             if let Ok(r) = DirectReader::new(path_ref) {
@@ -341,73 +341,6 @@ impl ZeroCopySource for Reader {
     }
 }
 
-// === BACKWARD COMPATIBILITY ===
-// Keep the old BlockSource trait working for existing code
-
-pub trait BlockSource {
-    fn read_chunk<'a>(&'a self, offset: u64, len: usize) -> Result<Cow<'a, [u8]>>;
-    fn size(&self) -> u64;
-}
-
-impl BlockSource for DiskReader {
-    fn read_chunk<'a>(&'a self, offset: u64, len: usize) -> Result<Cow<'a, [u8]>> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            let mut buffer = vec![0u8; len];
-            let bytes_read = self.file.read_at(&mut buffer, offset)?;
-            buffer.truncate(bytes_read);
-            Ok(Cow::Owned(buffer))
-        }
-        #[cfg(not(unix))]
-        {
-            todo!("Non-unix fallback not implemented")
-        }
-    }
-
-    #[inline]
-    fn size(&self) -> u64 {
-        self.size
-    }
-}
-
-impl BlockSource for MmapReader {
-    fn read_chunk<'a>(&'a self, offset: u64, len: usize) -> Result<Cow<'a, [u8]>> {
-        if let Some(slice) = self.slice(offset, len) {
-            Ok(Cow::Borrowed(slice))
-        } else {
-            Ok(Cow::Borrowed(&[]))
-        }
-    }
-
-    #[inline]
-    fn size(&self) -> u64 {
-        self.size
-    }
-}
-
-impl BlockSource for Reader {
-    fn read_chunk<'a>(&'a self, offset: u64, len: usize) -> Result<Cow<'a, [u8]>> {
-        match self {
-            Reader::Mmap(r) => r.read_chunk(offset, len),
-            Reader::Disk(r) => r.read_chunk(offset, len),
-            #[cfg(target_os = "linux")]
-            Reader::Direct(r) => {
-                // DirectReader requires aligned buffers, allocate one
-                let mut buffer = allocate_aligned_buffer(len);
-                let bytes_read = r.read_into(offset, &mut buffer)?;
-                buffer.truncate(bytes_read);
-                Ok(Cow::Owned(buffer))
-            }
-        }
-    }
-
-    #[inline]
-    fn size(&self) -> u64 {
-        ZeroCopySource::size(self)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,9 +357,10 @@ mod tests {
 
         assert_eq!(ZeroCopySource::size(&reader), test_data.len() as u64);
 
-        let cow = reader.read_chunk(0, 13).unwrap();
-        assert_eq!(cow.len(), 13);
-        assert_eq!(&*cow, b"Hello, World!");
+        let mut buffer = [0u8; 13];
+        let bytes_read = reader.read_into(0, &mut buffer).unwrap();
+        assert_eq!(bytes_read, 13);
+        assert_eq!(&buffer, b"Hello, World!");
     }
 
     #[test]
@@ -456,8 +390,10 @@ mod tests {
         let slice = reader.slice(0, 13).unwrap();
         assert_eq!(slice, b"Hello, World!");
 
-        let cow = reader.read_chunk(0, 13).unwrap();
-        assert_eq!(&*cow, b"Hello, World!");
+        let mut buffer = [0u8; 13];
+        let bytes_read = reader.read_into(0, &mut buffer).unwrap();
+        assert_eq!(bytes_read, 13);
+        assert_eq!(&buffer, b"Hello, World!");
     }
 
     #[test]

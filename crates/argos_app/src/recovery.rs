@@ -3,7 +3,7 @@ use argos_core::{
     carving::{CarveDecision, SkipReason, SmartCarver, SmartCarverConfig},
     io::DiskReader,
     statistics::{compute_entropy, ImageClassification},
-    BlockSource, FileType,
+    FileType,
 };
 use chrono::Utc;
 use crossbeam_channel::{bounded, Sender};
@@ -166,18 +166,18 @@ impl RecoveryManager {
         }
 
         let header_read_size = 4096.min(file_size as usize);
-        let header_buf_cow = match self
+        let mut header_buf = vec![0u8; header_read_size];
+        let header_read = match self
             .reader
-            .read_chunk(candidate.offset_start, header_read_size)
+            .read_into(candidate.offset_start, &mut header_buf)
         {
-            Ok(cow) if !cow.is_empty() => cow,
+            Ok(n) if n > 0 => n,
             _ => {
                 self.files_skipped.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
-        let header_buf = &header_buf_cow;
-        let header_read = header_buf.len();
+        header_buf.truncate(header_read);
 
         if header_read > 0 {
             if let Some((width, height)) =
@@ -362,8 +362,10 @@ fn save_file_job_with_buffer(
     while total_read < job.size as usize {
         let to_read = std::cmp::min(job.size as usize - total_read, EXTRACTION_BUFFER_SIZE);
 
-        let chunk_cow = match reader.read_chunk(offset, to_read) {
-            Ok(c) => c,
+        let mut buffer = vec![0u8; to_read];
+        let bytes_read = match reader.read_into(offset, &mut buffer) {
+            Ok(n) if n > 0 => n,
+            Ok(_) => break,
             Err(e) => {
                 eprintln!(
                     "[Recovery] I/O error reading at offset 0x{:016X}: {} - filling with zeros",
@@ -376,13 +378,9 @@ fn save_file_job_with_buffer(
                 continue;
             }
         };
+        buffer.truncate(bytes_read);
 
-        if chunk_cow.is_empty() {
-            break;
-        }
-
-        let bytes_read = chunk_cow.len();
-        file_data.extend_from_slice(&chunk_cow);
+        file_data.extend_from_slice(&buffer);
 
         total_read += bytes_read;
         offset += bytes_read as u64;
@@ -456,8 +454,9 @@ fn save_file_job_with_buffer(
                 let mut remaining = fragment.size as usize;
                 while remaining > 0 {
                     let to_read = remaining.min(EXTRACTION_BUFFER_SIZE);
-                    let chunk_cow = match reader.read_chunk(frag_offset, to_read) {
-                        Ok(c) if !c.is_empty() => c,
+                    let mut buffer = vec![0u8; to_read];
+                    let bytes_read = match reader.read_into(frag_offset, &mut buffer) {
+                        Ok(n) if n > 0 => n,
                         Ok(_) => break,
                         Err(e) => {
                             eprintln!(
@@ -467,9 +466,9 @@ fn save_file_job_with_buffer(
                             break;
                         }
                     };
-                    let bytes_read = chunk_cow.len();
-                    hasher.update(&chunk_cow);
-                    writer.write_all(&chunk_cow)?;
+                    buffer.truncate(bytes_read);
+                    hasher.update(&buffer);
+                    writer.write_all(&buffer)?;
                     total_written += bytes_read as u64;
                     frag_offset += bytes_read as u64;
                     remaining = remaining.saturating_sub(bytes_read);
@@ -495,12 +494,15 @@ fn save_file_job_with_buffer(
             if let (Some(tail_offset), Some(tail_size)) =
                 (bgc_result.tail_offset, bgc_result.tail_size)
             {
-                match reader.read_chunk(tail_offset, tail_size as usize) {
-                    Ok(chunk_cow) => {
-                        hasher.update(&chunk_cow);
-                        writer.write_all(&chunk_cow)?;
-                        total_written += chunk_cow.len() as u64;
+                let mut tail_buffer = vec![0u8; tail_size as usize];
+                match reader.read_into(tail_offset, &mut tail_buffer) {
+                    Ok(n) if n > 0 => {
+                        tail_buffer.truncate(n);
+                        hasher.update(&tail_buffer);
+                        writer.write_all(&tail_buffer)?;
+                        total_written += n as u64;
                     }
+                    Ok(_) => {}
                     Err(e) => {
                         eprintln!(
                             "[Recovery] Tail read error at 0x{:016X}: {}",

@@ -1,7 +1,7 @@
 use crate::jpeg::{JpegParser, JpegValidator, RestartMarkerScanner, ValidationResult};
 use crate::png::{PngValidationResult, PngValidator};
 use crate::statistics::{ImageClassification, ImageClassifier, ImageStatistics};
-use crate::{BlockSource, FileType};
+use crate::{FileType, ZeroCopySource};
 
 #[derive(Debug, Clone)]
 pub struct BgcConfig {
@@ -264,7 +264,7 @@ impl BifragmentCarver {
         }
     }
 
-    pub fn carve_bifragment<S: BlockSource>(
+    pub fn carve_bifragment<S: ZeroCopySource>(
         &self,
         head: &[u8],
         head_offset: u64,
@@ -294,20 +294,22 @@ impl BifragmentCarver {
 
         while cluster_offset < search_end {
             let read_size = read_window.min((search_end - cluster_offset) as usize);
-            let chunk_cow = match source.read_chunk(cluster_offset, read_size) {
-                Ok(c) if !c.is_empty() => c,
+            let mut buffer = vec![0u8; read_size];
+            let bytes_read = match source.read_into(cluster_offset, &mut buffer) {
+                Ok(n) if n > 0 => n,
                 _ => break,
             };
+            buffer.truncate(bytes_read);
 
             if let Some(candidate) =
-                self.try_stitch(head, &chunk_cow, corruption_offset as usize, cluster_offset)
+                self.try_stitch(head, &buffer, corruption_offset as usize, cluster_offset)
             {
                 let dominated = best_candidate
                     .as_ref()
                     .map(|(c, _)| candidate.confidence > c.confidence)
                     .unwrap_or(true);
                 if dominated && candidate.confidence >= self.config.min_confidence {
-                    best_candidate = Some((candidate, chunk_cow.to_vec()));
+                    best_candidate = Some((candidate, buffer));
                 }
             }
             cluster_offset += self.config.cluster_size;
@@ -489,8 +491,6 @@ impl Default for MultiFragmentConfig {
 
 pub struct MultiFragmentCarver {
     config: MultiFragmentConfig,
-    #[allow(dead_code)]
-    validator: JpegValidator,
     rst_scanner: RestartMarkerScanner,
 }
 
@@ -498,7 +498,6 @@ impl MultiFragmentCarver {
     pub fn new() -> Self {
         Self {
             config: MultiFragmentConfig::default(),
-            validator: JpegValidator::new(),
             rst_scanner: RestartMarkerScanner::new(),
         }
     }
@@ -506,12 +505,11 @@ impl MultiFragmentCarver {
     pub fn with_config(config: MultiFragmentConfig) -> Self {
         Self {
             config,
-            validator: JpegValidator::new(),
             rst_scanner: RestartMarkerScanner::new(),
         }
     }
 
-    pub fn carve<S: BlockSource>(
+    pub fn carve<S: ZeroCopySource>(
         &self,
         head_data: &[u8],
         head_offset: u64,
@@ -560,12 +558,14 @@ impl MultiFragmentCarver {
 
             while cluster_offset < search_end {
                 let read_size = read_window.min((search_end - cluster_offset) as usize);
-                let chunk_cow = match source.read_chunk(cluster_offset, read_size) {
-                    Ok(c) if !c.is_empty() => c,
+                let mut buffer = vec![0u8; read_size];
+                let bytes_read = match source.read_into(cluster_offset, &mut buffer) {
+                    Ok(n) if n > 0 => n,
                     _ => break,
                 };
+                buffer.truncate(bytes_read);
 
-                let chunk = &chunk_cow;
+                let chunk = &buffer;
 
                 if let Some(boundary) = crate::statistics::detect_entropy_boundary(
                     chunk,
@@ -667,8 +667,6 @@ pub struct SmartCarver {
     bgc_carver: BifragmentCarver,
     multi_fragment_carver: MultiFragmentCarver,
     classifier: ImageClassifier,
-    #[allow(dead_code)]
-    rst_scanner: RestartMarkerScanner,
 }
 
 impl SmartCarver {
@@ -696,7 +694,6 @@ impl SmartCarver {
             bgc_carver: BifragmentCarver::with_config(bgc_config),
             multi_fragment_carver: MultiFragmentCarver::with_config(mf_config),
             classifier: ImageClassifier::new(),
-            rst_scanner: RestartMarkerScanner::new(),
             config,
         }
     }
@@ -706,7 +703,7 @@ impl SmartCarver {
         &self.config
     }
 
-    pub fn analyze_jpeg<S: BlockSource>(
+    pub fn analyze_jpeg<S: ZeroCopySource>(
         &self,
         data: &[u8],
         offset: u64,

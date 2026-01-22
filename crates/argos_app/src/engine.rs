@@ -1,4 +1,4 @@
-use argos_core::{io::Reader, BlockSource, FileType, SignatureScanner, ZeroCopySource};
+use argos_core::{io::Reader, FileType, SignatureScanner, ZeroCopySource};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -542,17 +542,14 @@ fn collect_signatures(
             break;
         }
 
-        let chunk_cow = match reader.read_chunk(offset, CHUNK_SIZE) {
-            Ok(c) => c,
-            Err(_) => break,
+        let mut buffer = vec![0u8; CHUNK_SIZE];
+        let bytes_read = match reader.read_into(offset, &mut buffer) {
+            Ok(n) if n > 0 => n,
+            _ => break,
         };
+        buffer.truncate(bytes_read);
 
-        if chunk_cow.is_empty() {
-            break;
-        }
-
-        let chunk = &chunk_cow;
-        let bytes_read = chunk.len();
+        let chunk = &buffer;
 
         jpeg_scanner.scan_headers_callback(chunk, |rel_offset| {
             if rel_offset + 4 <= bytes_read {
