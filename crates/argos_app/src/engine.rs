@@ -1,4 +1,6 @@
-use argos_core::{io::Reader, FileType, SignatureScanner, ZeroCopySource};
+use argos_core::{
+    aligned_buffer::AlignedBuffer, io::Reader, FileType, SignatureScanner, ZeroCopySource,
+};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -13,15 +15,11 @@ use crate::recovery::RecoveryManager;
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const OVERLAP: usize = 256;
 const DATA_CHANNEL_CAPACITY: usize = 10;
-
 const EVENT_CHANNEL_CAPACITY: usize = 1000;
 
-/// Configuration for unsafe/debug modes that bypass strict validation
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnsafeConfig {
-    /// Bypass entropy, resolution, and decode validation filters
     pub unsafe_mode: bool,
-    /// Print detailed skip reasons to stderr  
     pub debug: bool,
 }
 
@@ -34,9 +32,7 @@ pub struct DataChunk {
 #[derive(Debug, Clone, Copy)]
 pub enum ScanEvent {
     HeaderFound { offset: u64, ftype: FileType },
-
     FooterFound { offset: u64, ftype: FileType },
-
     WorkerDone,
 }
 
@@ -251,7 +247,7 @@ fn producer_thread(
 
         let mut buffer = match recycle_rx.try_recv() {
             Ok(mut buf) => {
-                if is_direct && (buf.as_ptr() as usize % argos_core::PAGE_SIZE != 0) {
+                if is_direct && !(buf.as_ptr() as usize).is_multiple_of(argos_core::PAGE_SIZE) {
                     allocated_count += 1;
                     argos_core::allocate_aligned_buffer(CHUNK_SIZE)
                 } else {
@@ -386,7 +382,6 @@ fn worker_thread(
 use crate::signature_index::SignatureIndex;
 
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
-
 const MIN_FILE_SIZE: u64 = 64 * 1024;
 
 pub fn run_multipass_scan(
@@ -456,7 +451,7 @@ pub fn run_multipass_scan(
         total_candidates
     );
 
-    let mut recovery_manager = crate::recovery::RecoveryManager::new(device_path, output_dir, config)?;
+    let mut recovery_manager = RecoveryManager::new(device_path, output_dir, config)?;
     let mut recovered = 0u64;
     let mut skipped = 0u64;
 
@@ -475,7 +470,7 @@ pub fn run_multipass_scan(
             }
 
             let size = candidate.estimated_size();
-            if size < MIN_FILE_SIZE || size > MAX_FILE_SIZE {
+            if !(MIN_FILE_SIZE..=MAX_FILE_SIZE).contains(&size) {
                 skipped += 1;
                 pb.inc(1);
                 continue;
@@ -504,7 +499,7 @@ pub fn run_multipass_scan(
         skipped
     );
 
-    println!("\n[Pass 3/3] Fragment carving for orphan headers...");
+    println!("\n[Pass 3/3] Bifragment Gap Carving for orphan headers...");
     let pass3_start = Instant::now();
 
     let jpeg_orphans = index.orphan_headers(FileType::Jpeg, MAX_FILE_SIZE);
@@ -516,9 +511,98 @@ pub fn run_multipass_scan(
         total_orphans
     );
 
+    let mut bgc_recovered = 0u64;
+    let mut bgc_failed = 0u64;
+
+    if total_orphans > 0 {
+        use argos_core::carving::BifragmentCarver;
+        use argos_core::io::DiskReader;
+
+        let reader = match DiskReader::new(device_path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[Pass 3] Failed to open device for BGC: {}", e);
+                return Ok(());
+            }
+        };
+
+        let bgc_carver = BifragmentCarver::new();
+
+        let pb = ProgressBar::new(total_orphans as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[Pass 3] [{bar:40.magenta/black}] {pos}/{len} orphans")
+                .expect("invalid template")
+                .progress_chars("=>-"),
+        );
+
+        for orphan_offset in jpeg_orphans.iter() {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let mut header_buf = vec![0u8; 64 * 1024];
+            let bytes_read = match reader.read_into(*orphan_offset, &mut header_buf) {
+                Ok(n) => n,
+                Err(_) => {
+                    bgc_failed += 1;
+                    pb.inc(1);
+                    continue;
+                }
+            };
+            header_buf.truncate(bytes_read);
+
+            match bgc_carver.carve_bifragment(&header_buf, *orphan_offset, &reader) {
+                Some(carve_result) if carve_result.validation_score >= 0.5 => {
+                    if let (Some(tail_offset), Some(tail_size)) =
+                        (carve_result.tail_offset, carve_result.tail_size)
+                    {
+                        let file_size = carve_result.head_size + tail_size;
+
+                        if file_size >= MIN_FILE_SIZE && file_size <= MAX_FILE_SIZE {
+                            recovery_manager.process_event(&ScanEvent::HeaderFound {
+                                offset: *orphan_offset,
+                                ftype: FileType::Jpeg,
+                            });
+                            recovery_manager.process_event(&ScanEvent::FooterFound {
+                                offset: tail_offset + tail_size - 2,
+                                ftype: FileType::Jpeg,
+                            });
+                            bgc_recovered += 1;
+                        } else {
+                            bgc_failed += 1;
+                        }
+                    } else {
+                        bgc_failed += 1;
+                    }
+                }
+                Some(_) => {
+                    bgc_failed += 1;
+                }
+                None => {
+                    bgc_failed += 1;
+                }
+            }
+            pb.inc(1);
+        }
+
+        for _orphan_offset in png_orphans.iter() {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            bgc_failed += 1;
+            pb.inc(1);
+        }
+
+        pb.finish_and_clear();
+    }
+
     println!(
-        "[Pass 3] Complete in {:.1}s - {} orphans identified (carving pending)",
+        "[Pass 3] Complete in {:.1}s - {} recovered via BGC, {} failed (of {} orphans)",
         pass3_start.elapsed().as_secs_f64(),
+        bgc_recovered,
+        bgc_failed,
         total_orphans
     );
 
@@ -536,7 +620,8 @@ pub fn run_multipass_scan(
     println!("║ PNG Headers:        {:>18} ║", stats.png_headers);
     println!("║ PNG Footers:        {:>18} ║", stats.png_footers);
     println!("║ Contiguous Files:   {:>18} ║", recovered);
-    println!("║ Orphan Headers:     {:>18} ║", total_orphans);
+    println!("║ BGC Recovered:      {:>18} ║", bgc_recovered);
+    println!("║ Orphans Failed:     {:>18} ║", bgc_failed);
     println!(
         "║ Files Recovered:    {:>18} ║",
         recovery_manager.files_recovered()
@@ -565,14 +650,13 @@ fn collect_signatures(
             break;
         }
 
-        let mut buffer = vec![0u8; CHUNK_SIZE];
-        let bytes_read = match reader.read_into(offset, &mut buffer) {
+        let mut aligned_buffer = AlignedBuffer::new_default(CHUNK_SIZE);
+        let bytes_read = match reader.read_into(offset, aligned_buffer.as_mut_slice()) {
             Ok(n) if n > 0 => n,
             _ => break,
         };
-        buffer.truncate(bytes_read);
 
-        let chunk = &buffer;
+        let chunk = &aligned_buffer.as_slice()[..bytes_read];
 
         jpeg_scanner.scan_headers_callback(chunk, |rel_offset| {
             if rel_offset + 4 <= bytes_read {
@@ -643,7 +727,12 @@ mod tests {
         temp_file.flush().unwrap();
 
         let running = Arc::new(AtomicBool::new(true));
-        let result = run_scan(temp_file.path().to_str().unwrap(), temp_dir.path(), running, UnsafeConfig::default());
+        let result = run_scan(
+            temp_file.path().to_str().unwrap(),
+            temp_dir.path(),
+            running,
+            UnsafeConfig::default(),
+        );
         assert!(result.is_ok());
     }
 
@@ -652,7 +741,12 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let temp_dir = tempfile::TempDir::new().unwrap();
         let running = Arc::new(AtomicBool::new(true));
-        let result = run_scan(temp_file.path().to_str().unwrap(), temp_dir.path(), running, UnsafeConfig::default());
+        let result = run_scan(
+            temp_file.path().to_str().unwrap(),
+            temp_dir.path(),
+            running,
+            UnsafeConfig::default(),
+        );
         assert!(result.is_ok());
     }
 }

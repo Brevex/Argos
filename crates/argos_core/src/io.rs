@@ -147,7 +147,7 @@ impl DirectReader {
         let offset_adjustment = (offset - aligned_offset) as usize;
 
         let ptr = buffer.as_ptr() as usize;
-        if ptr % PAGE_SIZE != 0 {
+        if !ptr.is_multiple_of(PAGE_SIZE) {
             return Err(CoreError::InvalidFormat(
                 "Buffer not page-aligned for O_DIRECT".into(),
             ));
@@ -286,9 +286,8 @@ impl Reader {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path_ref = path.as_ref();
 
-        match MmapReader::new(path_ref) {
-            Ok(r) => return Ok(Reader::Mmap(r)),
-            Err(_) => {}
+        if let Ok(r) = MmapReader::new(path_ref) {
+            return Ok(Reader::Mmap(r));
         }
 
         #[cfg(target_os = "linux")]
@@ -422,7 +421,7 @@ mod tests {
     fn test_aligned_buffer_allocation() {
         let buffer = allocate_aligned_buffer(8192);
         assert!(buffer.len() >= 8192);
-        // Check alignment
+
         let ptr = buffer.as_ptr() as usize;
         assert_eq!(ptr % PAGE_SIZE, 0, "Buffer not page-aligned");
     }

@@ -1,9 +1,13 @@
+pub mod aligned_buffer;
 pub mod carving;
+pub mod error;
 pub mod io;
 pub mod jpeg;
+pub mod matching;
 pub mod png;
 pub mod scanners;
 pub mod statistics;
+pub mod validation;
 
 pub use carving::{
     CarveDecision, Fragment, MultiFragmentCarver, MultiFragmentConfig, MultiFragmentResult,
@@ -12,12 +16,29 @@ pub use carving::{
 #[cfg(target_os = "linux")]
 pub use io::DirectReader;
 pub use io::{allocate_aligned_buffer, DiskReader, MmapReader, Reader, ZeroCopySource, PAGE_SIZE};
-pub use jpeg::{HuffmanDecoder, JpegParser, JpegValidator, RestartMarkerScanner, ValidationResult};
+pub use jpeg::{
+    HuffmanDecoder, JpegBoundaryDetector, JpegParser, JpegValidator, RestartMarkerScanner,
+    ValidationResult,
+};
 pub use png::{PngFragmentCarver, PngParser, PngValidationResult, PngValidator};
 pub use scanners::{JpegScanner, PngScanner, SignatureScanner};
 pub use statistics::{
     compute_entropy_delta, detect_entropy_boundary, ImageClassification, ImageClassifier,
     ImageStatistics,
+};
+
+pub use aligned_buffer::{AlignedBuffer, AlignedBufferPool, DEFAULT_ALIGNMENT};
+pub use error::{
+    ArgosError, ArgosResult, ErrorContext, ErrorSeverity, FileFormat as ErrorFileFormat,
+};
+pub use matching::{
+    FooterCandidate, GlobalMatcher, HeaderCandidate, MatchEvidence, MatchResult, MatchWeight,
+    MatcherConfig,
+};
+pub use validation::{
+    EntropyFilter, JpegStructuralValidator, PngStructuralValidator, RenderingValidator,
+    StitchValidation, ValidationContext, ValidationPipeline,
+    ValidationResult as PipelineValidationResult, ValidationStage,
 };
 
 use thiserror::Error;

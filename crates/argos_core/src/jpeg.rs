@@ -52,17 +52,11 @@ pub fn quick_validate_header(data: &[u8]) -> bool {
 
     let marker = data[3];
     matches!(marker,
-
         0xE0..=0xEF |
-
         0xDB |
-
         0xC4 |
-
         0xC0..=0xC3 | 0xC5..=0xCF |
-
         0xDD |
-
         0xFE
     )
 }
@@ -152,8 +146,9 @@ pub struct JpegStructure {
     pub thumbnail: Option<ThumbnailInfo>,
     pub corruption_point: Option<u64>,
     pub valid_end_offset: u64,
-
     pub skipped_segments: u32,
+    pub is_truncated: bool,
+    pub has_valid_content: bool,
 }
 
 pub struct JpegParser;
@@ -179,16 +174,17 @@ impl JpegParser {
             length: 0,
         });
         let mut pos: usize = 2;
+        let mut found_valid_marker = false;
 
-        while pos < data.len() - 1 {
+        while pos < data.len().saturating_sub(1) {
             if data[pos] != 0xFF {
                 pos += 1;
                 continue;
             }
-            while pos < data.len() - 1 && data[pos + 1] == 0xFF {
+            while pos < data.len().saturating_sub(1) && data[pos + 1] == 0xFF {
                 pos += 1;
             }
-            if pos >= data.len() - 1 {
+            if pos >= data.len().saturating_sub(1) {
                 break;
             }
 
@@ -201,135 +197,18 @@ impl JpegParser {
             let marker_type = MarkerType::from_byte(marker_byte);
             let marker_offset = pos as u64;
 
-            if is_standalone_marker(marker_byte) {
-                structure.markers.push(JpegMarker {
-                    marker_type,
-                    offset: marker_offset,
-                    length: 0,
-                });
-                if matches!(marker_type, MarkerType::Eoi) {
-                    structure.valid_end_offset = pos as u64 + 2;
-                    break;
-                }
-                pos += 2;
-                continue;
-            }
-
-            if pos + 3 >= data.len() {
-                structure.corruption_point = Some(pos as u64);
-                break;
-            }
-            let length = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
-            if length < 2 || pos + 2 + length as usize > data.len() {
-                structure.corruption_point = Some(pos as u64);
-                break;
-            }
-
-            structure.markers.push(JpegMarker {
+            if matches!(
                 marker_type,
-                offset: marker_offset,
-                length,
-            });
-
-            match marker_type {
-                MarkerType::Sof(_) => {
-                    if pos + 9 <= data.len() {
-                        structure.image_height = u16::from_be_bytes([data[pos + 5], data[pos + 6]]);
-                        structure.image_width = u16::from_be_bytes([data[pos + 7], data[pos + 8]]);
-                    }
-                    if marker_byte == SOF2 {
-                        structure.is_progressive = true;
-                    }
-                }
-                MarkerType::Sos => {
-                    structure.sos_offset = Some(marker_offset);
-                    pos += 2 + length as usize;
-                    while pos < data.len() - 1 {
-                        if data[pos] == 0xFF && data[pos + 1] != 0x00 {
-                            let next = data[pos + 1];
-                            if next == 0xD9 {
-                                structure.markers.push(JpegMarker {
-                                    marker_type: MarkerType::Eoi,
-                                    offset: pos as u64,
-                                    length: 0,
-                                });
-                                structure.valid_end_offset = pos as u64 + 2;
-                                return Ok(structure);
-                            } else if is_restart_marker(next) {
-                                structure.markers.push(JpegMarker {
-                                    marker_type: MarkerType::Rst(next - 0xD0),
-                                    offset: pos as u64,
-                                    length: 0,
-                                });
-                                pos += 2;
-                            } else if next == 0xFF {
-                                pos += 1;
-                            } else {
-                                break;
-                            }
-                        } else {
-                            pos += 1;
-                        }
-                    }
-                    continue;
-                }
-                MarkerType::Dri => {
-                    if length >= 4 && pos + 5 < data.len() {
-                        structure.restart_interval =
-                            u16::from_be_bytes([data[pos + 4], data[pos + 5]]);
-                    }
-                }
-                MarkerType::App(1) => {
-                    self.parse_app1_exif(data, pos + 4, length - 2, &mut structure);
-                }
-                _ => {}
+                MarkerType::App(_)
+                    | MarkerType::Dqt
+                    | MarkerType::Dht
+                    | MarkerType::Sof(_)
+                    | MarkerType::Sos
+                    | MarkerType::Dri
+                    | MarkerType::Com
+            ) {
+                found_valid_marker = true;
             }
-            pos += 2 + length as usize;
-        }
-
-        if structure.valid_end_offset == 0 {
-            structure.valid_end_offset = pos as u64;
-        }
-        Ok(structure)
-    }
-
-    pub fn parse_tolerant(&self, data: &[u8]) -> Result<JpegStructure> {
-        if data.len() < 4 {
-            return Err(CoreError::InvalidFormat("Data too short for JPEG".into()));
-        }
-        if data[0] != 0xFF || data[1] != 0xD8 {
-            return Err(CoreError::InvalidFormat("Missing JPEG SOI marker".into()));
-        }
-
-        let mut structure = JpegStructure::default();
-        structure.markers.push(JpegMarker {
-            marker_type: MarkerType::Soi,
-            offset: 0,
-            length: 0,
-        });
-        let mut pos: usize = 2;
-
-        while pos < data.len() - 1 {
-            if data[pos] != 0xFF {
-                pos += 1;
-                continue;
-            }
-
-            while pos < data.len() - 1 && data[pos + 1] == 0xFF {
-                pos += 1;
-            }
-            if pos >= data.len() - 1 {
-                break;
-            }
-
-            let marker_byte = data[pos + 1];
-            if marker_byte == 0x00 {
-                pos += 2;
-                continue;
-            }
-
-            let marker_type = MarkerType::from_byte(marker_byte);
-            let marker_offset = pos as u64;
 
             if is_standalone_marker(marker_byte) {
                 structure.markers.push(JpegMarker {
@@ -339,17 +218,18 @@ impl JpegParser {
                 });
                 if matches!(marker_type, MarkerType::Eoi) {
                     structure.valid_end_offset = pos as u64 + 2;
-                    break;
+                    structure.has_valid_content = found_valid_marker;
+                    return Ok(structure);
                 }
                 pos += 2;
                 continue;
             }
 
             if pos + 3 >= data.len() {
-                structure.corruption_point = Some(pos as u64);
+                structure.is_truncated = true;
+                structure.valid_end_offset = pos as u64;
                 break;
             }
-
             let length = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
 
             if length < 2 || pos + 2 + length as usize > data.len() {
@@ -359,16 +239,11 @@ impl JpegParser {
                 }
 
                 pos += 2;
-                while pos < data.len() - 1 {
+                while pos < data.len().saturating_sub(1) {
                     if data[pos] == 0xFF && data[pos + 1] != 0x00 && data[pos + 1] != 0xFF {
                         let next_marker = data[pos + 1];
-
                         if matches!(next_marker,
-                            0xC0..=0xCF |
-                            0xD0..=0xD9 |
-                            0xDA..=0xDF |
-                            0xE0..=0xEF |
-                            0xFE
+                            0xC0..=0xCF | 0xD0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xEF | 0xFE
                         ) {
                             break;
                         }
@@ -396,9 +271,9 @@ impl JpegParser {
                 }
                 MarkerType::Sos => {
                     structure.sos_offset = Some(marker_offset);
-
                     pos += 2 + length as usize;
-                    while pos < data.len() - 1 {
+
+                    while pos < data.len().saturating_sub(1) {
                         if data[pos] == 0xFF && data[pos + 1] != 0x00 {
                             let next = data[pos + 1];
                             if next == 0xD9 {
@@ -408,6 +283,7 @@ impl JpegParser {
                                     length: 0,
                                 });
                                 structure.valid_end_offset = pos as u64 + 2;
+                                structure.has_valid_content = found_valid_marker;
                                 return Ok(structure);
                             } else if is_restart_marker(next) {
                                 structure.markers.push(JpegMarker {
@@ -425,6 +301,9 @@ impl JpegParser {
                             pos += 1;
                         }
                     }
+
+                    structure.is_truncated = true;
+                    structure.valid_end_offset = pos as u64;
                     continue;
                 }
                 MarkerType::Dri => {
@@ -443,7 +322,9 @@ impl JpegParser {
 
         if structure.valid_end_offset == 0 {
             structure.valid_end_offset = pos as u64;
+            structure.is_truncated = true;
         }
+        structure.has_valid_content = found_valid_marker;
         Ok(structure)
     }
 
@@ -1043,6 +924,163 @@ impl RestartMarkerScanner {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct JpegBoundaryDetector {
+    pub use_eoi_hints: bool,
+    pub validate_structure: bool,
+    pub entropy_window: usize,
+    pub entropy_threshold: f64,
+    pub max_file_size: u64,
+}
+
+impl Default for JpegBoundaryDetector {
+    fn default() -> Self {
+        Self {
+            use_eoi_hints: true,
+            validate_structure: true,
+            entropy_window: 8192,
+            entropy_threshold: 2.5,
+            max_file_size: 100 * 1024 * 1024, // 100MB
+        }
+    }
+}
+
+impl JpegBoundaryDetector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn find_boundary(&self, data: &[u8]) -> Option<usize> {
+        if data.len() < 4 {
+            return None;
+        }
+
+        let parser = JpegParser::new();
+        if let Ok(structure) = parser.parse(data) {
+            if structure.valid_end_offset > 0 && !structure.is_truncated {
+                return Some(structure.valid_end_offset as usize);
+            }
+        }
+
+        let eoi_candidates = if self.use_eoi_hints {
+            self.find_all_eoi_markers(data)
+        } else {
+            vec![]
+        };
+
+        let entropy_boundary = self.detect_entropy_drop(data);
+
+        if let Some(entropy_bound) = entropy_boundary {
+            if let Some(best_eoi) = self.select_best_eoi(&eoi_candidates, entropy_bound) {
+                if self.validate_structure {
+                    if self.validate_jpeg_at_offset(data, best_eoi) {
+                        return Some(best_eoi);
+                    }
+                } else {
+                    return Some(best_eoi);
+                }
+            }
+            return Some(entropy_bound);
+        }
+
+        for &eoi in &eoi_candidates {
+            if self.validate_structure {
+                if self.validate_jpeg_at_offset(data, eoi) {
+                    return Some(eoi);
+                }
+            } else {
+                return Some(eoi);
+            }
+        }
+
+        None
+    }
+
+    fn find_all_eoi_markers(&self, data: &[u8]) -> Vec<usize> {
+        let mut candidates = Vec::new();
+        let max_search = data.len().min(self.max_file_size as usize);
+
+        for i in 0..max_search.saturating_sub(1) {
+            if data[i] == 0xFF && data[i + 1] == 0xD9 {
+                candidates.push(i + 2); 
+            }
+        }
+        candidates
+    }
+
+    fn detect_entropy_drop(&self, data: &[u8]) -> Option<usize> {
+        if data.len() < self.entropy_window * 2 {
+            return None;
+        }
+
+        let max_search = data.len().min(self.max_file_size as usize);
+        let mut prev_entropy = Self::compute_entropy_for_window(&data[..self.entropy_window]);
+        let mut offset = self.entropy_window;
+
+        while offset + self.entropy_window <= max_search {
+            let current_entropy =
+                Self::compute_entropy_for_window(&data[offset..offset + self.entropy_window]);
+
+            let delta = prev_entropy - current_entropy;
+
+            if delta > self.entropy_threshold && prev_entropy > 6.0 {
+                return Some(offset);
+            }
+
+            prev_entropy = current_entropy;
+            offset += self.entropy_window;
+        }
+
+        None
+    }
+
+    fn select_best_eoi(&self, eois: &[usize], entropy_boundary: usize) -> Option<usize> {
+        eois.iter()
+            .filter(|&&eoi| eoi <= entropy_boundary + self.entropy_window)
+            .max_by_key(|&&eoi| eoi)
+            .copied()
+    }
+
+    fn validate_jpeg_at_offset(&self, data: &[u8], end_offset: usize) -> bool {
+        if end_offset > data.len() || end_offset < 4 {
+            return false;
+        }
+
+        let parser = JpegParser::new();
+        match parser.parse(&data[..end_offset]) {
+            Ok(structure) => {
+                !structure.markers.is_empty() &&
+                !structure.is_truncated &&
+                structure.has_valid_content
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn compute_entropy_for_window(data: &[u8]) -> f64 {
+        if data.is_empty() {
+            return 0.0;
+        }
+
+        let mut counts = [0u64; 256];
+        for &byte in data {
+            counts[byte as usize] += 1;
+        }
+
+        let len = data.len() as f64;
+        let mut entropy = 0.0;
+
+        for &count in &counts {
+            if count > 0 {
+                let p = count as f64 / len;
+                entropy -= p * p.log2();
+            }
+        }
+
+        entropy
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,11 +1177,8 @@ mod tests {
     #[test]
     fn test_quick_validate_header_invalid() {
         assert!(!quick_validate_header(&[0x00, 0x00, 0x00, 0x00]));
-
         assert!(!quick_validate_header(&[0xFF, 0xD8, 0xFF, 0x00]));
-
         assert!(!quick_validate_header(&[0xFF, 0xD8, 0x00, 0xE0]));
-
         assert!(!quick_validate_header(&[0xFF, 0xD8]));
     }
 }

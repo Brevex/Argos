@@ -20,7 +20,7 @@ pub fn quick_validate_header(data: &[u8]) -> bool {
         return false;
     }
 
-    if &data[0..8] != PNG_SIGNATURE {
+    if data[0..8] != PNG_SIGNATURE {
         return false;
     }
 
@@ -29,7 +29,7 @@ pub fn quick_validate_header(data: &[u8]) -> bool {
         return false;
     }
 
-    &data[12..16] == IHDR
+    data[12..16] == IHDR
 }
 
 const CRC_TABLE: [u32; 256] = generate_crc_table();
@@ -623,11 +623,8 @@ impl PngFragmentCarver {
 
 pub struct IdatRecovery {
     pub decompressed: Vec<u8>,
-
     pub scanlines_recovered: u32,
-
     pub complete: bool,
-
     pub error: Option<String>,
 }
 
@@ -694,7 +691,7 @@ impl IhdrData {
             6 => 4,
             _ => 1,
         };
-        ((self.bit_depth as usize * channels) + 7) / 8
+        (self.bit_depth as usize * channels).div_ceil(8)
     }
 }
 

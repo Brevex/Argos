@@ -101,6 +101,7 @@ name = "argos_core"
 version = "0.9.5"
 dependencies = [
  "flate2",
+ "image",
  "imagesize",
  "libc",
  "memchr",

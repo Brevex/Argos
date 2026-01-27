@@ -1,8 +1,12 @@
 use crate::engine::ScanEvent;
 use argos_core::{
+    aligned_buffer::AlignedBuffer,
     carving::{CarveDecision, SkipReason, SmartCarver, SmartCarverConfig},
+    error::FileFormat as ErrorFileFormat,
     io::DiskReader,
-    statistics::{compute_entropy, ImageClassification},
+    matching::{FooterCandidate, GlobalMatcher, HeaderCandidate},
+    statistics::compute_entropy,
+    validation::{ValidationContext, ValidationPipeline},
     FileType,
 };
 use chrono::Utc;
@@ -11,7 +15,7 @@ use dashmap::DashSet;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -19,31 +23,42 @@ use std::thread::{self, JoinHandle};
 use xxhash_rust::xxh3::xxh3_64;
 
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
-const MIN_FILE_SIZE: u64 = 64 * 1024;
+const MIN_FILE_SIZE: u64 = 2 * 1024;
 const EXTRACTION_BUFFER_SIZE: usize = 64 * 1024;
 const MIN_RESOLUTION: usize = 600;
-const FALLBACK_SIZE: u64 = 1024 * 1024;
 const EXTRACTION_WORKERS: usize = 2;
 const EXTRACTION_QUEUE_SIZE: usize = 16;
-const MAX_HEADER_DISTANCE: u64 = 200 * 1024 * 1024;
-const MIN_ENTROPY: f64 = 6.0;
-const MAX_ENTROPY: f64 = 7.99;
+const MIN_ENTROPY: f64 = 4.0;
+const MAX_ENTROPY: f64 = 8.0;
 const ENTROPY_SAMPLE_SIZE: usize = 4096;
 const ENTROPY_SAMPLE_COUNT: usize = 3;
 const HASH_SAMPLE_SIZE: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy)]
-struct Candidate {
-    offset_start: u64,
-    file_type: FileType,
+#[inline]
+fn filetype_to_format(ftype: FileType) -> ErrorFileFormat {
+    match ftype {
+        FileType::Jpeg => ErrorFileFormat::Jpeg,
+        FileType::Png => ErrorFileFormat::Png,
+        FileType::Unknown => ErrorFileFormat::Unknown,
+    }
+}
+
+#[inline]
+fn format_to_filetype(format: ErrorFileFormat) -> FileType {
+    match format {
+        ErrorFileFormat::Jpeg => FileType::Jpeg,
+        ErrorFileFormat::Png => FileType::Png,
+        ErrorFileFormat::Unknown => FileType::Unknown,
+    }
 }
 
 struct ExtractionJob {
     start: u64,
     size: u64,
     output_path: PathBuf,
-    device_path: Arc<str>,
     file_type: FileType,
+
+    header_cache: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,28 +75,42 @@ struct ChainOfCustody {
 }
 
 pub struct RecoveryManager {
-    stack: Vec<Candidate>,
-    reader: DiskReader,
+    reader: Arc<DiskReader>,
     output_dir: PathBuf,
+    #[allow(dead_code)]
     device_path: Arc<str>,
     files_recovered: Arc<AtomicU64>,
     files_skipped: Arc<AtomicU64>,
-    headers_pruned: Arc<AtomicU64>,
     #[allow(dead_code)]
     seen_hashes: Arc<DashSet<u64>>,
     extraction_tx: Option<Sender<ExtractionJob>>,
     extraction_handles: Vec<JoinHandle<()>>,
+    #[allow(dead_code)]
     config: crate::engine::UnsafeConfig,
+    header_buf: AlignedBuffer,
+    global_matcher: GlobalMatcher,
+    collected_headers: Vec<HeaderCandidate>,
+    collected_footers: Vec<FooterCandidate>,
+    #[allow(dead_code)]
+    jpeg_validator: ValidationPipeline,
+    #[allow(dead_code)]
+    png_validator: ValidationPipeline,
+    streaming_mode: bool,
 }
 
 impl RecoveryManager {
-    pub fn new(device_path: &str, output_dir: &Path, config: crate::engine::UnsafeConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        device_path: &str,
+        output_dir: &Path,
+        config: crate::engine::UnsafeConfig,
+    ) -> anyhow::Result<Self> {
         fs::create_dir_all(output_dir)?;
-        let reader = DiskReader::new(device_path)?;
+
+        let reader = Arc::new(DiskReader::new(device_path)?);
 
         let files_recovered = Arc::new(AtomicU64::new(0));
         let files_skipped = Arc::new(AtomicU64::new(0));
-        let headers_pruned = Arc::new(AtomicU64::new(0));
+        let _headers_pruned = Arc::new(AtomicU64::new(0));
         let seen_hashes = Arc::new(DashSet::new());
 
         let (tx, rx) = bounded::<ExtractionJob>(EXTRACTION_QUEUE_SIZE);
@@ -92,86 +121,152 @@ impl RecoveryManager {
             let recovered = Arc::clone(&files_recovered);
             let skipped = Arc::clone(&files_skipped);
             let hashes = Arc::clone(&seen_hashes);
+            let shared_reader = Arc::clone(&reader);
 
-            let handle = thread::Builder::new()
+            match thread::Builder::new()
                 .name(format!("extraction-{}", worker_id))
                 .spawn(move || {
-                    extraction_worker(rx, recovered, skipped, hashes, config);
-                })
-                .expect("failed to spawn extraction worker");
+                    extraction_worker(rx, recovered, skipped, hashes, shared_reader, config);
+                }) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    eprintln!("[Recovery] WARNING: Failed to spawn extraction worker {}: {} - degraded performance", worker_id, e);
+                }
+            }
+        }
 
-            handles.push(handle);
+        if handles.is_empty() {
+            anyhow::bail!("Failed to spawn any extraction workers");
         }
 
         Ok(Self {
-            stack: Vec::new(),
             reader,
             output_dir: output_dir.to_path_buf(),
             device_path: Arc::from(device_path),
             files_recovered,
             files_skipped,
-            headers_pruned,
             seen_hashes,
             extraction_tx: Some(tx),
             extraction_handles: handles,
             config,
+            header_buf: AlignedBuffer::new_default(4096),
+            global_matcher: GlobalMatcher::new(),
+            collected_headers: Vec::new(),
+            collected_footers: Vec::new(),
+            jpeg_validator: ValidationPipeline::for_jpeg_with_rendering(),
+            png_validator: ValidationPipeline::for_png_with_rendering(),
+            streaming_mode: false,
         })
     }
 
     pub fn process_event(&mut self, event: &ScanEvent) {
         match event {
             ScanEvent::HeaderFound { offset, ftype } => {
-                let prune_threshold = offset.saturating_sub(MAX_HEADER_DISTANCE);
-                let original_len = self.stack.len();
-                self.stack.retain(|c| c.offset_start >= prune_threshold);
-                let pruned = original_len - self.stack.len();
-                if pruned > 0 {
-                    self.headers_pruned
-                        .fetch_add(pruned as u64, Ordering::Relaxed);
-                }
-
-                self.stack.push(Candidate {
-                    offset_start: *offset,
-                    file_type: *ftype,
+                self.collected_headers.push(HeaderCandidate {
+                    offset: *offset,
+                    format: filetype_to_format(*ftype),
+                    quality: 0.9,
+                    dimensions: None,
+                    expected_size_range: None,
                 });
             }
             ScanEvent::FooterFound { offset, ftype } => {
-                let should_pop = self
-                    .stack
-                    .last()
-                    .map(|c| c.file_type == *ftype)
-                    .unwrap_or(false);
+                self.collected_footers.push(FooterCandidate {
+                    offset: *offset,
+                    format: filetype_to_format(*ftype),
+                    quality: 0.9,
+                });
 
-                if should_pop {
-                    let candidate = self.stack.pop().expect("stack verified non-empty");
-                    self.attempt_recovery(&candidate, *offset, *ftype);
+                if self.streaming_mode {
+                    self.try_immediate_match(*offset, *ftype);
                 }
             }
-            ScanEvent::WorkerDone => {}
+            ScanEvent::WorkerDone => {
+                if !self.streaming_mode {
+                    self.run_global_matching();
+                }
+            }
         }
     }
 
-    fn attempt_recovery(&mut self, candidate: &Candidate, footer_offset: u64, ftype: FileType) {
-        let footer_size = ftype.footer_size();
-        let file_size = footer_offset
-            .saturating_sub(candidate.offset_start)
-            .saturating_add(footer_size);
+    fn try_immediate_match(&mut self, footer_offset: u64, ftype: FileType) {
+        let footer_format = filetype_to_format(ftype);
 
-        if file_size < MIN_FILE_SIZE {
-            self.files_skipped.fetch_add(1, Ordering::Relaxed);
-            return;
+        let mut best_header_idx = None;
+        let mut best_score = 0.0f64;
+
+        for (idx, header) in self.collected_headers.iter().enumerate() {
+            if header.format != footer_format {
+                continue;
+            }
+
+            if footer_offset <= header.offset {
+                continue;
+            }
+
+            let distance = footer_offset - header.offset;
+
+            if !(MIN_FILE_SIZE..=MAX_FILE_SIZE).contains(&distance) {
+                continue;
+            }
+
+            let score = self.calculate_match_score(header, footer_offset, distance);
+
+            if score > best_score {
+                best_score = score;
+                best_header_idx = Some(idx);
+            }
         }
 
-        if file_size > MAX_FILE_SIZE {
+        if let Some(idx) = best_header_idx {
+            if best_score >= 0.3 {
+                let header = self.collected_headers.remove(idx);
+                self.attempt_recovery_from_match(&header, footer_offset, ftype);
+            }
+        }
+    }
+
+    fn calculate_match_score(
+        &self,
+        header: &HeaderCandidate,
+        _footer_offset: u64,
+        distance: u64,
+    ) -> f64 {
+        let mut score = 0.5;
+
+        let distance_score = 1.0 / (1.0 + (distance as f64 / 1_000_000.0).ln().max(0.0));
+        score += distance_score * 0.2;
+        score += header.quality * 0.2;
+
+        if let Some((min_size, max_size)) = header.expected_size_range {
+            if distance >= min_size && distance <= max_size {
+                score += 0.3;
+            }
+        }
+
+        score.min(1.0)
+    }
+
+    fn attempt_recovery_from_match(
+        &mut self,
+        header: &HeaderCandidate,
+        footer_offset: u64,
+        ftype: FileType,
+    ) {
+        let footer_size = ftype.footer_size();
+        let file_size = footer_offset
+            .saturating_sub(header.offset)
+            .saturating_add(footer_size);
+
+        if !(MIN_FILE_SIZE..=MAX_FILE_SIZE).contains(&file_size) {
             self.files_skipped.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
         let header_read_size = 4096.min(file_size as usize);
-        let mut header_buf = vec![0u8; header_read_size];
         let header_read = match self
             .reader
-            .read_into(candidate.offset_start, &mut header_buf)
+            .read_into(header.offset, &mut self.header_buf[..header_read_size])
         {
             Ok(n) if n > 0 => n,
             _ => {
@@ -179,37 +274,34 @@ impl RecoveryManager {
                 return;
             }
         };
-        header_buf.truncate(header_read);
 
         if header_read > 0 {
             if let Some((width, height)) =
-                argos_core::get_image_dimensions(&header_buf[..header_read])
+                argos_core::get_image_dimensions(&self.header_buf[..header_read])
             {
-                if width < MIN_RESOLUTION || height < MIN_RESOLUTION {
+                if width < MIN_RESOLUTION && height < MIN_RESOLUTION {
                     self.files_skipped.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-            } else if file_size < FALLBACK_SIZE {
-                self.files_skipped.fetch_add(1, Ordering::Relaxed);
-                return;
             }
         }
 
         let extension = ftype.extension();
-        let filename = format!(
-            "{}_{:016X}.{}",
-            ftype.name(),
-            candidate.offset_start,
-            extension
-        );
+        let filename = format!("{}_{:016X}.{}", ftype.name(), header.offset, extension);
         let output_path = self.output_dir.join(&filename);
 
+        let header_cache = if header_read > 0 {
+            Some(self.header_buf[..header_read].to_vec())
+        } else {
+            None
+        };
+
         let job = ExtractionJob {
-            start: candidate.offset_start,
+            start: header.offset,
             size: file_size,
             output_path,
-            device_path: Arc::clone(&self.device_path),
             file_type: ftype,
+            header_cache,
         };
 
         if let Some(tx) = &self.extraction_tx {
@@ -223,6 +315,52 @@ impl RecoveryManager {
         }
     }
 
+    fn run_global_matching(&mut self) {
+        if self.collected_headers.is_empty() || self.collected_footers.is_empty() {
+            return;
+        }
+
+        for header in &self.collected_headers {
+            self.global_matcher.add_header(header.clone());
+        }
+        for footer in &self.collected_footers {
+            self.global_matcher.add_footer(footer.clone());
+        }
+
+        let matches = if self.collected_headers.len() < 500 {
+            self.global_matcher.solve_optimal()
+        } else {
+            self.global_matcher.solve_greedy()
+        };
+
+        let match_data: Vec<_> = matches
+            .iter()
+            .filter_map(|result| {
+                let header = self.global_matcher.get_header(result.header_idx)?;
+                let footer = self.global_matcher.get_footer(result.footer_idx)?;
+                Some((
+                    header.clone(),
+                    footer.offset,
+                    format_to_filetype(header.format),
+                ))
+            })
+            .collect();
+
+        for (header, footer_offset, ftype) in match_data {
+            self.attempt_recovery_from_match(&header, footer_offset, ftype);
+        }
+
+        self.collected_headers.clear();
+        self.collected_footers.clear();
+    }
+
+    #[allow(dead_code)]
+    pub fn finalize(&mut self) {
+        if !self.collected_headers.is_empty() && !self.collected_footers.is_empty() {
+            self.run_global_matching();
+        }
+    }
+
     pub fn files_recovered(&self) -> u64 {
         self.files_recovered.load(Ordering::Relaxed)
     }
@@ -232,16 +370,28 @@ impl RecoveryManager {
     }
 
     pub fn pending_candidates(&self) -> usize {
-        self.stack.len()
+        self.collected_headers.len()
     }
 
     #[allow(dead_code)]
-    pub fn headers_pruned(&self) -> u64 {
-        self.headers_pruned.load(Ordering::Relaxed)
+    pub fn collected_headers_count(&self) -> usize {
+        self.collected_headers.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn collected_footers_count(&self) -> usize {
+        self.collected_footers.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn set_streaming_mode(&mut self, enabled: bool) {
+        self.streaming_mode = enabled;
     }
 
     #[allow(dead_code)]
     pub fn wait_for_completion(&mut self) {
+        self.finalize();
+
         self.extraction_tx.take();
         let handles = std::mem::take(&mut self.extraction_handles);
         for handle in handles {
@@ -265,37 +415,43 @@ fn extraction_worker(
     files_recovered: Arc<AtomicU64>,
     files_skipped: Arc<AtomicU64>,
     seen_hashes: Arc<DashSet<u64>>,
+    shared_reader: Arc<DiskReader>,
     config: crate::engine::UnsafeConfig,
 ) {
-    // When unsafe_mode is on, disable strict filtering
     let smart_carver = SmartCarver::with_config(SmartCarverConfig {
-        structural_validation: !config.unsafe_mode,
+        structural_validation: true,
         bifragment_carving: true,
-        statistical_filtering: !config.unsafe_mode,
-        filter_thumbnails: !config.unsafe_mode,
-        filter_graphics: !config.unsafe_mode,
+        statistical_filtering: true,
+        filter_thumbnails: true,
+        filter_graphics: true,
         ..Default::default()
     });
 
-    // Open debug log file if debug mode is enabled
     let mut debug_file = if config.debug {
-        Some(std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/argos_debug.log")
-            .ok()
-            .map(|f| std::io::BufWriter::new(f)))
+        Some(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/argos_debug.log")
+                .ok()
+                .map(BufWriter::new),
+        )
     } else {
         None
     };
 
-    let mut reusable_buffer = Vec::with_capacity(MAX_FILE_SIZE as usize);
+    let mut reusable_buffer = AlignedBuffer::new_default(EXTRACTION_BUFFER_SIZE);
 
     for job in rx {
-        reusable_buffer.clear();
-        reusable_buffer.reserve(job.size as usize);
-
-        match save_file_job_with_buffer(&job, &mut reusable_buffer, &seen_hashes, &smart_carver, config, &mut debug_file) {
+        match save_file_streaming(
+            &job,
+            &mut reusable_buffer,
+            &seen_hashes,
+            &smart_carver,
+            &shared_reader,
+            config,
+            &mut debug_file,
+        ) {
             Ok(true) => {
                 files_recovered.fetch_add(1, Ordering::Relaxed);
             }
@@ -347,30 +503,35 @@ fn sample_entropy(data: &[u8]) -> f64 {
 }
 
 fn validate_image_decode(path: &Path, file_type: FileType) -> bool {
-    let file = match File::open(path) {
-        Ok(f) => f,
+    let data = match fs::read(path) {
+        Ok(d) => d,
         Err(_) => return false,
     };
 
-    let reader = BufReader::new(file);
-
-    let format = match file_type {
-        FileType::Jpeg => image::ImageFormat::Jpeg,
-        FileType::Png => image::ImageFormat::Png,
-        _ => return true,
+    let format = filetype_to_format(file_type);
+    let pipeline = ValidationPipeline::for_format(format);
+    let ctx = ValidationContext {
+        format,
+        expected_size: Some(data.len() as u64),
+        is_fragmented: false,
+        fragment_count: 1,
     };
 
-    image::load(reader, format).is_ok()
+    let result = pipeline.validate(&data, &ctx);
+
+    result.passed && result.confidence >= 0.5
 }
-fn save_file_job_with_buffer(
+
+#[allow(clippy::too_many_arguments)]
+fn save_file_streaming(
     job: &ExtractionJob,
-    file_data: &mut Vec<u8>,
+    buffer: &mut [u8],
     seen_hashes: &DashSet<u64>,
     smart_carver: &SmartCarver,
+    reader: &DiskReader,
     config: crate::engine::UnsafeConfig,
-    debug_file: &mut Option<Option<std::io::BufWriter<File>>>,
+    debug_file: &mut Option<Option<BufWriter<File>>>,
 ) -> anyhow::Result<bool> {
-    // Helper macro for debug logging to file
     macro_rules! debug_log {
         ($($arg:tt)*) => {
             if let Some(Some(ref mut file)) = debug_file {
@@ -380,18 +541,242 @@ fn save_file_job_with_buffer(
         };
     }
 
-    let reader = DiskReader::new(&*job.device_path)?;
+    let header_data = job.header_cache.as_deref();
+
+    if let Some(header) = header_data {
+        match job.file_type {
+            FileType::Jpeg => {
+                if header.len() < 2 || header[0] != 0xFF || header[1] != 0xD8 {
+                    debug_log!(
+                        "[SKIP] 0x{:016X} {} - Invalid JPEG header",
+                        job.start,
+                        job.file_type
+                    );
+                    return Ok(false);
+                }
+            }
+            FileType::Png => {
+                if header.len() < 8
+                    || !header.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+                {
+                    debug_log!(
+                        "[SKIP] 0x{:016X} {} - Invalid PNG header",
+                        job.start,
+                        job.file_type
+                    );
+                    return Ok(false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let quick_hash = {
+        let mut hash_input = Vec::with_capacity(HASH_SAMPLE_SIZE * 2);
+
+        if let Some(header) = header_data {
+            let take = header.len().min(HASH_SAMPLE_SIZE);
+            hash_input.extend_from_slice(&header[..take]);
+        } else {
+            let bytes = reader.read_into(job.start, buffer)?;
+            let take = bytes.min(HASH_SAMPLE_SIZE);
+            hash_input.extend_from_slice(&buffer[..take]);
+        }
+
+        if job.size > (HASH_SAMPLE_SIZE * 2) as u64 {
+            let tail_offset = job.start + job.size - HASH_SAMPLE_SIZE as u64;
+            let bytes = reader.read_into(tail_offset, buffer)?;
+            let take = bytes.min(HASH_SAMPLE_SIZE);
+            hash_input.extend_from_slice(&buffer[..take]);
+        }
+
+        xxh3_64(&hash_input)
+    };
+
+    if !seen_hashes.insert(quick_hash) {
+        debug_log!("[SKIP] 0x{:016X} {} - Duplicate", job.start, job.file_type);
+        return Ok(false);
+    }
+
+    let header_entropy = if let Some(header) = header_data {
+        compute_entropy(header)
+    } else {
+        let bytes = reader.read_into(job.start, buffer)?;
+        compute_entropy(&buffer[..bytes.min(ENTROPY_SAMPLE_SIZE)])
+    };
+
+    if !config.unsafe_mode && !(MIN_ENTROPY..=MAX_ENTROPY).contains(&header_entropy) {
+        let reason = if header_entropy < MIN_ENTROPY {
+            "EntropyTooLow"
+        } else {
+            "EntropyTooHigh"
+        };
+        debug_log!(
+            "[SKIP] 0x{:016X} {} - {} (entropy={:.3})",
+            job.start,
+            job.file_type,
+            reason,
+            header_entropy
+        );
+        seen_hashes.remove(&quick_hash);
+        return Ok(false);
+    }
+
+    let needs_structural_analysis =
+        smart_carver.config().structural_validation || smart_carver.config().bifragment_carving;
+
+    const STREAMING_THRESHOLD: u64 = 256 * 1024;
+
+    if job.size <= STREAMING_THRESHOLD || needs_structural_analysis {
+        let mut file_data = Vec::with_capacity(job.size as usize);
+
+        let mut offset = job.start;
+        if let Some(header) = header_data {
+            file_data.extend_from_slice(header);
+            offset += header.len() as u64;
+        }
+
+        while file_data.len() < job.size as usize {
+            let to_read = (job.size as usize - file_data.len()).min(buffer.len());
+            let bytes = match reader.read_into(offset, &mut buffer[..to_read]) {
+                Ok(n) if n > 0 => n,
+                Ok(_) => break,
+                Err(e) => {
+                    debug_log!("[WARN] 0x{:016X} I/O error: {}", offset, e);
+                    break;
+                }
+            };
+            file_data.extend_from_slice(&buffer[..bytes]);
+            offset += bytes as u64;
+        }
+
+        let analysis = match job.file_type {
+            FileType::Jpeg => smart_carver.analyze_jpeg(&file_data, job.start, reader),
+            FileType::Png => smart_carver.analyze_png(&file_data, job.start),
+            _ => argos_core::carving::SmartCarveResult::extract(
+                job.file_type,
+                job.start,
+                file_data.len() as u64,
+            ),
+        };
+
+        if let CarveDecision::Skip(ref reason) = analysis.decision {
+            let should_reject =
+                matches!(reason, SkipReason::InvalidStructure) || !config.unsafe_mode;
+            if should_reject {
+                debug_log!(
+                    "[SKIP] 0x{:016X} {} - {:?}",
+                    job.start,
+                    job.file_type,
+                    reason
+                );
+                seen_hashes.remove(&quick_hash);
+                return Ok(false);
+            }
+        }
+
+        let file = File::create(&job.output_path)?;
+        let mut writer = BufWriter::with_capacity(131_072, file);
+        let mut hasher = Sha256::new();
+
+        hasher.update(&file_data);
+        writer.write_all(&file_data)?;
+        writer.flush()?;
+
+        let sha256 = format!("{:x}", hasher.finalize());
+
+        write_chain_of_custody(
+            &job.output_path,
+            job.start,
+            file_data.len() as u64,
+            &sha256,
+            job.file_type,
+            false,
+            1,
+        )?;
+
+        return Ok(true);
+    }
+
+    let file = File::create(&job.output_path)?;
+    let mut writer = BufWriter::with_capacity(131_072, file);
+    let mut hasher = Sha256::new();
+    let mut total_written: u64 = 0;
+    let mut offset = job.start;
+
+    if let Some(header) = header_data {
+        hasher.update(header);
+        writer.write_all(header)?;
+        total_written += header.len() as u64;
+        offset += header.len() as u64;
+    }
+
+    while total_written < job.size {
+        let to_read = ((job.size - total_written) as usize).min(buffer.len());
+        let bytes = match reader.read_into(offset, &mut buffer[..to_read]) {
+            Ok(n) if n > 0 => n,
+            Ok(_) => break,
+            Err(e) => {
+                eprintln!("[Recovery] I/O error at 0x{:016X}: {}", offset, e);
+                break;
+            }
+        };
+
+        hasher.update(&buffer[..bytes]);
+        writer.write_all(&buffer[..bytes])?;
+        total_written += bytes as u64;
+        offset += bytes as u64;
+    }
+
+    writer.flush()?;
+    let sha256 = format!("{:x}", hasher.finalize());
+
+    write_chain_of_custody(
+        &job.output_path,
+        job.start,
+        total_written,
+        &sha256,
+        job.file_type,
+        false,
+        1,
+    )?;
+
+    Ok(true)
+}
+
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+fn save_file_job_with_buffer(
+    job: &ExtractionJob,
+    file_data: &mut Vec<u8>,
+    seen_hashes: &DashSet<u64>,
+    smart_carver: &SmartCarver,
+    reader: &DiskReader,
+    config: crate::engine::UnsafeConfig,
+    debug_file: &mut Option<Option<BufWriter<File>>>,
+) -> anyhow::Result<bool> {
+    macro_rules! debug_log {
+        ($($arg:tt)*) => {
+            if let Some(Some(ref mut file)) = debug_file {
+                let _ = writeln!(file, $($arg)*);
+                let _ = file.flush();
+            }
+        };
+    }
+
     let mut total_read = 0;
     let mut offset = job.start;
 
     file_data.clear();
     file_data.reserve(job.size as usize);
 
+    let mut aligned_buffer = AlignedBuffer::new_default(EXTRACTION_BUFFER_SIZE);
+
     while total_read < job.size as usize {
         let to_read = std::cmp::min(job.size as usize - total_read, EXTRACTION_BUFFER_SIZE);
+        let buffer = aligned_buffer.as_mut_slice();
 
-        let mut buffer = vec![0u8; to_read];
-        let bytes_read = match reader.read_into(offset, &mut buffer) {
+        let bytes_read = match reader.read_into(offset, &mut buffer[..to_read]) {
             Ok(n) if n > 0 => n,
             Ok(_) => break,
             Err(e) => {
@@ -399,16 +784,18 @@ fn save_file_job_with_buffer(
                     "[Recovery] I/O error reading at offset 0x{:016X}: {} - filling with zeros",
                     offset, e
                 );
-                let zeros = vec![0u8; to_read];
-                file_data.extend_from_slice(&zeros);
+
+                for b in &mut buffer[..to_read] {
+                    *b = 0;
+                }
+                file_data.extend_from_slice(&buffer[..to_read]);
                 total_read += to_read;
                 offset += to_read as u64;
                 continue;
             }
         };
-        buffer.truncate(bytes_read);
 
-        file_data.extend_from_slice(&buffer);
+        file_data.extend_from_slice(&buffer[..bytes_read]);
 
         total_read += bytes_read;
         offset += bytes_read as u64;
@@ -416,34 +803,54 @@ fn save_file_job_with_buffer(
 
     let hash = compute_partial_hash(file_data);
     if !seen_hashes.insert(hash) {
-        debug_log!("[SKIP] 0x{:016X} {} - Reason: Duplicate (hash collision)", job.start, job.file_type);
+        debug_log!(
+            "[SKIP] 0x{:016X} {} - Reason: Duplicate (hash collision)",
+            job.start,
+            job.file_type
+        );
         return Ok(false);
     }
 
     let entropy = sample_entropy(file_data);
-    // In unsafe mode, bypass entropy filter
+
     if !config.unsafe_mode && !(MIN_ENTROPY..=MAX_ENTROPY).contains(&entropy) {
-        let reason = if entropy < MIN_ENTROPY { "EntropyTooLow" } else { "EntropyTooHigh" };
+        let reason = if entropy < MIN_ENTROPY {
+            "EntropyTooLow"
+        } else {
+            "EntropyTooHigh"
+        };
         debug_log!(
             "[SKIP] 0x{:016X} {} - Reason: {} (entropy={:.3}, min={:.1}, max={:.2})",
-            job.start, job.file_type, reason, entropy, MIN_ENTROPY, MAX_ENTROPY
+            job.start,
+            job.file_type,
+            reason,
+            entropy,
+            MIN_ENTROPY,
+            MAX_ENTROPY
         );
         seen_hashes.remove(&hash);
         return Ok(false);
     }
 
-    // DEBUG: Log first bytes to understand parse failures
     if config.debug && file_data.len() >= 4 {
-        let header_bytes: Vec<String> = file_data.iter().take(16).map(|b| format!("{:02X}", b)).collect();
+        let header_bytes: Vec<String> = file_data
+            .iter()
+            .take(16)
+            .map(|b| format!("{:02X}", b))
+            .collect();
         let has_soi = file_data.len() >= 2 && file_data[0] == 0xFF && file_data[1] == 0xD8;
         debug_log!(
             "[DEBUG] 0x{:016X} {} - size={}, has_SOI={}, first_16_bytes=[{}]",
-            job.start, job.file_type, file_data.len(), has_soi, header_bytes.join(" ")
+            job.start,
+            job.file_type,
+            file_data.len(),
+            has_soi,
+            header_bytes.join(" ")
         );
     }
 
     let analysis_result = match job.file_type {
-        FileType::Jpeg => smart_carver.analyze_jpeg(file_data, job.start, &reader),
+        FileType::Jpeg => smart_carver.analyze_jpeg(file_data, job.start, reader),
         FileType::Png => smart_carver.analyze_png(file_data, job.start),
         _ => {
             let sha256_hash = compute_sha256(file_data);
@@ -468,21 +875,22 @@ fn save_file_job_with_buffer(
 
     match analysis_result.decision {
         CarveDecision::Skip(ref reason) => {
-            // In unsafe mode, only reject InvalidStructure (must have header+footer)
             let should_reject = match reason {
                 SkipReason::InvalidStructure => true,
                 _ => !config.unsafe_mode,
             };
-            
+
             if should_reject {
                 debug_log!(
                     "[SKIP] 0x{:016X} {} - Reason: {:?}, validation_notes={:?}",
-                    job.start, job.file_type, reason, analysis_result.validation_notes
+                    job.start,
+                    job.file_type,
+                    reason,
+                    analysis_result.validation_notes
                 );
                 seen_hashes.remove(&hash);
                 return Ok(false);
             }
-            // If unsafe mode and not InvalidStructure, continue to extraction
         }
         CarveDecision::Extract | CarveDecision::ExtractPartial | CarveDecision::AttemptBgc => {}
     }
@@ -499,26 +907,28 @@ fn save_file_job_with_buffer(
             is_fragmented = true;
             fragment_count = mf_result.fragments.len();
 
+            let mut aligned_frag_buffer = AlignedBuffer::new_default(EXTRACTION_BUFFER_SIZE);
+
             for fragment in &mf_result.fragments {
                 let mut frag_offset = fragment.offset;
                 let mut remaining = fragment.size as usize;
                 while remaining > 0 {
                     let to_read = remaining.min(EXTRACTION_BUFFER_SIZE);
-                    let mut buffer = vec![0u8; to_read];
-                    let bytes_read = match reader.read_into(frag_offset, &mut buffer) {
-                        Ok(n) if n > 0 => n,
-                        Ok(_) => break,
-                        Err(e) => {
-                            eprintln!(
-                                "[Recovery] Fragment read error at 0x{:016X}: {}",
-                                frag_offset, e
-                            );
-                            break;
-                        }
-                    };
-                    buffer.truncate(bytes_read);
-                    hasher.update(&buffer);
-                    writer.write_all(&buffer)?;
+                    let frag_buffer = aligned_frag_buffer.as_mut_slice();
+                    let bytes_read =
+                        match reader.read_into(frag_offset, &mut frag_buffer[..to_read]) {
+                            Ok(n) if n > 0 => n,
+                            Ok(_) => break,
+                            Err(e) => {
+                                eprintln!(
+                                    "[Recovery] Fragment read error at 0x{:016X}: {}",
+                                    frag_offset, e
+                                );
+                                break;
+                            }
+                        };
+                    hasher.update(&frag_buffer[..bytes_read]);
+                    writer.write_all(&frag_buffer[..bytes_read])?;
                     total_written += bytes_read as u64;
                     frag_offset += bytes_read as u64;
                     remaining = remaining.saturating_sub(bytes_read);
@@ -544,12 +954,12 @@ fn save_file_job_with_buffer(
             if let (Some(tail_offset), Some(tail_size)) =
                 (bgc_result.tail_offset, bgc_result.tail_size)
             {
-                let mut tail_buffer = vec![0u8; tail_size as usize];
-                match reader.read_into(tail_offset, &mut tail_buffer) {
+                let mut aligned_tail = AlignedBuffer::new_default(tail_size as usize);
+                let tail_buffer = aligned_tail.as_mut_slice();
+                match reader.read_into(tail_offset, tail_buffer) {
                     Ok(n) if n > 0 => {
-                        tail_buffer.truncate(n);
-                        hasher.update(&tail_buffer);
-                        writer.write_all(&tail_buffer)?;
+                        hasher.update(&tail_buffer[..n]);
+                        writer.write_all(&tail_buffer[..n])?;
                         total_written += n as u64;
                     }
                     Ok(_) => {}
@@ -651,35 +1061,12 @@ fn compute_sha256(data: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn should_filter_as_graphic(path: &Path, file_type: FileType, smart_carver: &SmartCarver) -> bool {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
-    let reader = BufReader::new(file);
-    let format = match file_type {
-        FileType::Jpeg => image::ImageFormat::Jpeg,
-        FileType::Png => image::ImageFormat::Png,
-        _ => return false,
-    };
-
-    let img = match image::load(reader, format) {
-        Ok(i) => i,
-        Err(_) => return false,
-    };
-
-    let rgb = img.to_rgb8();
-    let (width, height) = rgb.dimensions();
-    let pixels = rgb.as_raw();
-
-    let (classification, _stats) =
-        smart_carver.classify_image(pixels, width as usize, height as usize, 3);
-
-    matches!(
-        classification,
-        ImageClassification::ArtificialGraphic | ImageClassification::Encrypted
-    )
+fn should_filter_as_graphic(
+    _path: &Path,
+    _file_type: FileType,
+    _smart_carver: &SmartCarver,
+) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -689,7 +1076,7 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     #[test]
-    fn test_stack_based_matching() {
+    fn test_global_matcher_based_matching() {
         let mut temp_file = NamedTempFile::new().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let valid_size = 512 * 1024;
@@ -704,20 +1091,27 @@ mod tests {
         temp_file.write_all(&data).unwrap();
         temp_file.flush().unwrap();
 
-        let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
+        let mut manager = RecoveryManager::new(
+            temp_file.path().to_str().unwrap(),
+            temp_dir.path(),
+            crate::engine::UnsafeConfig::default(),
+        )
+        .unwrap();
+
+        manager.set_streaming_mode(true);
 
         manager.process_event(&ScanEvent::HeaderFound {
             offset: 100,
             ftype: FileType::Jpeg,
         });
-        assert_eq!(manager.stack.len(), 1);
+        assert_eq!(manager.collected_headers.len(), 1);
 
         manager.process_event(&ScanEvent::FooterFound {
             offset: 524391,
             ftype: FileType::Jpeg,
         });
-        assert_eq!(manager.stack.len(), 0);
+
+        assert_eq!(manager.collected_headers.len(), 0);
 
         manager.wait_for_completion();
 
@@ -755,32 +1149,40 @@ mod tests {
         temp_file.write_all(&data).unwrap();
         temp_file.flush().unwrap();
 
-        let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
+        let mut manager = RecoveryManager::new(
+            temp_file.path().to_str().unwrap(),
+            temp_dir.path(),
+            crate::engine::UnsafeConfig::default(),
+        )
+        .unwrap();
+
+        manager.set_streaming_mode(true);
 
         manager.process_event(&ScanEvent::HeaderFound {
             offset: 100,
             ftype: FileType::Jpeg,
         });
-        assert_eq!(manager.stack.len(), 1);
+        assert_eq!(manager.collected_headers.len(), 1);
 
         manager.process_event(&ScanEvent::HeaderFound {
             offset: h2_offset,
             ftype: FileType::Jpeg,
         });
-        assert_eq!(manager.stack.len(), 2);
+        assert_eq!(manager.collected_headers.len(), 2);
 
         manager.process_event(&ScanEvent::FooterFound {
             offset: f2_offset,
             ftype: FileType::Jpeg,
         });
-        assert_eq!(manager.stack.len(), 1);
+
+        assert_eq!(manager.collected_headers.len(), 1);
 
         manager.process_event(&ScanEvent::FooterFound {
             offset: f1_offset,
             ftype: FileType::Jpeg,
         });
-        assert_eq!(manager.stack.len(), 0);
+
+        assert_eq!(manager.collected_headers.len(), 0);
 
         manager.wait_for_completion();
 
@@ -793,15 +1195,20 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let temp_dir = TempDir::new().unwrap();
 
-        let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
+        let mut manager = RecoveryManager::new(
+            temp_file.path().to_str().unwrap(),
+            temp_dir.path(),
+            crate::engine::UnsafeConfig::default(),
+        )
+        .unwrap();
 
         manager.process_event(&ScanEvent::FooterFound {
             offset: 100,
             ftype: FileType::Jpeg,
         });
 
-        assert_eq!(manager.stack.len(), 0);
+        assert_eq!(manager.collected_headers.len(), 0);
+        assert_eq!(manager.collected_footers.len(), 1);
         assert_eq!(manager.files_recovered(), 0);
     }
 
@@ -810,8 +1217,12 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let temp_dir = TempDir::new().unwrap();
 
-        let mut manager =
-            RecoveryManager::new(temp_file.path().to_str().unwrap(), temp_dir.path(), crate::engine::UnsafeConfig::default()).unwrap();
+        let mut manager = RecoveryManager::new(
+            temp_file.path().to_str().unwrap(),
+            temp_dir.path(),
+            crate::engine::UnsafeConfig::default(),
+        )
+        .unwrap();
 
         manager.process_event(&ScanEvent::HeaderFound {
             offset: 0,
@@ -827,7 +1238,7 @@ mod tests {
             ftype: FileType::Png,
         });
 
-        assert_eq!(manager.stack.len(), 1);
+        assert_eq!(manager.collected_headers.len(), 1);
         assert_eq!(manager.files_recovered(), 0);
     }
 }
