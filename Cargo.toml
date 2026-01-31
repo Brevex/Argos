@@ -1,12 +1,45 @@
-[workspace]
-resolver = "2"
-members = [
-    "crates/argos_core",
-    "crates/argos_app",
-]
-
-[workspace.package]
-version = "0.9.5"
+[package]
+name = "argos"
+version = "0.1.0"
 edition = "2021"
 authors = ["Breno"]
+description = "Professional forensic image recovery tool - specialized in recovering permanently deleted images"
 license = "MIT"
+readme = "README.md"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.12.0"
+console = "0.16.2"
+indicatif = "0.18.3"
+
+# Error handling
+anyhow = "1"
+thiserror = "2.0.18"
+
+# System I/O
+libc = "0.2"
+
+# Algorithms
+crc32fast = "1"
+
+# Utilities
+byteorder = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
