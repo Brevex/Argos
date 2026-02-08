@@ -5,6 +5,10 @@ use std::path::Path;
 
 pub const SECTOR_SIZE: usize = 4096;
 pub const BUFFER_SIZE: usize = 1024 * 1024;
+pub const OVERLAP: usize = SECTOR_SIZE;
+
+const BAD_SECTOR_BACKOFF_THRESHOLD: usize = 10;
+const MAX_JUMP_SIZE: u64 = 16 * 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 fn get_block_device_size(file: &File) -> io::Result<u64> {
@@ -60,9 +64,13 @@ impl AlignedBuffer {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         BUFFER_SIZE
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        false
     }
 }
 
@@ -82,11 +90,10 @@ impl Drop for AlignedBuffer {
 
 unsafe impl Send for AlignedBuffer {}
 unsafe impl Sync for AlignedBuffer {}
+
 pub struct DiskReader {
     file: File,
     size: u64,
-    #[allow(dead_code)]
-    use_direct_io: bool,
 }
 
 impl DiskReader {
@@ -94,7 +101,6 @@ impl DiskReader {
         Self::open_with_options(path, true)
     }
 
-    #[allow(dead_code)]
     pub fn open_regular(path: impl AsRef<Path>) -> io::Result<Self> {
         Self::open_with_options(path, false)
     }
@@ -133,7 +139,10 @@ impl DiskReader {
         };
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        let file = OpenOptions::new().read(true).open(path)?;
+        let file = {
+            let _ = direct_io;
+            OpenOptions::new().read(true).open(path)?
+        };
 
         let mut size = file.metadata()?.len();
 
@@ -153,15 +162,10 @@ impl DiskReader {
             return Ok(Self {
                 file: file_mut,
                 size,
-                use_direct_io: direct_io,
             });
         }
 
-        Ok(Self {
-            file,
-            size,
-            use_direct_io: direct_io,
-        })
+        Ok(Self { file, size })
     }
 
     pub fn read_at(&mut self, offset: u64, buffer: &mut AlignedBuffer) -> io::Result<usize> {
@@ -169,21 +173,9 @@ impl DiskReader {
         self.file.read(buffer.as_mut_slice())
     }
 
-    #[allow(dead_code)]
-    pub fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(buf)
-    }
-
     #[inline]
     pub fn size(&self) -> u64 {
         self.size
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn uses_direct_io(&self) -> bool {
-        self.use_direct_io
     }
 }
 
@@ -193,6 +185,7 @@ pub struct DiskScanner {
     buffer: AlignedBuffer,
     bad_sectors: Vec<u64>,
     jump_size: u64,
+    first_read: bool,
 }
 
 impl DiskScanner {
@@ -203,17 +196,8 @@ impl DiskScanner {
             buffer: AlignedBuffer::new(),
             bad_sectors: Vec::new(),
             jump_size: BUFFER_SIZE as u64,
+            first_read: true,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn disk_size(&self) -> u64 {
-        self.reader.size()
-    }
-
-    #[allow(dead_code)]
-    pub fn current_offset(&self) -> u64 {
-        self.current_offset
     }
 
     pub fn next_block(&mut self) -> io::Result<Option<(u64, &[u8])>> {
@@ -221,23 +205,30 @@ impl DiskScanner {
             return Ok(None);
         }
 
-        match self.reader.read_at(self.current_offset, &mut self.buffer) {
+        let read_offset = if self.first_read {
+            0
+        } else {
+            self.current_offset.saturating_sub(OVERLAP as u64)
+        };
+
+        match self.reader.read_at(read_offset, &mut self.buffer) {
             Ok(n) if n > 0 => {
-                let offset = self.current_offset;
-                self.current_offset += n as u64;
-                Ok(Some((offset, &self.buffer.as_slice()[..n])))
+                self.first_read = false;
+                self.current_offset = read_offset + n as u64;
+                Ok(Some((read_offset, &self.buffer.as_slice()[..n])))
             }
             Ok(_) => Ok(None),
             Err(e) => {
-                if e.kind() == io::ErrorKind::InvalidInput
+                let is_recoverable = e.kind() == io::ErrorKind::InvalidInput
                     || e.kind() == io::ErrorKind::Other
-                    || e.raw_os_error() == Some(5)
-                {
+                    || matches!(e.raw_os_error(), Some(5) | Some(61));
+
+                if is_recoverable {
                     self.bad_sectors.push(self.current_offset);
                     self.current_offset += self.jump_size;
 
-                    if self.bad_sectors.len() > 10 {
-                        self.jump_size = (self.jump_size * 2).min(16 * 1024 * 1024);
+                    if self.bad_sectors.len() > BAD_SECTOR_BACKOFF_THRESHOLD {
+                        self.jump_size = (self.jump_size * 2).min(MAX_JUMP_SIZE);
                     }
                     self.next_block()
                 } else {
@@ -245,13 +236,6 @@ impl DiskScanner {
                 }
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.current_offset = 0;
-        self.bad_sectors.clear();
-        self.jump_size = BUFFER_SIZE as u64;
     }
 
     pub fn bad_sectors(&self) -> &[u64] {

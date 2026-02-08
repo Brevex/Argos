@@ -133,7 +133,6 @@ fn parse_windows_device(index: usize, path: &str) -> Option<BlockDevice> {
     })
 }
 
-#[allow(dead_code)]
 pub fn format_device_table(devices: &[BlockDevice]) -> String {
     let mut output = String::new();
 

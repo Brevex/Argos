@@ -14,11 +14,20 @@ fn test_fragment_kind_size() {
 #[test]
 fn test_fragment_map_operations() {
     let mut map = FragmentMap::new();
-    map.push(Fragment::new(0, 100, FragmentKind::JpegHeader, 7.8));
-    map.push(Fragment::new(1000, 2, FragmentKind::JpegFooter, 7.5));
+    map.push(Fragment::new(0, FragmentKind::JpegHeader, 7.8));
+    map.push(Fragment::new(1000, FragmentKind::JpegFooter, 0.0));
     assert_eq!(map.len(), 2);
     assert_eq!(map.jpeg_headers().count(), 1);
     assert_eq!(map.jpeg_footers().count(), 1);
+}
+#[test]
+fn test_viable_headers_filter_low_entropy() {
+    let mut map = FragmentMap::new();
+    map.push(Fragment::new(0, FragmentKind::JpegHeader, 7.8));
+    map.push(Fragment::new(1000, FragmentKind::JpegHeader, 3.0));
+    map.push(Fragment::new(2000, FragmentKind::JpegHeader, 5.6));
+    assert_eq!(map.jpeg_headers().count(), 3);
+    assert_eq!(map.viable_jpeg_headers().count(), 2);
 }
 #[test]
 fn test_size_human() {
