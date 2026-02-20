@@ -7,6 +7,7 @@ pub mod io;
 pub mod types;
 
 pub use types::{
-    BlockDevice, DeviceType, Fragment, FragmentKind, FragmentMap, ImageFormat, ImageQualityScore,
+    BlockDevice, DeviceType, DimensionVerdict, ExtractionReport, ExtractionResult, Fragment,
+    FragmentCounts, FragmentKind, FragmentLists, FragmentMap, FragmentRanges, ImageFormat,
     JpegMetadata, Offset, PngMetadata, QuantizationQuality, RecoveredFile, RecoveryMethod,
 };

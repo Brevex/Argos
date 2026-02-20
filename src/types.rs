@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::LazyLock;
 
 pub type Offset = u64;
 
@@ -7,33 +8,88 @@ const MB: u64 = KB * 1024;
 const GB: u64 = MB * 1024;
 const TB: u64 = GB * 1024;
 
-const ENTROPY_WEIGHT: f32 = 0.35;
-const METADATA_WEIGHT: f32 = 0.25;
-const DIMENSION_WEIGHT: f32 = 0.20;
-const STRUCTURE_WEIGHT: f32 = 0.20;
+const AVG_IMAGE_SIZE: u64 = 3 * MB;
+const FRAGMENT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const MAX_FRAGMENT_CAPACITY: usize = FRAGMENT_BUDGET_BYTES / std::mem::size_of::<Fragment>();
 
-const HIGH_ENTROPY_THRESHOLD: f32 = 7.0;
-const MEDIUM_ENTROPY_THRESHOLD: f32 = 6.0;
-const LOW_ENTROPY_THRESHOLD: f32 = 5.5;
+pub const ICON_MAX_DIMENSION: u32 = 256;
+pub const ASSET_UPPER_DIMENSION: u32 = 512;
+pub const MIN_PHOTO_WIDTH: u32 = 640;
+pub const MIN_PHOTO_HEIGHT: u32 = 480;
+pub const MIN_PHOTO_MEGAPIXELS: f32 = 0.2;
+pub const MIN_PHOTO_BYTES: u64 = 50 * KB;
+pub const LOW_ENTROPY_THRESHOLD: f32 = 5.5;
+pub const MIN_SCAN_DATA_ENTROPY: f32 = 7.0;
+pub const EXTREME_ASPECT_RATIO: u32 = 5;
+pub const LOW_MARKER_COUNT_THRESHOLD: u16 = 6;
+pub const LOW_QUALITY_MAX_DIMENSION: u32 = 1280;
+pub const MIN_PNG_CHUNK_VARIETY: u8 = 3;
+pub const MIN_PNG_VARIETY_DIMENSION: u32 = 512;
+pub const CORRUPT_SECTOR_RATIO: usize = 4;
+pub const VALIDATION_HEADER_SIZE: usize = 16;
 
-const MINIMUM_QUALITY_SCORE: f32 = 0.3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimensionVerdict {
+    Photo,
+    Asset,
+    TooSmall,
+}
+
+pub fn categorize_dimensions(width: u32, height: u32) -> DimensionVerdict {
+    if width == 0 || height == 0 {
+        return DimensionVerdict::TooSmall;
+    }
+
+    if width <= ICON_MAX_DIMENSION && height <= ICON_MAX_DIMENSION {
+        return DimensionVerdict::Asset;
+    }
+
+    if width < MIN_PHOTO_WIDTH && height < MIN_PHOTO_HEIGHT {
+        return DimensionVerdict::TooSmall;
+    }
+
+    let megapixels = (width as f32 * height as f32) / 1_000_000.0;
+    if megapixels < MIN_PHOTO_MEGAPIXELS {
+        return DimensionVerdict::TooSmall;
+    }
+
+    if (width > height && width / height > EXTREME_ASPECT_RATIO)
+        || (height > width && height / width > EXTREME_ASPECT_RATIO)
+    {
+        return DimensionVerdict::Asset;
+    }
+
+    DimensionVerdict::Photo
+}
+
+pub fn is_metadata_asset_jpeg(width: u32, height: u32, metadata: &JpegMetadata) -> bool {
+    width <= ASSET_UPPER_DIMENSION
+        && height <= ASSET_UPPER_DIMENSION
+        && (width == height || (!metadata.has_exif && !metadata.has_icc_profile))
+}
+
+pub fn is_metadata_asset_png(width: u32, height: u32, metadata: &PngMetadata) -> bool {
+    if metadata.has_physical_dimensions && metadata.is_screen_resolution {
+        return true;
+    }
+    width <= ASSET_UPPER_DIMENSION && height <= ASSET_UPPER_DIMENSION && width == height
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FragmentKind {
     JpegHeader = 0,
     JpegFooter = 1,
-    PngHeader = 3,
-    PngIend = 5,
+    PngHeader = 2,
+    PngIend = 3,
 }
 
-#[repr(C, align(32))]
 #[derive(Debug, Clone, Copy)]
 pub struct Fragment {
     pub offset: Offset,
     pub kind: FragmentKind,
     pub entropy: f32,
-    _padding: [u8; 15],
+    pub verdict: DimensionVerdict,
 }
 
 impl Fragment {
@@ -42,7 +98,21 @@ impl Fragment {
             offset,
             kind,
             entropy,
-            _padding: [0; 15],
+            verdict: DimensionVerdict::Photo,
+        }
+    }
+
+    pub fn with_verdict(
+        offset: Offset,
+        kind: FragmentKind,
+        entropy: f32,
+        verdict: DimensionVerdict,
+    ) -> Self {
+        Self {
+            offset,
+            kind,
+            entropy,
+            verdict,
         }
     }
 
@@ -54,11 +124,40 @@ impl Fragment {
             _ => true,
         }
     }
+
+    pub fn is_header(&self) -> bool {
+        matches!(
+            self.kind,
+            FragmentKind::JpegHeader | FragmentKind::PngHeader
+        )
+    }
+}
+
+#[derive(Debug)]
+pub enum FragmentRanges {
+    Linear(Range<Offset>),
+    Bifragment([Range<Offset>; 2]),
+}
+
+impl FragmentRanges {
+    pub fn as_slice(&self) -> &[Range<Offset>] {
+        match self {
+            FragmentRanges::Linear(r) => std::slice::from_ref(r),
+            FragmentRanges::Bifragment(arr) => arr,
+        }
+    }
+
+    pub fn start_offset(&self) -> Offset {
+        match self {
+            FragmentRanges::Linear(r) => r.start,
+            FragmentRanges::Bifragment(arr) => arr[0].start,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct RecoveredFile {
-    pub fragments: Vec<Range<Offset>>,
+    pub fragments: FragmentRanges,
     pub method: RecoveryMethod,
     pub format: ImageFormat,
     pub header_entropy: f32,
@@ -66,7 +165,7 @@ pub struct RecoveredFile {
 
 impl RecoveredFile {
     pub fn new(
-        fragments: Vec<Range<Offset>>,
+        fragments: FragmentRanges,
         method: RecoveryMethod,
         format: ImageFormat,
         header_entropy: f32,
@@ -77,6 +176,10 @@ impl RecoveredFile {
             format,
             header_entropy,
         }
+    }
+
+    pub fn header_offset(&self) -> Offset {
+        self.fragments.start_offset()
     }
 }
 
@@ -110,6 +213,8 @@ pub struct JpegMetadata {
     pub has_jfif: bool,
     pub quantization_quality: QuantizationQuality,
     pub marker_count: u16,
+    pub has_sos: bool,
+    pub scan_data_entropy: f32,
 }
 
 impl Default for JpegMetadata {
@@ -120,6 +225,8 @@ impl Default for JpegMetadata {
             has_jfif: false,
             quantization_quality: QuantizationQuality::Unknown,
             marker_count: 0,
+            has_sos: false,
+            scan_data_entropy: 0.0,
         }
     }
 }
@@ -136,174 +243,20 @@ pub enum QuantizationQuality {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PngMetadata {
     pub has_text_chunks: bool,
-    pub has_gamma: bool,
-    pub has_chromaticity: bool,
     pub has_icc_profile: bool,
     pub has_physical_dimensions: bool,
     pub is_screen_resolution: bool,
     pub chunk_variety: u8,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ImageQualityScore {
-    pub entropy_score: f32,
-    pub metadata_score: f32,
-    pub dimension_score: f32,
-    pub structure_score: f32,
-    pub corruption_penalty: f32,
-    pub total: f32,
+pub trait FragmentCollector {
+    fn collect(&mut self, fragment: Fragment);
 }
 
-impl ImageQualityScore {
-    pub fn for_jpeg(
-        entropy: f32,
-        width: u16,
-        height: u16,
-        metadata: &JpegMetadata,
-        structure_valid: bool,
-    ) -> Self {
-        let entropy_score = entropy_to_score(entropy);
-        let metadata_score = jpeg_metadata_score(metadata);
-        let dimension_score = dimension_to_score(width as u32, height as u32);
-
-        let structure_score = if structure_valid {
-            let marker_density = (metadata.marker_count as f32 / 20.0).min(1.0);
-            0.5 + marker_density * 0.5
-        } else {
-            0.0
-        };
-
-        let corruption_penalty = if structure_valid { 1.0 } else { 0.3 };
-
-        let total = (entropy_score * ENTROPY_WEIGHT
-            + metadata_score * METADATA_WEIGHT
-            + dimension_score * DIMENSION_WEIGHT
-            + structure_score * STRUCTURE_WEIGHT)
-            * corruption_penalty;
-
-        Self {
-            entropy_score,
-            metadata_score,
-            dimension_score,
-            structure_score,
-            corruption_penalty,
-            total,
-        }
-    }
-
-    pub fn for_png(
-        entropy: f32,
-        width: u32,
-        height: u32,
-        metadata: &PngMetadata,
-        idat_count: usize,
-    ) -> Self {
-        let entropy_score = entropy_to_score(entropy);
-        let metadata_score = png_metadata_score(metadata);
-        let dimension_score = dimension_to_score(width, height);
-
-        let structure_score = {
-            let chunk_diversity = (metadata.chunk_variety as f32 / 6.0).min(1.0);
-            let idat_density = (idat_count as f32 / 5.0).min(1.0);
-            chunk_diversity * 0.6 + idat_density * 0.4
-        };
-
-        let corruption_penalty = if idat_count >= 1 { 1.0 } else { 0.0 };
-
-        let total = (entropy_score * ENTROPY_WEIGHT
-            + metadata_score * METADATA_WEIGHT
-            + dimension_score * DIMENSION_WEIGHT
-            + structure_score * STRUCTURE_WEIGHT)
-            * corruption_penalty;
-
-        Self {
-            entropy_score,
-            metadata_score,
-            dimension_score,
-            structure_score,
-            corruption_penalty,
-            total,
-        }
-    }
-
-    pub fn meets_minimum(&self) -> bool {
-        self.total >= MINIMUM_QUALITY_SCORE
-    }
-}
-
-fn entropy_to_score(entropy: f32) -> f32 {
-    if entropy >= HIGH_ENTROPY_THRESHOLD {
-        1.0
-    } else if entropy >= MEDIUM_ENTROPY_THRESHOLD {
-        0.5 + (entropy - MEDIUM_ENTROPY_THRESHOLD)
-            / (HIGH_ENTROPY_THRESHOLD - MEDIUM_ENTROPY_THRESHOLD)
-            * 0.5
-    } else if entropy >= LOW_ENTROPY_THRESHOLD {
-        0.2 + (entropy - LOW_ENTROPY_THRESHOLD) / (MEDIUM_ENTROPY_THRESHOLD - LOW_ENTROPY_THRESHOLD)
-            * 0.3
-    } else {
-        (entropy / LOW_ENTROPY_THRESHOLD * 0.2).max(0.0)
-    }
-}
-
-fn jpeg_metadata_score(metadata: &JpegMetadata) -> f32 {
-    let mut score = 0.0f32;
-
-    if metadata.has_exif {
-        score += 0.45;
-    }
-    if metadata.has_icc_profile {
-        score += 0.25;
-    }
-    if metadata.has_jfif && !metadata.has_exif {
-        score += 0.1;
-    }
-
-    score += match metadata.quantization_quality {
-        QuantizationQuality::High => 0.3,
-        QuantizationQuality::Medium => 0.15,
-        QuantizationQuality::Low => 0.0,
-        QuantizationQuality::Unknown => 0.05,
-    };
-
-    score.min(1.0)
-}
-
-fn png_metadata_score(metadata: &PngMetadata) -> f32 {
-    let mut score = 0.0f32;
-
-    if metadata.has_icc_profile {
-        score += 0.3;
-    }
-    if metadata.has_gamma {
-        score += 0.15;
-    }
-    if metadata.has_chromaticity {
-        score += 0.15;
-    }
-    if metadata.has_text_chunks {
-        score += 0.1;
-    }
-
-    if metadata.has_physical_dimensions && metadata.is_screen_resolution {
-        score -= 0.2;
-    }
-
-    score.clamp(0.0, 1.0)
-}
-
-fn dimension_to_score(width: u32, height: u32) -> f32 {
-    let pixels = width as u64 * height as u64;
-    let megapixels = pixels as f32 / 1_000_000.0;
-
-    if megapixels >= 2.0 {
-        1.0
-    } else if megapixels >= 0.5 {
-        0.5 + (megapixels - 0.5) / 1.5 * 0.5
-    } else if megapixels >= 0.1 {
-        0.2 + (megapixels - 0.1) / 0.4 * 0.3
-    } else {
-        (megapixels / 0.1 * 0.2).max(0.0)
+impl FragmentCollector for Vec<Fragment> {
+    #[inline]
+    fn collect(&mut self, fragment: Fragment) {
+        self.push(fragment);
     }
 }
 
@@ -314,13 +267,22 @@ pub struct FragmentMap {
 impl FragmentMap {
     pub fn new() -> Self {
         Self {
-            fragments: Vec::with_capacity(1_000_000),
+            fragments: Vec::new(),
+        }
+    }
+
+    pub fn with_disk_estimate(disk_size: u64) -> Self {
+        let estimated = ((disk_size / AVG_IMAGE_SIZE) as usize).min(MAX_FRAGMENT_CAPACITY);
+        Self {
+            fragments: Vec::with_capacity(estimated),
         }
     }
 
     #[inline]
     pub fn push(&mut self, fragment: Fragment) {
-        self.fragments.push(fragment);
+        if self.fragments.len() < MAX_FRAGMENT_CAPACITY {
+            self.fragments.push(fragment);
+        }
     }
 
     #[inline]
@@ -384,12 +346,78 @@ impl FragmentMap {
         self.fragments
             .dedup_by(|a, b| a.offset == b.offset && a.kind == b.kind);
     }
+
+    pub fn build_lists(&self) -> FragmentLists<'_> {
+        let mut jpeg_headers = Vec::new();
+        let mut jpeg_footers = Vec::new();
+        let mut png_headers = Vec::new();
+        let mut png_footers = Vec::new();
+
+        for f in &self.fragments {
+            match f.kind {
+                FragmentKind::JpegHeader => {
+                    if f.has_viable_entropy() {
+                        jpeg_headers.push(f);
+                    }
+                }
+                FragmentKind::JpegFooter => jpeg_footers.push(f),
+                FragmentKind::PngHeader => {
+                    if f.has_viable_entropy() {
+                        png_headers.push(f);
+                    }
+                }
+                FragmentKind::PngIend => png_footers.push(f),
+            }
+        }
+
+        FragmentLists {
+            jpeg_headers,
+            jpeg_footers,
+            png_headers,
+            png_footers,
+        }
+    }
+
+    pub fn count_by_kind(&self) -> FragmentCounts {
+        let mut counts = FragmentCounts::default();
+        for f in &self.fragments {
+            match f.kind {
+                FragmentKind::JpegHeader => counts.jpeg_headers += 1,
+                FragmentKind::JpegFooter => counts.jpeg_footers += 1,
+                FragmentKind::PngHeader => counts.png_headers += 1,
+                FragmentKind::PngIend => counts.png_footers += 1,
+            }
+        }
+        counts
+    }
 }
 
 impl Default for FragmentMap {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl FragmentCollector for FragmentMap {
+    #[inline]
+    fn collect(&mut self, fragment: Fragment) {
+        self.push(fragment);
+    }
+}
+
+pub struct FragmentLists<'a> {
+    pub jpeg_headers: Vec<&'a Fragment>,
+    pub jpeg_footers: Vec<&'a Fragment>,
+    pub png_headers: Vec<&'a Fragment>,
+    pub png_footers: Vec<&'a Fragment>,
+}
+
+#[derive(Default)]
+pub struct FragmentCounts {
+    pub jpeg_headers: usize,
+    pub jpeg_footers: usize,
+    pub png_headers: usize,
+    pub png_footers: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -437,6 +465,17 @@ impl std::fmt::Display for DeviceType {
     }
 }
 
+const ENTROPY_LUT_SIZE: usize = 4097;
+
+static ENTROPY_LUT: LazyLock<[f32; ENTROPY_LUT_SIZE]> = LazyLock::new(|| {
+    let mut lut = [0.0f32; ENTROPY_LUT_SIZE];
+    for (c, entry) in lut.iter_mut().enumerate().skip(1) {
+        let cf = c as f32;
+        *entry = cf * cf.log2();
+    }
+    lut
+});
+
 pub fn calculate_entropy(data: &[u8]) -> f32 {
     if data.is_empty() {
         return 0.0;
@@ -445,13 +484,35 @@ pub fn calculate_entropy(data: &[u8]) -> f32 {
     for &byte in data {
         freq[byte as usize] += 1;
     }
-    let len = data.len() as f32;
-    -freq
+    let n = data.len();
+    let log2_n = (n as f32).log2();
+    let lut = &*ENTROPY_LUT;
+    let sum: f32 = freq
         .iter()
         .filter(|&&c| c > 0)
         .map(|&c| {
-            let p = c as f32 / len;
-            p * p.log2()
+            let idx = c as usize;
+            if idx < ENTROPY_LUT_SIZE {
+                lut[idx]
+            } else {
+                let cf = c as f32;
+                cf * cf.log2()
+            }
         })
-        .sum::<f32>()
+        .sum();
+    log2_n - sum / n as f32
+}
+
+pub struct ExtractionResult {
+    pub zero_filled_sectors: usize,
+    pub total_sectors: usize,
+    pub head: [u8; VALIDATION_HEADER_SIZE],
+    pub tail: [u8; VALIDATION_HEADER_SIZE],
+    pub bytes_written: usize,
+}
+
+pub struct ExtractionReport {
+    pub extracted: Vec<std::path::PathBuf>,
+    pub failed: usize,
+    pub corrupt_discarded: usize,
 }

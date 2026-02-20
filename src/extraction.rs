@@ -1,156 +1,259 @@
-use crate::formats::jpeg::validate_jpeg;
-use crate::formats::png::validate_png_header;
-use crate::io::{AlignedBuffer, DiskReader};
-use crate::types::{ImageFormat, ImageQualityScore, RecoveredFile};
+use std::cell::RefCell;
+
+use crate::formats::jpeg::{JPEG_EOI, JPEG_SOI};
+use crate::formats::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
+use crate::io::{is_recoverable_io_error, zero_sector, AlignedBuffer, DiskReader, ALIGNMENT_MASK};
+use crate::types::{
+    ExtractionReport, ExtractionResult, ImageFormat, RecoveredFile, CORRUPT_SECTOR_RATIO,
+    VALIDATION_HEADER_SIZE,
+};
+use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-const MIN_JPEG_WRITTEN_BYTES: u64 = 2048;
-const MIN_PNG_WRITTEN_BYTES: u64 = 4096;
+thread_local! {
+    static EXTRACT_BUFFER: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::new());
+}
 
 pub fn extract_all(
     files: &[RecoveredFile],
-    device_path: &Path,
+    reader: &DiskReader,
     output_dir: &Path,
-    progress_callback: Option<&dyn Fn(usize, usize)>,
-) -> io::Result<Vec<PathBuf>> {
+    progress_callback: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> io::Result<ExtractionReport> {
     fs::create_dir_all(output_dir)?;
 
-    let mut extracted = Vec::with_capacity(files.len());
-    let mut reader = DiskReader::open(device_path)?;
     let total = files.len();
+    let counter = AtomicUsize::new(0);
 
-    for (i, file) in files.iter().enumerate() {
-        if let Some(cb) = progress_callback {
-            cb(i, total);
-        }
+    let mut indices: Vec<usize> = (0..total).collect();
+    indices.sort_unstable_by_key(|&i| files[i].header_offset());
 
-        let filename = generate_filename(i, file.format);
-        let output_path = output_dir.join(&filename);
+    let results: Vec<_> = indices
+        .par_iter()
+        .map(|&i| {
+            let file = &files[i];
+            let filename = generate_filename(i, file.format);
+            let output_path = output_dir.join(&filename);
 
-        match extract_single(file, &mut reader, &output_path) {
-            Ok(valid) => {
-                if valid {
-                    extracted.push(output_path);
-                } else {
+            let extraction = EXTRACT_BUFFER.with(|cell| {
+                let mut buffer = cell.borrow_mut();
+                extract_single(file, reader, &output_path, &mut buffer)
+            });
+
+            if let Some(cb) = progress_callback {
+                let current = counter.fetch_add(1, Ordering::Relaxed);
+                cb(current, total);
+            }
+
+            (output_path, file.format, extraction)
+        })
+        .collect();
+
+    let mut report = ExtractionReport {
+        extracted: Vec::with_capacity(files.len()),
+        failed: 0,
+        corrupt_discarded: 0,
+    };
+
+    for (output_path, format, extraction) in results {
+        match extraction {
+            Ok(result) => {
+                if result.total_sectors > 0
+                    && result.zero_filled_sectors * CORRUPT_SECTOR_RATIO > result.total_sectors
+                {
                     let _ = fs::remove_file(&output_path);
+                    report.corrupt_discarded += 1;
+                    continue;
                 }
+
+                if !validate_in_memory(&result, format) {
+                    let _ = fs::remove_file(&output_path);
+                    report.failed += 1;
+                    continue;
+                }
+
+                report.extracted.push(output_path);
             }
             Err(_) => {
                 let _ = fs::remove_file(&output_path);
+                report.failed += 1;
             }
         }
     }
-    Ok(extracted)
+
+    sync_directory(output_dir)?;
+
+    Ok(report)
 }
 
-pub fn extract_single(
+fn extract_single(
     file: &RecoveredFile,
-    reader: &mut DiskReader,
+    reader: &DiskReader,
     output_path: &Path,
-) -> io::Result<bool> {
-    let mut out = File::create(output_path)?;
-    let mut buffer = AlignedBuffer::new();
-    let mut total_written = 0u64;
+    buffer: &mut AlignedBuffer,
+) -> io::Result<ExtractionResult> {
+    if !pre_validate_tail(file, reader, buffer) {
+        return Ok(ExtractionResult {
+            zero_filled_sectors: 0,
+            total_sectors: 0,
+            head: [0u8; VALIDATION_HEADER_SIZE],
+            tail: [0u8; VALIDATION_HEADER_SIZE],
+            bytes_written: 0,
+        });
+    }
 
-    for range in &file.fragments {
+    let mut out = File::create(output_path)?;
+    let mut zero_filled_sectors: usize = 0;
+    let mut total_sectors: usize = 0;
+    let mut head = [0u8; VALIDATION_HEADER_SIZE];
+    let mut tail = [0u8; VALIDATION_HEADER_SIZE];
+    let mut bytes_written: usize = 0;
+
+    for range in file.fragments.as_slice() {
         let mut offset = range.start;
 
         while offset < range.end {
-            let aligned_offset = offset & !4095;
+            let aligned_offset = offset & ALIGNMENT_MASK;
             let skip = (offset - aligned_offset) as usize;
+            total_sectors += 1;
 
-            let n = match reader.read_at(aligned_offset, &mut buffer) {
-                Ok(n) => n,
-                Err(e) => {
-                    if matches!(e.raw_os_error(), Some(5) | Some(61)) {
-                        offset += 4096;
-                        continue;
+            let write_data;
+            let to_write;
+
+            match reader.read_at(aligned_offset, buffer) {
+                Ok(n) => {
+                    if n == 0 {
+                        break;
                     }
-                    return Err(e);
+                    let available = n.saturating_sub(skip);
+                    let remaining = (range.end - offset) as usize;
+                    to_write = available.min(remaining);
+                    write_data = &buffer.as_slice()[skip..skip + to_write];
                 }
-            };
-
-            if n == 0 {
-                break;
+                Err(e) => {
+                    if is_recoverable_io_error(&e) {
+                        let remaining = (range.end - offset) as usize;
+                        to_write = remaining.min(4096 - skip);
+                        write_data = &zero_sector()[..to_write];
+                        zero_filled_sectors += 1;
+                    } else {
+                        return Err(e);
+                    }
+                }
             }
 
-            let available = n.saturating_sub(skip);
-            let remaining = (range.end - offset) as usize;
-            let to_write = available.min(remaining);
-
             if to_write > 0 {
-                out.write_all(&buffer.as_slice()[skip..skip + to_write])?;
-                total_written += to_write as u64;
+                out.write_all(write_data)?;
+                track_head_tail(write_data, bytes_written, &mut head, &mut tail);
+                bytes_written += to_write;
             }
 
             offset += to_write as u64;
         }
     }
-    out.sync_all()?;
 
-    let min_bytes = match file.format {
-        ImageFormat::Jpeg => MIN_JPEG_WRITTEN_BYTES,
-        ImageFormat::Png => MIN_PNG_WRITTEN_BYTES,
-    };
+    Ok(ExtractionResult {
+        zero_filled_sectors,
+        total_sectors,
+        head,
+        tail,
+        bytes_written,
+    })
+}
 
-    if total_written < min_bytes {
-        return Ok(false);
+#[inline]
+fn track_head_tail(
+    data: &[u8],
+    bytes_written: usize,
+    head: &mut [u8; VALIDATION_HEADER_SIZE],
+    tail: &mut [u8; VALIDATION_HEADER_SIZE],
+) {
+    let len = data.len();
+    if len == 0 {
+        return;
     }
 
-    Ok(score_recovered_image(output_path, file))
+    let head_remaining = VALIDATION_HEADER_SIZE.saturating_sub(bytes_written);
+    if head_remaining > 0 {
+        let n = len.min(head_remaining);
+        head[bytes_written..bytes_written + n].copy_from_slice(&data[..n]);
+    }
+
+    if bytes_written + len <= VALIDATION_HEADER_SIZE {
+        tail[bytes_written..bytes_written + len].copy_from_slice(data);
+    } else if len >= VALIDATION_HEADER_SIZE {
+        tail.copy_from_slice(&data[len - VALIDATION_HEADER_SIZE..]);
+    } else {
+        tail.copy_within(len.., 0);
+        tail[VALIDATION_HEADER_SIZE - len..].copy_from_slice(data);
+    }
+}
+
+fn validate_in_memory(result: &ExtractionResult, format: ImageFormat) -> bool {
+    if result.bytes_written < VALIDATION_HEADER_SIZE {
+        return false;
+    }
+
+    let valid_head = match format {
+        ImageFormat::Jpeg => result.head[..2] == JPEG_SOI,
+        ImageFormat::Png => result.head[..8] == PNG_SIGNATURE,
+    };
+
+    if !valid_head {
+        return false;
+    }
+
+    match format {
+        ImageFormat::Jpeg => result.tail[VALIDATION_HEADER_SIZE - 2..] == JPEG_EOI,
+        ImageFormat::Png => {
+            result.tail[VALIDATION_HEADER_SIZE - 4..] == *IEND_CHUNK_TYPE
+                || result.tail.windows(4).any(|w| w == IEND_CHUNK_TYPE)
+        }
+    }
+}
+
+fn pre_validate_tail(
+    file: &RecoveredFile,
+    reader: &DiskReader,
+    buffer: &mut AlignedBuffer,
+) -> bool {
+    let ranges = file.fragments.as_slice();
+    if ranges.is_empty() {
+        return false;
+    }
+    let last_range = &ranges[ranges.len() - 1];
+    if last_range.end < VALIDATION_HEADER_SIZE as u64 {
+        return false;
+    }
+    let tail_start = last_range.end - VALIDATION_HEADER_SIZE as u64;
+    let aligned = tail_start & ALIGNMENT_MASK;
+    match reader.read_at(aligned, buffer) {
+        Ok(n) => {
+            let skip = (tail_start - aligned) as usize;
+            if n < skip + VALIDATION_HEADER_SIZE {
+                return false;
+            }
+            let tail = &buffer.as_slice()[skip..skip + VALIDATION_HEADER_SIZE];
+            match file.format {
+                ImageFormat::Jpeg => tail[VALIDATION_HEADER_SIZE - 2..] == JPEG_EOI,
+                ImageFormat::Png => {
+                    tail[VALIDATION_HEADER_SIZE - 4..] == *IEND_CHUNK_TYPE
+                        || tail.windows(4).any(|w| w == IEND_CHUNK_TYPE)
+                }
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn sync_directory(dir: &Path) -> io::Result<()> {
+    let d = File::open(dir)?;
+    d.sync_all()
 }
 
 pub fn generate_filename(index: usize, format: ImageFormat) -> String {
     format!("recovered_{:06}.{}", index, format.extension())
-}
-
-fn score_recovered_image(path: &Path, recovered: &RecoveredFile) -> bool {
-    let data = match fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-
-    match recovered.format {
-        ImageFormat::Jpeg => score_recovered_jpeg(&data, recovered.header_entropy),
-        ImageFormat::Png => score_recovered_png(&data, recovered.header_entropy),
-    }
-}
-
-fn score_recovered_jpeg(data: &[u8], header_entropy: f32) -> bool {
-    let info = match validate_jpeg(data) {
-        Some(info) => info,
-        None => return false,
-    };
-
-    let structure_valid =
-        data.len() >= 4 && data[0..2] == [0xFF, 0xD8] && data[data.len() - 2..] == [0xFF, 0xD9];
-
-    let score = ImageQualityScore::for_jpeg(
-        header_entropy,
-        info.width,
-        info.height,
-        &info.metadata,
-        structure_valid,
-    );
-
-    score.meets_minimum()
-}
-
-fn score_recovered_png(data: &[u8], header_entropy: f32) -> bool {
-    let info = match validate_png_header(data) {
-        Some(info) => info,
-        None => return false,
-    };
-
-    let score = ImageQualityScore::for_png(
-        header_entropy,
-        info.width,
-        info.height,
-        &info.metadata,
-        info.idat_count,
-    );
-
-    score.meets_minimum()
 }

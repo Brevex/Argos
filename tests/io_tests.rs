@@ -18,7 +18,7 @@ fn test_disk_reader_regular_file() {
     let test_data = vec![0xAA; 4096];
     temp.write_all(&test_data).unwrap();
     temp.flush().unwrap();
-    let mut reader = DiskReader::open_regular(temp.path()).unwrap();
+    let reader = DiskReader::open_regular(temp.path()).unwrap();
     assert_eq!(reader.size(), 4096);
     let mut buffer = AlignedBuffer::new();
     let n = reader.read_at(0, &mut buffer).unwrap();
@@ -34,7 +34,7 @@ fn test_disk_scanner() {
     let mut scanner = DiskScanner::new(reader);
     let mut block_count = 0;
     while let Some((_, data)) = scanner.next_block().unwrap() {
-        assert!(data.len() > 0);
+        assert!(!data.is_empty());
         block_count += 1;
     }
     assert!(block_count >= 2, "Should read multiple blocks");

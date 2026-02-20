@@ -1,4 +1,5 @@
-use argos::formats::png::{find_png_iend, validate_png_header};
+use argos::formats::png::validate_png_header;
+
 #[test]
 fn test_validate_png_header_valid() {
     let png = [
@@ -12,15 +13,9 @@ fn test_validate_png_header_valid() {
     assert_eq!(info.width, 16);
     assert_eq!(info.height, 16);
 }
+
 #[test]
 fn test_validate_png_header_invalid_signature() {
     let not_png = [0xFF, 0xD8, 0xFF, 0xE0];
     assert!(validate_png_header(&not_png).is_none());
-}
-#[test]
-fn test_find_png_iend() {
-    let data = [
-        0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
-    assert_eq!(find_png_iend(&data), Some(3));
 }

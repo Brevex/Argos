@@ -1,11 +1,11 @@
 use argos::types::{BlockDevice, DeviceType, Fragment, FragmentKind, FragmentMap};
 #[test]
 fn test_fragment_size() {
-    assert_eq!(std::mem::size_of::<Fragment>(), 32);
+    assert_eq!(std::mem::size_of::<Fragment>(), 16);
 }
 #[test]
 fn test_fragment_alignment() {
-    assert_eq!(std::mem::align_of::<Fragment>(), 32);
+    assert_eq!(std::mem::align_of::<Fragment>(), 8);
 }
 #[test]
 fn test_fragment_kind_size() {

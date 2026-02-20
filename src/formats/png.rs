@@ -2,8 +2,13 @@ use crate::types::PngMetadata;
 
 pub const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
-const SCREEN_DPI_LOWER: u32 = 2500;
-const SCREEN_DPI_UPPER: u32 = 3200;
+const SCREEN_PPM_LOWER: u32 = 2500;
+const SCREEN_PPM_UPPER: u32 = 3200;
+const IDAT_MIN_RATIO: u64 = 100;
+
+pub const IEND_CHUNK_TYPE: &[u8; 4] = b"IEND";
+
+pub const IEND_CRC: u32 = 0xAE426082;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PngInfo {
@@ -11,6 +16,7 @@ pub struct PngInfo {
     pub height: u32,
     pub metadata: PngMetadata,
     pub idat_count: usize,
+    pub idat_total_bytes: u64,
 }
 
 #[inline]
@@ -47,6 +53,7 @@ pub fn validate_png_header(data: &[u8]) -> Option<PngInfo> {
 
     let mut metadata = PngMetadata::default();
     let mut idat_count = 0usize;
+    let mut idat_total_bytes = 0u64;
     let mut unique_chunk_types = 0u8;
 
     if let Some(iter) = PngChunkIterator::new(data) {
@@ -54,17 +61,10 @@ pub fn validate_png_header(data: &[u8]) -> Option<PngInfo> {
             match &chunk_type {
                 b"IDAT" => {
                     idat_count += 1;
+                    idat_total_bytes += payload.len() as u64;
                 }
                 b"tEXt" | b"iTXt" | b"zTXt" => {
                     metadata.has_text_chunks = true;
-                    unique_chunk_types += 1;
-                }
-                b"gAMA" => {
-                    metadata.has_gamma = true;
-                    unique_chunk_types += 1;
-                }
-                b"cHRM" => {
-                    metadata.has_chromaticity = true;
                     unique_chunk_types += 1;
                 }
                 b"iCCP" => {
@@ -80,11 +80,12 @@ pub fn validate_png_header(data: &[u8]) -> Option<PngInfo> {
                         let unit = payload[8];
                         if unit == 1 {
                             metadata.is_screen_resolution =
-                                (SCREEN_DPI_LOWER..=SCREEN_DPI_UPPER).contains(&ppu_x);
+                                (SCREEN_PPM_LOWER..=SCREEN_PPM_UPPER).contains(&ppu_x);
                         }
                     }
                 }
-                b"sRGB" | b"sBIT" | b"bKGD" | b"hIST" | b"tRNS" | b"sPLT" | b"tIME" => {
+                b"gAMA" | b"cHRM" | b"sRGB" | b"sBIT" | b"bKGD" | b"hIST" | b"tRNS" | b"sPLT"
+                | b"tIME" => {
                     unique_chunk_types += 1;
                 }
                 _ => {}
@@ -99,31 +100,53 @@ pub fn validate_png_header(data: &[u8]) -> Option<PngInfo> {
         height,
         metadata,
         idat_count,
+        idat_total_bytes,
     })
 }
 
-#[inline]
-pub fn find_png_iend(data: &[u8]) -> Option<usize> {
-    if data.len() < 12 {
+pub fn validate_png_full(data: &[u8]) -> Option<PngInfo> {
+    let info = validate_png_header(data)?;
+
+    if info.idat_count == 0 {
         return None;
     }
 
-    for i in 0..=data.len().saturating_sub(12) {
-        if i + 12 <= data.len()
-            && data[i..i + 4] == [0x00, 0x00, 0x00, 0x00]
-            && &data[i + 4..i + 8] == b"IEND"
-        {
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(b"IEND");
-            let calculated = hasher.finalize();
-            let stored = u32::from_be_bytes([data[i + 8], data[i + 9], data[i + 10], data[i + 11]]);
-
-            if calculated == stored {
-                return Some(i);
-            }
-        }
+    let pixel_count = info.width as u64 * info.height as u64;
+    if pixel_count > 0
+        && info.idat_total_bytes > 0
+        && info.idat_total_bytes < pixel_count / IDAT_MIN_RATIO
+    {
+        return None;
     }
-    None
+
+    if !has_valid_iend(data) {
+        return None;
+    }
+
+    Some(info)
+}
+
+fn has_valid_iend(data: &[u8]) -> bool {
+    if data.len() < 12 {
+        return false;
+    }
+    let iend_start = data.len() - 12;
+    let iend_len = u32::from_be_bytes([
+        data[iend_start],
+        data[iend_start + 1],
+        data[iend_start + 2],
+        data[iend_start + 3],
+    ]);
+    if iend_len != 0 || &data[iend_start + 4..iend_start + 8] != IEND_CHUNK_TYPE {
+        return false;
+    }
+    let stored = u32::from_be_bytes([
+        data[iend_start + 8],
+        data[iend_start + 9],
+        data[iend_start + 10],
+        data[iend_start + 11],
+    ]);
+    IEND_CRC == stored
 }
 
 pub struct PngChunkIterator<'a> {

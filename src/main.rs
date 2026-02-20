@@ -3,19 +3,21 @@ use clap::Parser;
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use argos::carving::RecoveryStats;
 use argos::devices::{device_selection_options, discover_block_devices};
 use argos::io::DiskScanner;
-use argos::types::FragmentMap;
+use argos::types::{Fragment, FragmentMap};
 use argos::{analysis, carving, extraction, io};
+use rayon::prelude::*;
 
 const PROGRESS_UPDATE_INTERVAL: u64 = 100 * 1024 * 1024;
 
 #[derive(Parser)]
 #[command(name = "argos")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Professional forensic image recovery tool")]
 #[command(author = "Argos Project")]
 struct Cli {
@@ -36,16 +38,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.scan {
-        run_interactive_wizard()?;
+        run_interactive_wizard(cli.yes)?;
     } else if let (Some(device), Some(output)) = (cli.device, cli.output) {
         run_scan(&device, &output)?;
     } else {
-        run_interactive_wizard()?;
+        run_interactive_wizard(cli.yes)?;
     }
     Ok(())
 }
 
-fn run_interactive_wizard() -> Result<()> {
+fn run_interactive_wizard(skip_confirm: bool) -> Result<()> {
     print_banner();
 
     println!("\n{}", style("Discovering block devices...").cyan());
@@ -64,17 +66,17 @@ fn run_interactive_wizard() -> Result<()> {
     println!("\n{}", style("Found Devices:").green().bold());
     println!();
     println!(
-        "{:<12} {:<15} {:>12} {}",
+        "{:<10} {:<8} {:>10} {}",
         style("NAME").bold(),
         style("TYPE").bold(),
         style("SIZE").bold(),
         style("PATH").bold()
     );
-    println!("{}", "-".repeat(55));
+    println!("{}", "-".repeat(45));
 
     for device in &devices {
         println!(
-            "{:<12} {:<15} {:>12} {}",
+            "{:<10} {:<8} {:>10} {}",
             device.name,
             format!("{}", device.device_type),
             device.size_human(),
@@ -107,23 +109,25 @@ fn run_interactive_wizard() -> Result<()> {
     println!();
     println!("{}", style("Operation Summary:").cyan().bold());
     println!(
-        "   - Target:  {} ({})",
+        "Target: {} ({})",
         selected_device.path,
         selected_device.size_human()
     );
-    println!("   - Output:  {}", output_dir);
-    println!("   - Modes:   JPEG, PNG");
+    println!("Output: {}", output_dir);
+    println!("Modes:  JPEG, PNG");
     println!();
 
-    let confirmed = Confirm::with_theme(&theme)
-        .with_prompt("Confirm and start scan?")
-        .default(true)
-        .interact()
-        .context("Failed to confirm")?;
+    if !skip_confirm {
+        let confirmed = Confirm::with_theme(&theme)
+            .with_prompt("Confirm and start scan?")
+            .default(true)
+            .interact()
+            .context("Failed to confirm")?;
 
-    if !confirmed {
-        println!("\nOperation cancelled.");
-        return Ok(());
+        if !confirmed {
+            println!("\nOperation cancelled.");
+            return Ok(());
+        }
     }
 
     run_scan(&PathBuf::from(&selected_device.path), &output_path)?;
@@ -147,17 +151,47 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
             .progress_chars("=>-"),
     );
 
-    let mut map = FragmentMap::new();
+    let mut map = FragmentMap::with_disk_estimate(disk_size);
     let mut blocks_processed = 0u64;
+    let batch_size = rayon::current_num_threads().min(4);
+    let mut batch = Vec::with_capacity(batch_size);
 
-    while let Some((offset, data)) = scanner.next_block()? {
-        analysis::scan_block(offset, data, &mut map);
+    loop {
+        batch.clear();
+        for _ in 0..batch_size {
+            match scanner.next_owned_block()? {
+                Some(block) => batch.push(block),
+                None => break,
+            }
+        }
+        if batch.is_empty() {
+            break;
+        }
 
-        blocks_processed += data.len() as u64;
+        let batch_results: Vec<Vec<Fragment>> = batch
+            .par_iter()
+            .map(|block| {
+                let mut local = Vec::new();
+                analysis::scan_block(block.offset, block.data(), &mut local);
+                local
+            })
+            .collect();
+
+        for fragments in batch_results {
+            for f in fragments {
+                map.push(f);
+            }
+        }
+
+        blocks_processed += batch.iter().map(|b| b.bytes_read as u64).sum::<u64>();
         pb.set_position(blocks_processed);
 
         if blocks_processed.is_multiple_of(PROGRESS_UPDATE_INTERVAL) {
             pb.set_message(format!("Found {} fragments", map.len()));
+        }
+
+        for block in batch.drain(..) {
+            scanner.recycle_buffer(block.buffer);
         }
     }
 
@@ -174,28 +208,67 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         );
     }
 
-    println!("\nAnalyzing fragments...");
+    println!();
+    println!("Analyzing fragments...");
 
-    let jpeg_headers = map.jpeg_headers().count();
-    let jpeg_footers = map.jpeg_footers().count();
-    let png_headers = map.png_headers().count();
-    let png_footers = map.png_footers().count();
+    let counts = map.count_by_kind();
 
-    println!("   Fragment breakdown:");
-    println!("   - JPEG headers: {}", jpeg_headers);
-    println!("   - JPEG footers: {}", jpeg_footers);
-    println!("   - PNG headers:  {}", png_headers);
-    println!("   - PNG footers:  {}", png_footers);
+    println!("JPEG headers: {}", counts.jpeg_headers);
+    println!("JPEG footers: {}", counts.jpeg_footers);
+    println!("PNG headers:  {}", counts.png_headers);
+    println!("PNG footers:  {}", counts.png_footers);
 
     map.sort_by_offset();
     map.dedup();
-    let mut recovered = carving::linear_carve(&map);
+
+    let lists = map.build_lists();
+    drop(scanner);
+    let reader = io::DiskReader::open_regular(device_path)
+        .context("Failed to reopen device for recovery")?;
+
+    let linear_total = lists.jpeg_headers.len() + lists.png_headers.len();
+    let pb_linear = ProgressBar::new(linear_total as u64);
+    pb_linear.set_style(
+        ProgressStyle::default_bar()
+            .template("[{bar:40.yellow/white}] {pos}/{len} Linear carving ({percent}%)")?
+            .progress_chars("=>-"),
+    );
+
+    let linear_cb = |current: usize, _total: usize| {
+        pb_linear.set_position(current as u64);
+    };
+
+    let mut recovered = carving::linear_carve(&lists, &reader, Some(&linear_cb));
+    pb_linear.finish_with_message(format!(
+        "Linear carving complete — {} images found",
+        style(recovered.len()).green().bold()
+    ));
 
     if map.len() > recovered.len() * 2 {
-        println!("Attempting bifragment recovery...");
-        let mut reader = io::DiskReader::open(device_path)?;
-        let bifrag = carving::bifragment_carve(&map, &mut reader);
-        recovered.extend(bifrag);
+        let bifrag_total = lists.jpeg_headers.len() + lists.png_headers.len();
+        let pb_bifrag = ProgressBar::new(bifrag_total as u64);
+        pb_bifrag.set_style(
+            ProgressStyle::default_bar()
+                .template("[{bar:40.magenta/white}] {pos}/{len} Bifragment carving ({percent}%)")?
+                .progress_chars("=>-"),
+        );
+
+        let bifrag_cb = |current: usize, _total: usize| {
+            pb_bifrag.set_position(current as u64);
+        };
+
+        let bifrag = carving::bifragment_carve(&lists, &reader, Some(&bifrag_cb));
+        pb_bifrag.finish_with_message(format!(
+            "Bifragment carving complete — {} images found",
+            style(bifrag.len()).green().bold()
+        ));
+
+        let existing_offsets: HashSet<u64> = recovered.iter().map(|r| r.header_offset()).collect();
+        recovered.extend(
+            bifrag
+                .into_iter()
+                .filter(|r| !existing_offsets.contains(&r.header_offset())),
+        );
     }
 
     let stats = RecoveryStats::from_recovered(&recovered);
@@ -204,10 +277,10 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         "\nFound {} recoverable images:",
         style(stats.total_files()).green().bold()
     );
-    println!("   - JPEG (linear):     {}", stats.jpeg_linear);
-    println!("   - JPEG (bifragment): {}", stats.jpeg_bifragment);
-    println!("   - PNG (linear):      {}", stats.png_linear);
-    println!("   - PNG (bifragment):  {}", stats.png_bifragment);
+    println!("JPEG (linear):     {}", stats.jpeg_linear);
+    println!("JPEG (bifragment): {}", stats.jpeg_bifragment);
+    println!("PNG (linear):      {}", stats.png_linear);
+    println!("PNG (bifragment):  {}", stats.png_bifragment);
 
     if recovered.is_empty() {
         println!("\n[!] No recoverable images found.");
@@ -215,7 +288,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     }
 
     println!(
-        "\nExtracting and validating {} candidates to {:?}...",
+        "\nExtracting {} validated images to {:?}...",
         recovered.len(),
         output_path
     );
@@ -231,22 +304,27 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         pb.set_position(current as u64);
     };
 
-    let extracted =
-        extraction::extract_all(&recovered, device_path, output_path, Some(&progress_cb))?;
+    let report = extraction::extract_all(&recovered, &reader, output_path, Some(&progress_cb))?;
 
     pb.finish_with_message("done");
 
     println!();
-    println!("{}", "=".repeat(55));
     println!("{}", style("Recovery Complete!").green().bold());
-    println!("{}", "=".repeat(55));
     println!();
-    println!("   Candidates processed: {}", recovered.len());
     println!(
-        "   Valid files recovered: {}",
-        style(extracted.len()).green()
+        "Images extracted: {}",
+        style(report.extracted.len()).green()
     );
-    println!("   Output folder:   {:?}", output_path);
+    if report.failed > 0 {
+        println!("Failed:           {}", style(report.failed).yellow());
+    }
+    if report.corrupt_discarded > 0 {
+        println!(
+            "Corrupt/dropped:  {}",
+            style(report.corrupt_discarded).yellow()
+        );
+    }
+    println!("Output folder:    {:?}", output_path);
     println!();
 
     Ok(())

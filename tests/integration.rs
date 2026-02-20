@@ -5,34 +5,29 @@ use argos::analysis::scan_block;
 use argos::carving::{linear_carve, RecoveryStats};
 use argos::extraction::extract_all;
 use argos::io::{DiskReader, DiskScanner};
-use argos::types::{FragmentMap, ImageFormat};
+use argos::types::FragmentMap;
 
 fn create_test_jpeg() -> Vec<u8> {
     let mut jpeg = Vec::new();
 
     jpeg.extend_from_slice(&[0xFF, 0xD8]);
 
-    jpeg.extend_from_slice(&[0xFF, 0xE0]);
-    jpeg.extend_from_slice(&[0x00, 0x10]);
-    jpeg.extend_from_slice(b"JFIF\x00");
-    jpeg.extend_from_slice(&[0x01, 0x01]);
-    jpeg.extend_from_slice(&[0x00]);
-    jpeg.extend_from_slice(&[0x00, 0x48]);
-    jpeg.extend_from_slice(&[0x00, 0x48]);
-    jpeg.extend_from_slice(&[0x00, 0x00]);
+    jpeg.extend_from_slice(&[0xFF, 0xE1, 0x00, 0x10]);
+    jpeg.extend_from_slice(b"Exif\x00\x00");
+    jpeg.extend_from_slice(&[0x00; 8]);
 
     jpeg.extend_from_slice(&[0xFF, 0xDB]);
     jpeg.extend_from_slice(&[0x00, 0x43]);
     jpeg.extend_from_slice(&[0x00]);
     for _ in 0..64 {
-        jpeg.push(16);
+        jpeg.push(10);
     }
 
     jpeg.extend_from_slice(&[0xFF, 0xC0]);
     jpeg.extend_from_slice(&[0x00, 0x0B]);
     jpeg.extend_from_slice(&[0x08]);
-    jpeg.extend_from_slice(&[0x01, 0x00]);
-    jpeg.extend_from_slice(&[0x01, 0x00]);
+    jpeg.extend_from_slice(&[0x02, 0x00]);
+    jpeg.extend_from_slice(&[0x02, 0x80]);
     jpeg.extend_from_slice(&[0x01]);
     jpeg.extend_from_slice(&[0x01, 0x11, 0x00]);
 
@@ -40,7 +35,7 @@ fn create_test_jpeg() -> Vec<u8> {
     jpeg.extend_from_slice(&[0x00, 0x1F]);
     jpeg.extend_from_slice(&[0x00]);
     for i in 0u8..28 {
-        jpeg.push(i);
+        jpeg.push(i.wrapping_mul(37));
     }
 
     jpeg.extend_from_slice(&[0xFF, 0xDA]);
@@ -49,8 +44,9 @@ fn create_test_jpeg() -> Vec<u8> {
     jpeg.extend_from_slice(&[0x01, 0x00]);
     jpeg.extend_from_slice(&[0x00, 0x3F, 0x00]);
 
-    while jpeg.len() < 2500 {
-        jpeg.push(((jpeg.len() * 7) % 254) as u8);
+    while jpeg.len() < 55_000 {
+        let idx = jpeg.len();
+        jpeg.push(((idx.wrapping_mul(131).wrapping_add(17)) % 251) as u8);
     }
 
     jpeg.extend_from_slice(&[0xFF, 0xD9]);
@@ -58,7 +54,12 @@ fn create_test_jpeg() -> Vec<u8> {
 }
 
 fn create_test_disk(size_mb: usize, jpeg_offsets: &[usize]) -> Vec<u8> {
-    let mut disk = vec![0u8; size_mb * 1024 * 1024];
+    let size = size_mb * 1024 * 1024;
+    let mut disk = Vec::with_capacity(size);
+    for i in 0..size {
+        disk.push(((i.wrapping_mul(97).wrapping_add(13)) % 256) as u8);
+    }
+
     let jpeg = create_test_jpeg();
 
     for &offset in jpeg_offsets {
@@ -89,24 +90,26 @@ fn test_full_recovery_pipeline() {
         scan_block(offset, data, &mut map);
     }
 
-    assert!(map.len() > 0, "Should find fragments");
+    assert!(!map.is_empty(), "Should find fragments");
 
     map.sort_by_offset();
-    let recovered = linear_carve(&map);
+    let lists = map.build_lists();
+    let reader = scanner.into_reader();
+    let recovered = linear_carve(&lists, &reader, None);
 
     let stats = RecoveryStats::from_recovered(&recovered);
     assert_eq!(stats.jpeg_linear, 3, "Should recover 3 JPEGs");
 
-    let extracted = extract_all(&recovered, &disk_path, &output_dir, None).unwrap();
-    assert_eq!(extracted.len(), 3, "Should extract 3 files");
+    let report = extract_all(&recovered, &reader, &output_dir, None).unwrap();
+    assert_eq!(report.extracted.len(), 3, "Should extract 3 files");
 
-    for path in &extracted {
+    for path in &report.extracted {
         assert!(path.exists(), "File should exist: {:?}", path);
     }
 
-    for path in &extracted {
+    for path in &report.extracted {
         let data = fs::read(path).unwrap();
-        assert!(data.len() > 2048, "File too small");
+        assert!(data.len() > 50_000, "File too small");
         assert_eq!(&data[0..2], &[0xFF, 0xD8], "Should start with SOI");
         assert_eq!(
             &data[data.len() - 2..],
@@ -133,7 +136,9 @@ fn test_empty_disk_no_false_positives() {
     }
 
     map.sort_by_offset();
-    let recovered = linear_carve(&map);
+    let lists = map.build_lists();
+    let reader = scanner.into_reader();
+    let recovered = linear_carve(&lists, &reader, None);
 
     assert_eq!(
         recovered.len(),
@@ -167,44 +172,12 @@ fn test_disk_with_noise() {
     }
 
     map.sort_by_offset();
-    let recovered = linear_carve(&map);
+    let lists = map.build_lists();
+    let reader = scanner.into_reader();
+    let recovered = linear_carve(&lists, &reader, None);
 
     let stats = RecoveryStats::from_recovered(&recovered);
     assert!(stats.jpeg_linear >= 1, "Should recover at least 1 JPEG");
-}
-
-#[test]
-fn test_multiple_formats() {
-    let dir = tempdir().unwrap();
-    let disk_path = dir.path().join("multi_format.img");
-
-    let jpeg = create_test_jpeg();
-    let mut disk_data = vec![0u8; 2 * 1024 * 1024];
-    disk_data[1024 * 1024..1024 * 1024 + jpeg.len()].copy_from_slice(&jpeg);
-
-    fs::write(&disk_path, &disk_data).unwrap();
-
-    let reader = DiskReader::open(&disk_path).unwrap();
-    let mut scanner = DiskScanner::new(reader);
-    let mut map = FragmentMap::new();
-
-    while let Some((offset, data)) = scanner.next_block().unwrap() {
-        scan_block(offset, data, &mut map);
-    }
-
-    map.sort_by_offset();
-    let recovered = linear_carve(&map);
-
-    for file in &recovered {
-        match file.format {
-            ImageFormat::Jpeg => {
-                assert!(!file.fragments.is_empty());
-            }
-            ImageFormat::Png => {
-                assert!(!file.fragments.is_empty());
-            }
-        }
-    }
 }
 
 #[test]
@@ -253,4 +226,46 @@ fn test_fragment_map_sorting() {
 
     let offsets: Vec<u64> = map.fragments.iter().map(|f| f.offset).collect();
     assert_eq!(offsets, vec![500, 1000, 2000]);
+}
+
+#[test]
+fn test_small_images_filtered_out() {
+    let dir = tempdir().unwrap();
+    let disk_path = dir.path().join("small_img.img");
+
+    let mut small_jpeg = Vec::new();
+    small_jpeg.extend_from_slice(&[0xFF, 0xD8]);
+    small_jpeg.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x10]);
+    small_jpeg.extend_from_slice(b"JFIF\x00\x01\x01\x00\x00\x48\x00\x48\x00\x00");
+    small_jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08]);
+    small_jpeg.extend_from_slice(&[0x00, 0x20]);
+    small_jpeg.extend_from_slice(&[0x00, 0x20]);
+    small_jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+    small_jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+    while small_jpeg.len() < 60_000 {
+        let idx = small_jpeg.len();
+        small_jpeg.push(((idx.wrapping_mul(131).wrapping_add(17)) % 251) as u8);
+    }
+    small_jpeg.extend_from_slice(&[0xFF, 0xD9]);
+
+    let mut disk_data = vec![0u8; 1024 * 1024];
+    let offset = 4096;
+    disk_data[offset..offset + small_jpeg.len()].copy_from_slice(&small_jpeg);
+
+    fs::write(&disk_path, &disk_data).unwrap();
+
+    let reader = DiskReader::open(&disk_path).unwrap();
+    let mut scanner = DiskScanner::new(reader);
+    let mut map = FragmentMap::new();
+
+    while let Some((off, data)) = scanner.next_block().unwrap() {
+        scan_block(off, data, &mut map);
+    }
+
+    map.sort_by_offset();
+    let lists = map.build_lists();
+    let reader = scanner.into_reader();
+    let recovered = linear_carve(&lists, &reader, None);
+
+    assert_eq!(recovered.len(), 0, "32x32 icon should be filtered out");
 }

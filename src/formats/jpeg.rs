@@ -1,10 +1,12 @@
-use crate::types::{JpegMetadata, QuantizationQuality};
+use crate::types::{calculate_entropy, JpegMetadata, QuantizationQuality};
 
 pub const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
 pub const JPEG_EOI: [u8; 2] = [0xFF, 0xD9];
 
 const QUANTIZATION_HIGH_THRESHOLD: u16 = 25;
 const QUANTIZATION_LOW_THRESHOLD: u16 = 80;
+const SCAN_DATA_ENTROPY_SAMPLE: usize = 2048;
+const ZERO_GAP_THRESHOLD: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct JpegInfo {
@@ -27,6 +29,69 @@ pub fn is_valid_marker(marker: u8) -> bool {
     )
 }
 
+pub fn quick_jpeg_dimensions(data: &[u8]) -> Option<(u16, u16)> {
+    if data.len() < 10 || data[0..2] != JPEG_SOI {
+        return None;
+    }
+
+    if data[2] != 0xFF {
+        return None;
+    }
+
+    let mut pos = 2;
+
+    while pos + 1 < data.len() {
+        if data[pos] != 0xFF {
+            break;
+        }
+
+        let marker = data[pos + 1];
+
+        if marker == 0x00 {
+            pos += 2;
+            continue;
+        }
+
+        if marker == 0xFF {
+            pos += 1;
+            continue;
+        }
+
+        if matches!(marker, 0xD0..=0xD7) {
+            pos += 2;
+            continue;
+        }
+
+        if marker == 0xD9 || marker == 0xDA {
+            break;
+        }
+
+        if matches!(marker, 0xC0..=0xC3) {
+            if pos + 8 < data.len() {
+                let height = u16::from_be_bytes([data[pos + 5], data[pos + 6]]);
+                let width = u16::from_be_bytes([data[pos + 7], data[pos + 8]]);
+                if width > 0 && height > 0 {
+                    return Some((width, height));
+                }
+            }
+            return None;
+        }
+
+        if pos + 3 >= data.len() {
+            break;
+        }
+
+        let seg_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        if seg_len < 2 {
+            break;
+        }
+
+        pos = pos + 2 + seg_len;
+    }
+
+    None
+}
+
 pub fn validate_jpeg(data: &[u8]) -> Option<JpegInfo> {
     if data.len() < 10 || data[0..2] != JPEG_SOI {
         return None;
@@ -40,12 +105,12 @@ pub fn validate_jpeg(data: &[u8]) -> Option<JpegInfo> {
     let mut width = 0u16;
     let mut height = 0u16;
     let mut has_sof = false;
-    let mut has_sos = false;
     let mut metadata = JpegMetadata::default();
+    let mut prev_segment_end = 2usize;
 
     while pos + 1 < data.len() {
         if data[pos] != 0xFF {
-            if has_sos {
+            if metadata.has_sos {
                 pos += 1;
                 continue;
             }
@@ -69,6 +134,13 @@ pub fn validate_jpeg(data: &[u8]) -> Option<JpegInfo> {
         }
 
         metadata.marker_count += 1;
+
+        if !metadata.has_sos && pos > prev_segment_end {
+            let gap = &data[prev_segment_end..pos];
+            if gap.len() > ZERO_GAP_THRESHOLD && gap.iter().all(|&b| b == 0) {
+                return None;
+            }
+        }
 
         if matches!(marker, 0xD0..=0xD7) {
             pos += 2;
@@ -132,12 +204,19 @@ pub fn validate_jpeg(data: &[u8]) -> Option<JpegInfo> {
             }
 
             0xDA => {
-                has_sos = true;
+                metadata.has_sos = true;
+                let scan_start = seg_end;
+                let scan_sample_end = (scan_start + SCAN_DATA_ENTROPY_SAMPLE).min(data.len());
+                if scan_sample_end > scan_start {
+                    metadata.scan_data_entropy =
+                        calculate_entropy(&data[scan_start..scan_sample_end]);
+                }
             }
 
             _ => {}
         }
 
+        prev_segment_end = seg_end;
         pos = seg_end;
     }
 
@@ -152,24 +231,11 @@ pub fn validate_jpeg(data: &[u8]) -> Option<JpegInfo> {
     })
 }
 
-pub fn validate_jpeg_structure(data: &[u8]) -> bool {
-    if data.len() < 4 {
-        return false;
-    }
-
-    if data[0..2] != JPEG_SOI || data[data.len() - 2..] != JPEG_EOI {
-        return false;
-    }
-
-    validate_jpeg(data).is_some()
-}
-
-#[inline]
-pub fn find_jpeg_footer(data: &[u8]) -> Option<usize> {
-    if data.len() < 2 {
+pub fn validate_jpeg_full(data: &[u8]) -> Option<JpegInfo> {
+    if data.len() < 4 || data[data.len() - 2..] != JPEG_EOI {
         return None;
     }
-    (0..data.len().saturating_sub(1)).find(|&i| data[i..i + 2] == JPEG_EOI)
+    validate_jpeg(data)
 }
 
 fn assess_quantization_table(table_data: &[u8]) -> QuantizationQuality {
@@ -180,21 +246,26 @@ fn assess_quantization_table(table_data: &[u8]) -> QuantizationQuality {
     let precision_byte = table_data[0];
     let is_16bit = (precision_byte >> 4) & 0x01 == 1;
 
-    let values: Vec<u16> = if is_16bit {
-        table_data[1..]
-            .chunks_exact(2)
-            .take(64)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
-            .collect()
-    } else {
-        table_data[1..].iter().take(64).map(|&b| b as u16).collect()
-    };
+    let mut sum = 0u32;
+    let mut count = 0u32;
 
-    if values.is_empty() {
+    if is_16bit {
+        for chunk in table_data[1..].chunks_exact(2).take(64) {
+            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+            count += 1;
+        }
+    } else {
+        for &b in table_data[1..].iter().take(64) {
+            sum += b as u32;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
         return QuantizationQuality::Unknown;
     }
 
-    let avg: u16 = (values.iter().map(|&v| v as u32).sum::<u32>() / values.len() as u32) as u16;
+    let avg = (sum / count) as u16;
 
     if avg <= QUANTIZATION_HIGH_THRESHOLD {
         QuantizationQuality::High

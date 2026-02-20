@@ -1,4 +1,4 @@
-use argos::formats::jpeg::{find_jpeg_footer, is_valid_marker, validate_jpeg};
+use argos::formats::jpeg::{is_valid_marker, validate_jpeg};
 
 #[test]
 fn test_validate_jpeg_with_sof() {
@@ -43,12 +43,6 @@ fn test_validate_jpeg_with_exif() {
 fn test_validate_jpeg_invalid() {
     let not_jpeg = [0x89, 0x50, 0x4E, 0x47];
     assert!(validate_jpeg(&not_jpeg).is_none());
-}
-
-#[test]
-fn test_find_jpeg_footer() {
-    let data = [0xAA, 0xBB, 0xFF, 0xD9, 0xCC];
-    assert_eq!(find_jpeg_footer(&data), Some(2));
 }
 
 #[test]

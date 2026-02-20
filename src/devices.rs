@@ -136,12 +136,12 @@ fn parse_windows_device(index: usize, path: &str) -> Option<BlockDevice> {
 pub fn format_device_table(devices: &[BlockDevice]) -> String {
     let mut output = String::new();
 
-    output.push_str("NAME         TYPE                    SIZE PATH\n");
-    output.push_str("-------------------------------------------------------\n");
+    output.push_str("NAME       TYPE       SIZE PATH\n");
+    output.push_str("---------------------------------------------\n");
 
     for device in devices {
         output.push_str(&format!(
-            "{:<12} {:<15} {:>12} {}\n",
+            "{:<10} {:<8} {:>10} {}\n",
             device.name,
             format!("{}", device.device_type),
             device.size_human(),
