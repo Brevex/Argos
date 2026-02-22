@@ -60,11 +60,17 @@ fn advise_sequential(_file: &File) {}
 pub struct AlignedBuffer {
     ptr: *mut u8,
     layout: Layout,
+    size: usize,
 }
 
 impl AlignedBuffer {
     pub fn new() -> Self {
-        let layout = Layout::from_size_align(BUFFER_SIZE, SECTOR_SIZE)
+        Self::with_size(BUFFER_SIZE)
+    }
+
+    pub fn with_size(size: usize) -> Self {
+        let aligned_size = (size + SECTOR_SIZE - 1) & !(SECTOR_SIZE - 1);
+        let layout = Layout::from_size_align(aligned_size, SECTOR_SIZE)
             .expect("Invalid layout for AlignedBuffer");
 
         let ptr = unsafe { alloc_zeroed(layout) };
@@ -73,22 +79,26 @@ impl AlignedBuffer {
             std::alloc::handle_alloc_error(layout);
         }
 
-        Self { ptr, layout }
+        Self {
+            ptr,
+            layout,
+            size: aligned_size,
+        }
     }
 
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, BUFFER_SIZE) }
+        unsafe { std::slice::from_raw_parts(self.ptr, self.size) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, BUFFER_SIZE) }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        BUFFER_SIZE
+        self.size
     }
 
     #[inline]
@@ -237,6 +247,22 @@ impl DiskReader {
     pub fn size(&self) -> u64 {
         self.size
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn advise_willneed(&self, offset: u64, len: u64) {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(
+                self.file.as_raw_fd(),
+                offset as i64,
+                len as i64,
+                libc::POSIX_FADV_WILLNEED,
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn advise_willneed(&self, _offset: u64, _len: u64) {}
 }
 
 enum ScanMessage {
@@ -409,8 +435,6 @@ fn io_producer(
     let disk_size = reader.size();
     let max_total_bad_sectors = disk_size / MAX_JUMP_SIZE;
 
-    // Spawn a persistent reader worker so we can timeout stuck pread() calls
-    // on damaged HDD sectors without blocking the entire pipeline.
     let (mut req_tx, req_rx) = crossbeam_channel::bounded::<ReadRequest>(0);
     let (resp_tx, mut resp_rx) = crossbeam_channel::bounded::<ReadResponse>(0);
     let worker_reader = reader
@@ -444,12 +468,21 @@ fn io_producer(
             }
         };
 
-        if req_tx.send(ReadRequest { offset: read_offset, buffer }).is_err() {
+        if req_tx
+            .send(ReadRequest {
+                offset: read_offset,
+                buffer,
+            })
+            .is_err()
+        {
             break;
         }
 
         match resp_rx.recv_timeout(READ_TIMEOUT) {
-            Ok(ReadResponse { buffer, result: Ok(n) }) if n > 0 => {
+            Ok(ReadResponse {
+                buffer,
+                result: Ok(n),
+            }) if n > 0 => {
                 first_read = false;
                 if consecutive_failures > 0 {
                     consecutive_failures = 0;
@@ -467,11 +500,17 @@ fn io_producer(
                     break;
                 }
             }
-            Ok(ReadResponse { buffer: _, result: Ok(_) }) => {
+            Ok(ReadResponse {
+                buffer: _,
+                result: Ok(_),
+            }) => {
                 let _ = data_tx.send(ScanMessage::Done);
                 break;
             }
-            Ok(ReadResponse { buffer, result: Err(e) }) => {
+            Ok(ReadResponse {
+                buffer,
+                result: Err(e),
+            }) => {
                 if !is_recoverable_io_error(&e) {
                     let _ = data_tx.send(ScanMessage::FatalError(e));
                     break;
@@ -495,9 +534,6 @@ fn io_producer(
                 spare_buffer = Some(buffer);
             }
             Err(_timeout) => {
-                // Worker is stuck on a damaged sector — detach it and spawn a fresh one.
-                // The stuck thread will eventually exit when the kernel SCSI/ATA
-                // command timeout fires (~30s), freeing its buffer and file descriptor.
                 let (new_req_tx, new_req_rx) = crossbeam_channel::bounded::<ReadRequest>(0);
                 let (new_resp_tx, new_resp_rx) = crossbeam_channel::bounded::<ReadResponse>(0);
                 match reader.try_clone() {
@@ -529,7 +565,6 @@ fn io_producer(
                     break;
                 }
 
-                // Buffer is lost with the stuck thread — allocate a replacement
                 spare_buffer = Some(AlignedBuffer::new());
             }
         }

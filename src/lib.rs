@@ -8,6 +8,6 @@ pub mod types;
 
 pub use types::{
     BlockDevice, DeviceType, DimensionVerdict, ExtractionReport, ExtractionResult, Fragment,
-    FragmentCounts, FragmentKind, FragmentLists, FragmentMap, FragmentRanges, ImageFormat,
-    JpegMetadata, Offset, PngMetadata, QuantizationQuality, RecoveredFile, RecoveryMethod,
+    FragmentCounts, FragmentKind, FragmentMap, FragmentRanges, ImageFormat, JpegMetadata, Offset,
+    PngMetadata, QuantizationQuality, RecoveredFile, RecoveryMethod,
 };

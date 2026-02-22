@@ -16,7 +16,7 @@ fn test_scan_block_finds_jpeg_header() {
     data[103] = 0xE0;
     let mut map = FragmentMap::new();
     scan_block(0, &data, &mut map);
-    assert!(map.jpeg_headers().count() >= 1);
+    assert!(map.jpeg_headers().len() >= 1);
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn test_scan_block_finds_jpeg_footer() {
     data[501] = 0xD9;
     let mut map = FragmentMap::new();
     scan_block(0, &data, &mut map);
-    assert!(map.jpeg_footers().count() >= 1);
+    assert!(map.jpeg_footers().len() >= 1);
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn test_scan_block_finds_png_header() {
     data[100..108].copy_from_slice(&png_magic);
     let mut map = FragmentMap::new();
     scan_block(0, &data, &mut map);
-    assert!(map.png_headers().count() >= 1);
+    assert!(map.png_headers().len() >= 1);
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn test_scan_block_finds_png_footer() {
     data[508..512].copy_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
     let mut map = FragmentMap::new();
     scan_block(0, &data, &mut map);
-    assert!(map.png_footers().count() >= 1);
+    assert!(map.png_footers().len() >= 1);
 }
 
 #[test]
@@ -61,5 +61,5 @@ fn test_scan_block_multiple_headers() {
     data[502] = 0xFF;
     let mut map = FragmentMap::new();
     scan_block(0, &data, &mut map);
-    assert_eq!(map.jpeg_headers().count(), 2);
+    assert_eq!(map.jpeg_headers().len(), 2);
 }

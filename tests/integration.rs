@@ -93,9 +93,9 @@ fn test_full_recovery_pipeline() {
     assert!(!map.is_empty(), "Should find fragments");
 
     map.sort_by_offset();
-    let lists = map.build_lists();
+    map.dedup();
     let reader = scanner.into_reader();
-    let recovered = linear_carve(&lists, &reader, None);
+    let recovered = linear_carve(&map, &reader, None);
 
     let stats = RecoveryStats::from_recovered(&recovered);
     assert_eq!(stats.jpeg_linear, 3, "Should recover 3 JPEGs");
@@ -136,9 +136,9 @@ fn test_empty_disk_no_false_positives() {
     }
 
     map.sort_by_offset();
-    let lists = map.build_lists();
+    map.dedup();
     let reader = scanner.into_reader();
-    let recovered = linear_carve(&lists, &reader, None);
+    let recovered = linear_carve(&map, &reader, None);
 
     assert_eq!(
         recovered.len(),
@@ -172,9 +172,9 @@ fn test_disk_with_noise() {
     }
 
     map.sort_by_offset();
-    let lists = map.build_lists();
+    map.dedup();
     let reader = scanner.into_reader();
-    let recovered = linear_carve(&lists, &reader, None);
+    let recovered = linear_carve(&map, &reader, None);
 
     let stats = RecoveryStats::from_recovered(&recovered);
     assert!(stats.jpeg_linear >= 1, "Should recover at least 1 JPEG");
@@ -224,8 +224,10 @@ fn test_fragment_map_sorting() {
 
     map.sort_by_offset();
 
-    let offsets: Vec<u64> = map.fragments.iter().map(|f| f.offset).collect();
-    assert_eq!(offsets, vec![500, 1000, 2000]);
+    let header_offsets: Vec<u64> = map.jpeg_headers().iter().map(|f| f.offset).collect();
+    assert_eq!(header_offsets, vec![500, 1000]);
+    let footer_offsets: Vec<u64> = map.jpeg_footers().iter().map(|f| f.offset).collect();
+    assert_eq!(footer_offsets, vec![2000]);
 }
 
 #[test]
@@ -263,9 +265,9 @@ fn test_small_images_filtered_out() {
     }
 
     map.sort_by_offset();
-    let lists = map.build_lists();
+    map.dedup();
     let reader = scanner.into_reader();
-    let recovered = linear_carve(&lists, &reader, None);
+    let recovered = linear_carve(&map, &reader, None);
 
     assert_eq!(recovered.len(), 0, "32x32 icon should be filtered out");
 }

@@ -27,6 +27,7 @@ pub const MIN_PNG_CHUNK_VARIETY: u8 = 3;
 pub const MIN_PNG_VARIETY_DIMENSION: u32 = 512;
 pub const CORRUPT_SECTOR_RATIO: usize = 4;
 pub const VALIDATION_HEADER_SIZE: usize = 16;
+pub const SMALL_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DimensionVerdict {
@@ -261,134 +262,112 @@ impl FragmentCollector for Vec<Fragment> {
 }
 
 pub struct FragmentMap {
-    pub fragments: Vec<Fragment>,
+    jpeg_headers: Vec<Fragment>,
+    jpeg_footers: Vec<Fragment>,
+    png_headers: Vec<Fragment>,
+    png_footers: Vec<Fragment>,
 }
 
 impl FragmentMap {
     pub fn new() -> Self {
         Self {
-            fragments: Vec::new(),
+            jpeg_headers: Vec::new(),
+            jpeg_footers: Vec::new(),
+            png_headers: Vec::new(),
+            png_footers: Vec::new(),
         }
     }
 
     pub fn with_disk_estimate(disk_size: u64) -> Self {
         let estimated = ((disk_size / AVG_IMAGE_SIZE) as usize).min(MAX_FRAGMENT_CAPACITY);
+        let per_kind = estimated / 4;
         Self {
-            fragments: Vec::with_capacity(estimated),
+            jpeg_headers: Vec::with_capacity(per_kind),
+            jpeg_footers: Vec::with_capacity(per_kind),
+            png_headers: Vec::with_capacity(per_kind),
+            png_footers: Vec::with_capacity(per_kind),
         }
     }
 
     #[inline]
     pub fn push(&mut self, fragment: Fragment) {
-        if self.fragments.len() < MAX_FRAGMENT_CAPACITY {
-            self.fragments.push(fragment);
+        if self.len() < MAX_FRAGMENT_CAPACITY {
+            match fragment.kind {
+                FragmentKind::JpegHeader => self.jpeg_headers.push(fragment),
+                FragmentKind::JpegFooter => self.jpeg_footers.push(fragment),
+                FragmentKind::PngHeader => self.png_headers.push(fragment),
+                FragmentKind::PngIend => self.png_footers.push(fragment),
+            }
         }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.fragments.len()
+        self.jpeg_headers.len()
+            + self.jpeg_footers.len()
+            + self.png_headers.len()
+            + self.png_footers.len()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.fragments.is_empty()
+        self.jpeg_headers.is_empty()
+            && self.jpeg_footers.is_empty()
+            && self.png_headers.is_empty()
+            && self.png_footers.is_empty()
     }
 
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &Fragment> {
-        self.fragments.iter()
+    pub fn jpeg_headers(&self) -> &[Fragment] {
+        &self.jpeg_headers
     }
 
     #[inline]
-    pub fn jpeg_headers(&self) -> impl Iterator<Item = &Fragment> {
-        self.fragments
-            .iter()
-            .filter(|f| f.kind == FragmentKind::JpegHeader)
+    pub fn jpeg_footers(&self) -> &[Fragment] {
+        &self.jpeg_footers
     }
 
     #[inline]
-    pub fn jpeg_footers(&self) -> impl Iterator<Item = &Fragment> {
-        self.fragments
-            .iter()
-            .filter(|f| f.kind == FragmentKind::JpegFooter)
+    pub fn png_headers(&self) -> &[Fragment] {
+        &self.png_headers
     }
 
     #[inline]
-    pub fn png_headers(&self) -> impl Iterator<Item = &Fragment> {
-        self.fragments
-            .iter()
-            .filter(|f| f.kind == FragmentKind::PngHeader)
-    }
-
-    #[inline]
-    pub fn png_footers(&self) -> impl Iterator<Item = &Fragment> {
-        self.fragments
-            .iter()
-            .filter(|f| f.kind == FragmentKind::PngIend)
+    pub fn png_footers(&self) -> &[Fragment] {
+        &self.png_footers
     }
 
     #[inline]
     pub fn viable_jpeg_headers(&self) -> impl Iterator<Item = &Fragment> {
-        self.jpeg_headers().filter(|f| f.has_viable_entropy())
+        self.jpeg_headers.iter().filter(|f| f.has_viable_entropy())
     }
 
     #[inline]
     pub fn viable_png_headers(&self) -> impl Iterator<Item = &Fragment> {
-        self.png_headers().filter(|f| f.has_viable_entropy())
+        self.png_headers.iter().filter(|f| f.has_viable_entropy())
     }
 
     pub fn sort_by_offset(&mut self) {
-        self.fragments.sort_unstable_by_key(|f| f.offset);
+        self.jpeg_headers.sort_unstable_by_key(|f| f.offset);
+        self.jpeg_footers.sort_unstable_by_key(|f| f.offset);
+        self.png_headers.sort_unstable_by_key(|f| f.offset);
+        self.png_footers.sort_unstable_by_key(|f| f.offset);
     }
 
     pub fn dedup(&mut self) {
-        self.fragments
-            .dedup_by(|a, b| a.offset == b.offset && a.kind == b.kind);
-    }
-
-    pub fn build_lists(&self) -> FragmentLists<'_> {
-        let mut jpeg_headers = Vec::new();
-        let mut jpeg_footers = Vec::new();
-        let mut png_headers = Vec::new();
-        let mut png_footers = Vec::new();
-
-        for f in &self.fragments {
-            match f.kind {
-                FragmentKind::JpegHeader => {
-                    if f.has_viable_entropy() {
-                        jpeg_headers.push(f);
-                    }
-                }
-                FragmentKind::JpegFooter => jpeg_footers.push(f),
-                FragmentKind::PngHeader => {
-                    if f.has_viable_entropy() {
-                        png_headers.push(f);
-                    }
-                }
-                FragmentKind::PngIend => png_footers.push(f),
-            }
-        }
-
-        FragmentLists {
-            jpeg_headers,
-            jpeg_footers,
-            png_headers,
-            png_footers,
-        }
+        self.jpeg_headers.dedup_by(|a, b| a.offset == b.offset);
+        self.jpeg_footers.dedup_by(|a, b| a.offset == b.offset);
+        self.png_headers.dedup_by(|a, b| a.offset == b.offset);
+        self.png_footers.dedup_by(|a, b| a.offset == b.offset);
     }
 
     pub fn count_by_kind(&self) -> FragmentCounts {
-        let mut counts = FragmentCounts::default();
-        for f in &self.fragments {
-            match f.kind {
-                FragmentKind::JpegHeader => counts.jpeg_headers += 1,
-                FragmentKind::JpegFooter => counts.jpeg_footers += 1,
-                FragmentKind::PngHeader => counts.png_headers += 1,
-                FragmentKind::PngIend => counts.png_footers += 1,
-            }
+        FragmentCounts {
+            jpeg_headers: self.jpeg_headers.len(),
+            jpeg_footers: self.jpeg_footers.len(),
+            png_headers: self.png_headers.len(),
+            png_footers: self.png_footers.len(),
         }
-        counts
     }
 }
 
@@ -403,13 +382,6 @@ impl FragmentCollector for FragmentMap {
     fn collect(&mut self, fragment: Fragment) {
         self.push(fragment);
     }
-}
-
-pub struct FragmentLists<'a> {
-    pub jpeg_headers: Vec<&'a Fragment>,
-    pub jpeg_footers: Vec<&'a Fragment>,
-    pub png_headers: Vec<&'a Fragment>,
-    pub png_footers: Vec<&'a Fragment>,
 }
 
 #[derive(Default)]

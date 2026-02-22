@@ -9,9 +9,8 @@ use std::path::PathBuf;
 use argos::carving::RecoveryStats;
 use argos::devices::{device_selection_options, discover_block_devices};
 use argos::io::DiskScanner;
-use argos::types::{Fragment, FragmentMap};
+use argos::types::FragmentMap;
 use argos::{analysis, carving, extraction, io};
-use rayon::prelude::*;
 
 const PROGRESS_UPDATE_INTERVAL: u64 = 100 * 1024 * 1024;
 
@@ -143,8 +142,8 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
 
     let disk_size = reader.size();
     let mut scanner = DiskScanner::new(reader);
-
     let pb = ProgressBar::new(disk_size);
+
     pb.set_style(
         ProgressStyle::default_bar()
             .template("[{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}")?
@@ -153,47 +152,77 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
 
     let mut map = FragmentMap::with_disk_estimate(disk_size);
     let mut blocks_processed = 0u64;
-    let batch_size = rayon::current_num_threads().min(4);
-    let mut batch = Vec::with_capacity(batch_size);
+    let max_in_flight = rayon::current_num_threads().min(5);
+    let (result_tx, result_rx) = crossbeam_channel::bounded(max_in_flight * 2);
+    let mut in_flight = 0usize;
+    let mut scanner_done = false;
 
     loop {
-        batch.clear();
-        for _ in 0..batch_size {
-            match scanner.next_owned_block()? {
-                Some(block) => batch.push(block),
-                None => break,
-            }
-        }
-        if batch.is_empty() {
-            break;
-        }
-
-        let batch_results: Vec<Vec<Fragment>> = batch
-            .par_iter()
-            .map(|block| {
-                let mut local = Vec::new();
-                analysis::scan_block(block.offset, block.data(), &mut local);
-                local
-            })
-            .collect();
-
-        for fragments in batch_results {
+        while let Ok((fragments, bytes_read, buffer)) = result_rx.try_recv() {
             for f in fragments {
                 map.push(f);
             }
+
+            blocks_processed += bytes_read;
+            pb.set_position(blocks_processed);
+
+            if blocks_processed.is_multiple_of(PROGRESS_UPDATE_INTERVAL) {
+                pb.set_message(format!("Found {} fragments", map.len()));
+            }
+
+            scanner.recycle_buffer(buffer);
+            in_flight -= 1;
         }
 
-        blocks_processed += batch.iter().map(|b| b.bytes_read as u64).sum::<u64>();
-        pb.set_position(blocks_processed);
-
-        if blocks_processed.is_multiple_of(PROGRESS_UPDATE_INTERVAL) {
-            pb.set_message(format!("Found {} fragments", map.len()));
+        if scanner_done && in_flight == 0 {
+            break;
         }
 
-        for block in batch.drain(..) {
-            scanner.recycle_buffer(block.buffer);
+        if !scanner_done && in_flight < max_in_flight {
+            match scanner.next_owned_block()? {
+                Some(block) => {
+                    let tx = result_tx.clone();
+
+                    rayon::spawn(move || {
+                        let mut local = Vec::new();
+                        analysis::scan_block(block.offset, block.data(), &mut local);
+                        let bytes = block.bytes_read as u64;
+                        let _ = tx.send((local, bytes, block.buffer));
+                    });
+
+                    in_flight += 1;
+                    continue;
+                }
+                None => {
+                    scanner_done = true;
+                }
+            }
+        }
+
+        if in_flight > 0 {
+            match result_rx.recv() {
+                Ok((fragments, bytes_read, buffer)) => {
+                    for f in fragments {
+                        map.push(f);
+                    }
+
+                    blocks_processed += bytes_read;
+                    pb.set_position(blocks_processed);
+
+                    if blocks_processed.is_multiple_of(PROGRESS_UPDATE_INTERVAL) {
+                        pb.set_message(format!("Found {} fragments", map.len()));
+                    }
+
+                    scanner.recycle_buffer(buffer);
+                    in_flight -= 1;
+                }
+                Err(_) => break,
+            }
         }
     }
+
+    drop(result_tx);
+    drop(result_rx);
 
     pb.finish_with_message(format!(
         "Scan complete! Found {} fragments",
@@ -221,13 +250,13 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     map.sort_by_offset();
     map.dedup();
 
-    let lists = map.build_lists();
     drop(scanner);
     let reader = io::DiskReader::open_regular(device_path)
         .context("Failed to reopen device for recovery")?;
 
-    let linear_total = lists.jpeg_headers.len() + lists.png_headers.len();
+    let linear_total = map.jpeg_headers().len() + map.png_headers().len();
     let pb_linear = ProgressBar::new(linear_total as u64);
+
     pb_linear.set_style(
         ProgressStyle::default_bar()
             .template("[{bar:40.yellow/white}] {pos}/{len} Linear carving ({percent}%)")?
@@ -238,15 +267,16 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         pb_linear.set_position(current as u64);
     };
 
-    let mut recovered = carving::linear_carve(&lists, &reader, Some(&linear_cb));
+    let mut recovered = carving::linear_carve(&map, &reader, Some(&linear_cb));
     pb_linear.finish_with_message(format!(
         "Linear carving complete — {} images found",
         style(recovered.len()).green().bold()
     ));
 
     if map.len() > recovered.len() * 2 {
-        let bifrag_total = lists.jpeg_headers.len() + lists.png_headers.len();
+        let bifrag_total = map.jpeg_headers().len() + map.png_headers().len();
         let pb_bifrag = ProgressBar::new(bifrag_total as u64);
+        
         pb_bifrag.set_style(
             ProgressStyle::default_bar()
                 .template("[{bar:40.magenta/white}] {pos}/{len} Bifragment carving ({percent}%)")?
@@ -257,7 +287,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
             pb_bifrag.set_position(current as u64);
         };
 
-        let bifrag = carving::bifragment_carve(&lists, &reader, Some(&bifrag_cb));
+        let bifrag = carving::bifragment_carve(&map, &reader, Some(&bifrag_cb));
         pb_bifrag.finish_with_message(format!(
             "Bifragment carving complete — {} images found",
             style(bifrag.len()).green().bold()

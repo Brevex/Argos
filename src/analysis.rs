@@ -1,7 +1,3 @@
-use std::sync::LazyLock;
-
-use memchr::memmem;
-
 use crate::formats::jpeg::quick_jpeg_dimensions;
 use crate::formats::png::{validate_png_header, IEND_CRC, PNG_SIGNATURE};
 use crate::types::{
@@ -9,79 +5,112 @@ use crate::types::{
     FragmentKind, Offset, LOW_ENTROPY_THRESHOLD,
 };
 
-const JPEG_SOI_PATTERN: [u8; 3] = [0xFF, 0xD8, 0xFF];
-const JPEG_EOI_PATTERN: [u8; 2] = [0xFF, 0xD9];
-const PNG_IEND_PATTERN: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44];
 const ENTROPY_SAMPLE_SIZE: usize = 1024;
 const EOI_CONTEXT_WINDOW: usize = 256;
 const EOI_MIN_CONTEXT_ENTROPY: f32 = 6.0;
 
-static JPEG_SOI_FINDER: LazyLock<memmem::Finder<'static>> =
-    LazyLock::new(|| memmem::Finder::new(&JPEG_SOI_PATTERN));
-static JPEG_EOI_FINDER: LazyLock<memmem::Finder<'static>> =
-    LazyLock::new(|| memmem::Finder::new(&JPEG_EOI_PATTERN));
-static PNG_SIG_FINDER: LazyLock<memmem::Finder<'static>> =
-    LazyLock::new(|| memmem::Finder::new(&PNG_SIGNATURE));
-static PNG_IEND_FINDER: LazyLock<memmem::Finder<'static>> =
-    LazyLock::new(|| memmem::Finder::new(&PNG_IEND_PATTERN));
-
 pub fn scan_block(offset: Offset, data: &[u8], collector: &mut impl FragmentCollector) {
-    scan_jpeg_headers(offset, data, collector);
-    scan_jpeg_footers(offset, data, collector);
-    scan_png_headers(offset, data, collector);
-    scan_png_footers(offset, data, collector);
-}
+    let expected_crc = IEND_CRC.to_be_bytes();
 
-fn scan_jpeg_headers(base_offset: Offset, data: &[u8], collector: &mut impl FragmentCollector) {
-    for pos in JPEG_SOI_FINDER.find_iter(data) {
-        let verdict = if let Some((w, h)) = quick_jpeg_dimensions(&data[pos..]) {
-            let v = categorize_dimensions(w as u32, h as u32);
-            match v {
-                DimensionVerdict::Photo => v,
-                DimensionVerdict::Asset | DimensionVerdict::TooSmall => continue,
+    for pos in memchr::memchr3_iter(0xFF, 0x89, 0x49, data) {
+        match data[pos] {
+            0xFF => {
+                if pos + 2 < data.len() && data[pos + 1] == 0xD8 && data[pos + 2] == 0xFF {
+                    'soi: {
+                        let verdict = if let Some((w, h)) = quick_jpeg_dimensions(&data[pos..]) {
+                            match categorize_dimensions(w as u32, h as u32) {
+                                DimensionVerdict::Photo => DimensionVerdict::Photo,
+                                _ => break 'soi,
+                            }
+                        } else {
+                            DimensionVerdict::Photo
+                        };
+
+                        let sample_end = (pos + ENTROPY_SAMPLE_SIZE).min(data.len());
+                        let entropy = calculate_entropy(&data[pos..sample_end]);
+                        if entropy < LOW_ENTROPY_THRESHOLD {
+                            break 'soi;
+                        }
+
+                        collector.collect(Fragment::with_verdict(
+                            offset + pos as u64,
+                            FragmentKind::JpegHeader,
+                            entropy,
+                            verdict,
+                        ));
+                    }
+                } else if pos + 1 < data.len() && data[pos + 1] == 0xD9 {
+                    'eoi: {
+                        if pos > 0 && data[pos - 1] == 0x00 {
+                            break 'eoi;
+                        }
+
+                        if pos >= EOI_CONTEXT_WINDOW {
+                            let context = &data[pos - EOI_CONTEXT_WINDOW..pos];
+                            let context_entropy = calculate_entropy(context);
+                            if context_entropy < EOI_MIN_CONTEXT_ENTROPY {
+                                break 'eoi;
+                            }
+                            if !is_valid_scan_context(context) {
+                                break 'eoi;
+                            }
+                        }
+
+                        collector.collect(Fragment::new(
+                            offset + pos as u64,
+                            FragmentKind::JpegFooter,
+                            0.0,
+                        ));
+                    }
+                }
             }
-        } else {
-            DimensionVerdict::Photo
-        };
+            0x89 => {
+                if pos + 8 <= data.len() && data[pos..pos + 8] == PNG_SIGNATURE {
+                    'png: {
+                        let verdict = if let Some(info) = validate_png_header(&data[pos..]) {
+                            match categorize_dimensions(info.width, info.height) {
+                                DimensionVerdict::Photo => DimensionVerdict::Photo,
+                                _ => break 'png,
+                            }
+                        } else {
+                            DimensionVerdict::Photo
+                        };
 
-        let sample_end = (pos + ENTROPY_SAMPLE_SIZE).min(data.len());
-        let entropy = calculate_entropy(&data[pos..sample_end]);
+                        let sample_end = (pos + ENTROPY_SAMPLE_SIZE).min(data.len());
+                        let entropy = calculate_entropy(&data[pos..sample_end]);
+                        if entropy < LOW_ENTROPY_THRESHOLD {
+                            break 'png;
+                        }
 
-        if entropy < LOW_ENTROPY_THRESHOLD {
-            continue;
-        }
-
-        collector.collect(Fragment::with_verdict(
-            base_offset + pos as u64,
-            FragmentKind::JpegHeader,
-            entropy,
-            verdict,
-        ));
-    }
-}
-
-fn scan_jpeg_footers(base_offset: Offset, data: &[u8], collector: &mut impl FragmentCollector) {
-    for pos in JPEG_EOI_FINDER.find_iter(data) {
-        if pos > 0 && data[pos - 1] == 0x00 {
-            continue;
-        }
-
-        if pos >= EOI_CONTEXT_WINDOW {
-            let context = &data[pos - EOI_CONTEXT_WINDOW..pos];
-            let context_entropy = calculate_entropy(context);
-            if context_entropy < EOI_MIN_CONTEXT_ENTROPY {
-                continue;
+                        collector.collect(Fragment::with_verdict(
+                            offset + pos as u64,
+                            FragmentKind::PngHeader,
+                            entropy,
+                            verdict,
+                        ));
+                    }
+                }
             }
-            if !is_valid_scan_context(context) {
-                continue;
+            0x49 => {
+                if pos >= 4
+                    && pos + 4 <= data.len()
+                    && data[pos - 4..pos] == [0x00, 0x00, 0x00, 0x00]
+                    && data[pos..pos + 4] == *b"IEND"
+                {
+                    let iend_pos = pos - 4;
+                    if iend_pos + 12 <= data.len()
+                        && data[iend_pos + 8..iend_pos + 12] == expected_crc
+                    {
+                        collector.collect(Fragment::new(
+                            offset + iend_pos as u64,
+                            FragmentKind::PngIend,
+                            0.0,
+                        ));
+                    }
+                }
             }
+            _ => {}
         }
-
-        collector.collect(Fragment::new(
-            base_offset + pos as u64,
-            FragmentKind::JpegFooter,
-            0.0,
-        ));
     }
 }
 
@@ -100,46 +129,4 @@ fn is_valid_scan_context(context: &[u8]) -> bool {
         }
     }
     true
-}
-
-fn scan_png_headers(base_offset: Offset, data: &[u8], collector: &mut impl FragmentCollector) {
-    for pos in PNG_SIG_FINDER.find_iter(data) {
-        let verdict = if let Some(info) = validate_png_header(&data[pos..]) {
-            let v = categorize_dimensions(info.width, info.height);
-            match v {
-                DimensionVerdict::Photo => v,
-                DimensionVerdict::Asset | DimensionVerdict::TooSmall => continue,
-            }
-        } else {
-            DimensionVerdict::Photo
-        };
-
-        let sample_end = (pos + ENTROPY_SAMPLE_SIZE).min(data.len());
-        let entropy = calculate_entropy(&data[pos..sample_end]);
-
-        if entropy < LOW_ENTROPY_THRESHOLD {
-            continue;
-        }
-
-        collector.collect(Fragment::with_verdict(
-            base_offset + pos as u64,
-            FragmentKind::PngHeader,
-            entropy,
-            verdict,
-        ));
-    }
-}
-
-fn scan_png_footers(base_offset: Offset, data: &[u8], collector: &mut impl FragmentCollector) {
-    let expected_crc = IEND_CRC.to_be_bytes();
-    for pos in PNG_IEND_FINDER.find_iter(data) {
-        if pos + 12 > data.len() || data[pos + 8..pos + 12] != expected_crc {
-            continue;
-        }
-        collector.collect(Fragment::new(
-            base_offset + pos as u64,
-            FragmentKind::PngIend,
-            0.0,
-        ));
-    }
 }

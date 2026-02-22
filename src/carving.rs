@@ -8,18 +8,20 @@ use crate::formats::png::{validate_png_full, validate_png_header, PngInfo};
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 use crate::types::{
     categorize_dimensions, is_metadata_asset_jpeg, is_metadata_asset_png, DimensionVerdict,
-    Fragment, FragmentLists, FragmentRanges, ImageFormat, QuantizationQuality, RecoveredFile,
+    Fragment, FragmentMap, FragmentRanges, ImageFormat, QuantizationQuality, RecoveredFile,
     RecoveryMethod, LOW_MARKER_COUNT_THRESHOLD, LOW_QUALITY_MAX_DIMENSION, MIN_PHOTO_BYTES,
-    MIN_PNG_CHUNK_VARIETY, MIN_PNG_VARIETY_DIMENSION, MIN_SCAN_DATA_ENTROPY,
+    MIN_PNG_CHUNK_VARIETY, MIN_PNG_VARIETY_DIMENSION, MIN_SCAN_DATA_ENTROPY, SMALL_BUFFER_SIZE,
 };
 
 const CONTIGUOUS_SEARCH_LIMIT: u64 = 10 * 1024 * 1024;
 const BIFRAGMENT_MAX_GAP: u64 = 50 * 1024 * 1024;
 const CLUSTER_SIZES: [u64; 3] = [4096, 8192, 32768];
 const MAX_BIFRAGMENT_CANDIDATES: usize = 8;
+const FADVISE_CHUNK: u64 = 256 * 1024 * 1024;
+const QUICK_CHECK_SIZE: usize = 64;
 
 thread_local! {
-    static CARVE_BUFFER: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::new());
+    static CARVE_BUFFER: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_size(SMALL_BUFFER_SIZE));
     static BIFRAG_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -114,16 +116,16 @@ fn png_bifragment_passes(data: &[u8]) -> bool {
 }
 
 pub fn linear_carve(
-    lists: &FragmentLists,
+    map: &FragmentMap,
     reader: &DiskReader,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Vec<RecoveredFile> {
-    let total = lists.jpeg_headers.len() + lists.png_headers.len();
+    let total = map.jpeg_headers().len() + map.png_headers().len();
     let counter = AtomicUsize::new(0);
 
     let mut recovered = linear_carve_format(
-        &lists.jpeg_headers,
-        &lists.jpeg_footers,
+        map.jpeg_headers(),
+        map.jpeg_footers(),
         &JPEG_SPEC,
         reader,
         jpeg_candidate_passes,
@@ -133,8 +135,8 @@ pub fn linear_carve(
     );
 
     recovered.extend(linear_carve_format(
-        &lists.png_headers,
-        &lists.png_footers,
+        map.png_headers(),
+        map.png_footers(),
         &PNG_SPEC,
         reader,
         png_candidate_passes,
@@ -148,8 +150,8 @@ pub fn linear_carve(
 
 #[allow(clippy::too_many_arguments)]
 fn linear_carve_format(
-    headers: &[&Fragment],
-    footers: &[&Fragment],
+    headers: &[Fragment],
+    footers: &[Fragment],
     spec: &FormatSpec,
     reader: &DiskReader,
     candidate_passes: fn(&[u8]) -> bool,
@@ -157,6 +159,17 @@ fn linear_carve_format(
     counter: &AtomicUsize,
     total: usize,
 ) -> Vec<RecoveredFile> {
+    if !headers.is_empty() {
+        let first = headers[0].offset;
+        let last = headers[headers.len() - 1].offset;
+        let mut adv = first;
+        while adv <= last {
+            let chunk = FADVISE_CHUNK.min(last - adv + SMALL_BUFFER_SIZE as u64);
+            reader.advise_willneed(adv, chunk);
+            adv += FADVISE_CHUNK;
+        }
+    }
+
     headers
         .par_iter()
         .filter_map(|header| {
@@ -187,16 +200,16 @@ fn linear_carve_format(
 }
 
 pub fn bifragment_carve(
-    lists: &FragmentLists,
+    map: &FragmentMap,
     reader: &DiskReader,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Vec<RecoveredFile> {
-    let total = lists.jpeg_headers.len() + lists.png_headers.len();
+    let total = map.jpeg_headers().len() + map.png_headers().len();
     let counter = AtomicUsize::new(0);
 
     let mut recovered = bifragment_carve_format(
-        &lists.jpeg_headers,
-        &lists.jpeg_footers,
+        map.jpeg_headers(),
+        map.jpeg_footers(),
         &JPEG_SPEC,
         reader,
         jpeg_bifragment_passes,
@@ -206,8 +219,8 @@ pub fn bifragment_carve(
     );
 
     recovered.extend(bifragment_carve_format(
-        &lists.png_headers,
-        &lists.png_footers,
+        map.png_headers(),
+        map.png_footers(),
         &PNG_SPEC,
         reader,
         png_bifragment_passes,
@@ -221,8 +234,8 @@ pub fn bifragment_carve(
 
 #[allow(clippy::too_many_arguments)]
 fn bifragment_carve_format(
-    headers: &[&Fragment],
-    footers: &[&Fragment],
+    headers: &[Fragment],
+    footers: &[Fragment],
     spec: &FormatSpec,
     reader: &DiskReader,
     validate_and_pass: fn(&[u8]) -> bool,
@@ -276,6 +289,15 @@ fn bifragment_carve_format(
         .collect()
 }
 
+fn quick_check_fragpoint(reader: &DiskReader, offset: u64, buffer: &mut AlignedBuffer) -> bool {
+    if let Some(data) = read_at_offset(reader, offset, buffer) {
+        let sample = &data[..data.len().min(QUICK_CHECK_SIZE)];
+        !sample.iter().all(|&b| b == 0)
+    } else {
+        false
+    }
+}
+
 fn try_bifragment_points(
     header: &Fragment,
     footer: &Fragment,
@@ -304,6 +326,12 @@ fn try_bifragment_points(
             let total_size = first_frag_size + second_frag_size;
             if total_size > spec.max_file_bytes {
                 break;
+            }
+
+            if !quick_check_fragpoint(reader, frag_point, buffer) {
+                frag_point += cluster_size;
+                candidates_tested += 1;
+                continue;
             }
 
             if read_bifragment_candidate(
@@ -340,6 +368,7 @@ fn try_bifragment_points(
             if first_frag_size >= MIN_PHOTO_BYTES && second_frag_size >= MIN_PHOTO_BYTES {
                 let total_size = first_frag_size + second_frag_size;
                 if total_size <= spec.max_file_bytes
+                    && quick_check_fragpoint(reader, aligned_mid, buffer)
                     && read_bifragment_candidate(
                         reader,
                         header.offset,
@@ -384,7 +413,7 @@ fn read_at_offset<'a>(
 
 fn find_nearest_footer<'a>(
     header: &Fragment,
-    footers: &[&'a Fragment],
+    footers: &'a [Fragment],
     min_size: u64,
     max_size: u64,
 ) -> Option<&'a Fragment> {
@@ -393,13 +422,10 @@ fn find_nearest_footer<'a>(
 
     let start_idx = footers.partition_point(|f| f.offset < min_offset);
 
-    footers[start_idx..]
-        .iter()
-        .find(|f| f.offset < max_offset)
-        .copied()
+    footers[start_idx..].iter().find(|f| f.offset < max_offset)
 }
 
-fn has_nearby_footer(footers: &[&Fragment], header_offset: u64, limit: u64) -> bool {
+fn has_nearby_footer(footers: &[Fragment], header_offset: u64, limit: u64) -> bool {
     let start_idx = footers.partition_point(|f| f.offset <= header_offset);
 
     if let Some(footer) = footers.get(start_idx) {

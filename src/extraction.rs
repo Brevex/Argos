@@ -5,7 +5,7 @@ use crate::formats::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
 use crate::io::{is_recoverable_io_error, zero_sector, AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 use crate::types::{
     ExtractionReport, ExtractionResult, ImageFormat, RecoveredFile, CORRUPT_SECTOR_RATIO,
-    VALIDATION_HEADER_SIZE,
+    SMALL_BUFFER_SIZE, VALIDATION_HEADER_SIZE,
 };
 use rayon::prelude::*;
 use std::fs::{self, File};
@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 thread_local! {
-    static EXTRACT_BUFFER: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::new());
+    static EXTRACT_BUFFER: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_size(SMALL_BUFFER_SIZE));
 }
 
 pub fn extract_all(
@@ -95,7 +95,8 @@ fn extract_single(
     output_path: &Path,
     buffer: &mut AlignedBuffer,
 ) -> io::Result<ExtractionResult> {
-    if !pre_validate_tail(file, reader, buffer) {
+    let ranges = file.fragments.as_slice();
+    if ranges.is_empty() {
         return Ok(ExtractionResult {
             zero_filled_sectors: 0,
             total_sectors: 0,
@@ -105,6 +106,39 @@ fn extract_single(
         });
     }
 
+    let last_range = &ranges[ranges.len() - 1];
+    if last_range.end >= VALIDATION_HEADER_SIZE as u64 {
+        let tail_start = last_range.end - VALIDATION_HEADER_SIZE as u64;
+        let aligned = tail_start & ALIGNMENT_MASK;
+        let valid_tail = match reader.read_at(aligned, buffer) {
+            Ok(n) => {
+                let skip = (tail_start - aligned) as usize;
+                if n >= skip + VALIDATION_HEADER_SIZE {
+                    let tail = &buffer.as_slice()[skip..skip + VALIDATION_HEADER_SIZE];
+                    match file.format {
+                        ImageFormat::Jpeg => tail[VALIDATION_HEADER_SIZE - 2..] == JPEG_EOI,
+                        ImageFormat::Png => {
+                            tail[VALIDATION_HEADER_SIZE - 4..] == *IEND_CHUNK_TYPE
+                                || tail.windows(4).any(|w| w == IEND_CHUNK_TYPE)
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        };
+        if !valid_tail {
+            return Ok(ExtractionResult {
+                zero_filled_sectors: 0,
+                total_sectors: 0,
+                head: [0u8; VALIDATION_HEADER_SIZE],
+                tail: [0u8; VALIDATION_HEADER_SIZE],
+                bytes_written: 0,
+            });
+        }
+    }
+
     let mut out = File::create(output_path)?;
     let mut zero_filled_sectors: usize = 0;
     let mut total_sectors: usize = 0;
@@ -112,7 +146,7 @@ fn extract_single(
     let mut tail = [0u8; VALIDATION_HEADER_SIZE];
     let mut bytes_written: usize = 0;
 
-    for range in file.fragments.as_slice() {
+    for range in ranges {
         let mut offset = range.start;
 
         while offset < range.end {
@@ -212,40 +246,6 @@ fn validate_in_memory(result: &ExtractionResult, format: ImageFormat) -> bool {
             result.tail[VALIDATION_HEADER_SIZE - 4..] == *IEND_CHUNK_TYPE
                 || result.tail.windows(4).any(|w| w == IEND_CHUNK_TYPE)
         }
-    }
-}
-
-fn pre_validate_tail(
-    file: &RecoveredFile,
-    reader: &DiskReader,
-    buffer: &mut AlignedBuffer,
-) -> bool {
-    let ranges = file.fragments.as_slice();
-    if ranges.is_empty() {
-        return false;
-    }
-    let last_range = &ranges[ranges.len() - 1];
-    if last_range.end < VALIDATION_HEADER_SIZE as u64 {
-        return false;
-    }
-    let tail_start = last_range.end - VALIDATION_HEADER_SIZE as u64;
-    let aligned = tail_start & ALIGNMENT_MASK;
-    match reader.read_at(aligned, buffer) {
-        Ok(n) => {
-            let skip = (tail_start - aligned) as usize;
-            if n < skip + VALIDATION_HEADER_SIZE {
-                return false;
-            }
-            let tail = &buffer.as_slice()[skip..skip + VALIDATION_HEADER_SIZE];
-            match file.format {
-                ImageFormat::Jpeg => tail[VALIDATION_HEADER_SIZE - 2..] == JPEG_EOI,
-                ImageFormat::Png => {
-                    tail[VALIDATION_HEADER_SIZE - 4..] == *IEND_CHUNK_TYPE
-                        || tail.windows(4).any(|w| w == IEND_CHUNK_TYPE)
-                }
-            }
-        }
-        Err(_) => false,
     }
 }
 
