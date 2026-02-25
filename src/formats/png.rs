@@ -1,4 +1,4 @@
-use crate::types::PngMetadata;
+use crate::types::{calculate_entropy, PngMetadata};
 
 pub const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -198,4 +198,118 @@ impl<'a> Iterator for PngChunkIterator<'a> {
 
         Some((chunk_data, chunk_type, payload))
     }
+}
+
+const PNG_BREAK_ZERO_THRESHOLD: usize = 512;
+const PNG_CONTINUATION_MIN_ENTROPY: f32 = 5.0;
+
+pub fn detect_png_break(data: &[u8]) -> Option<usize> {
+    if data.len() < 8 || data[..8] != PNG_SIGNATURE {
+        return None;
+    }
+
+    let mut pos = 8;
+    let mut found_idat = false;
+
+    while pos + 12 <= data.len() {
+        let length =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+
+        let chunk_type: [u8; 4] = [data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]];
+
+        let total_size = 4 + 4 + length + 4;
+
+        if pos + total_size > data.len() {
+            if found_idat {
+                return Some(pos);
+            }
+            return None;
+        }
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&data[pos + 4..pos + 8 + length]);
+        let calculated = hasher.finalize();
+        let stored = u32::from_be_bytes([
+            data[pos + 8 + length],
+            data[pos + 8 + length + 1],
+            data[pos + 8 + length + 2],
+            data[pos + 8 + length + 3],
+        ]);
+
+        if calculated != stored {
+            if found_idat {
+                return Some(pos);
+            }
+            return None;
+        }
+
+        if chunk_type == *b"IDAT" {
+            found_idat = true;
+        }
+
+        if chunk_type == *b"IEND" {
+            return None;
+        }
+
+        let payload = &data[pos + 8..pos + 8 + length];
+        if payload.len() >= PNG_BREAK_ZERO_THRESHOLD
+            && payload[..PNG_BREAK_ZERO_THRESHOLD].iter().all(|&b| b == 0)
+        {
+            return Some(pos);
+        }
+
+        pos += total_size;
+    }
+
+    if found_idat && pos < data.len() {
+        return Some(pos);
+    }
+
+    None
+}
+
+pub fn matches_png_continuation(cluster_data: &[u8]) -> bool {
+    if cluster_data.len() < 12 {
+        return false;
+    }
+
+    let entropy = calculate_entropy(cluster_data);
+    if entropy < PNG_CONTINUATION_MIN_ENTROPY {
+        return false;
+    }
+
+    let length = u32::from_be_bytes([
+        cluster_data[0],
+        cluster_data[1],
+        cluster_data[2],
+        cluster_data[3],
+    ]) as usize;
+
+    let chunk_type: [u8; 4] = [
+        cluster_data[4],
+        cluster_data[5],
+        cluster_data[6],
+        cluster_data[7],
+    ];
+
+    if chunk_type != *b"IDAT" {
+        return false;
+    }
+
+    let total = 4 + 4 + length + 4;
+    if total > 16 * 1024 * 1024 || total > cluster_data.len() {
+        return length > 0 && length < 16 * 1024 * 1024;
+    }
+
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&cluster_data[4..8 + length]);
+    let calculated = hasher.finalize();
+    let stored = u32::from_be_bytes([
+        cluster_data[8 + length],
+        cluster_data[8 + length + 1],
+        cluster_data[8 + length + 2],
+        cluster_data[8 + length + 3],
+    ]);
+
+    calculated == stored
 }

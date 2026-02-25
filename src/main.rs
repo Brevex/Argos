@@ -8,11 +8,11 @@ use std::path::PathBuf;
 
 use argos::carving::RecoveryStats;
 use argos::devices::{device_selection_options, discover_block_devices};
-use argos::io::DiskScanner;
+use argos::io::{DiskScanner, PollResult};
 use argos::types::FragmentMap;
-use argos::{analysis, carving, extraction, io};
+use argos::{analysis, carving, extraction, io, reassembly};
 
-const PROGRESS_UPDATE_INTERVAL: u64 = 100 * 1024 * 1024;
+const PROGRESS_MSG_INTERVAL: u64 = 50 * 1024 * 1024;
 
 #[derive(Parser)]
 #[command(name = "argos")]
@@ -151,27 +151,30 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     );
 
     let mut map = FragmentMap::with_disk_estimate(disk_size);
-    let mut blocks_processed = 0u64;
+    let mut last_msg_pos = 0u64;
     let max_in_flight = rayon::current_num_threads().min(5);
     let (result_tx, result_rx) = crossbeam_channel::bounded(max_in_flight * 2);
     let mut in_flight = 0usize;
     let mut scanner_done = false;
 
     loop {
-        while let Ok((fragments, bytes_read, buffer)) = result_rx.try_recv() {
+        while let Ok((fragments, end_pos, buffer)) = result_rx.try_recv() {
             for f in fragments {
                 map.push(f);
             }
 
-            blocks_processed += bytes_read;
-            pb.set_position(blocks_processed);
-
-            if blocks_processed.is_multiple_of(PROGRESS_UPDATE_INTERVAL) {
-                pb.set_message(format!("Found {} fragments", map.len()));
-            }
-
             scanner.recycle_buffer(buffer);
             in_flight -= 1;
+
+            // end_pos is not used for progress — disk_position is the source of truth
+            let _ = end_pos;
+        }
+
+        let disk_pos = scanner.disk_position();
+        pb.set_position(disk_pos);
+        if disk_pos >= last_msg_pos + PROGRESS_MSG_INTERVAL {
+            pb.set_message(format!("Found {} fragments", map.len()));
+            last_msg_pos = disk_pos;
         }
 
         if scanner_done && in_flight == 0 {
@@ -179,45 +182,46 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         }
 
         if !scanner_done && in_flight < max_in_flight {
-            match scanner.next_owned_block()? {
-                Some(block) => {
+            match scanner.poll_block()? {
+                PollResult::Block(block) => {
                     let tx = result_tx.clone();
 
                     rayon::spawn(move || {
                         let mut local = Vec::new();
                         analysis::scan_block(block.offset, block.data(), &mut local);
-                        let bytes = block.bytes_read as u64;
-                        let _ = tx.send((local, bytes, block.buffer));
+                        let end = block.offset + block.bytes_read as u64;
+                        let _ = tx.send((local, end, block.buffer));
                     });
 
                     in_flight += 1;
                     continue;
                 }
-                None => {
+                PollResult::Pending => {
+                    // IO thread busy (bad sectors / slow read) — loop to update progress
+                }
+                PollResult::Done => {
                     scanner_done = true;
                 }
             }
         }
 
         if in_flight > 0 {
-            match result_rx.recv() {
-                Ok((fragments, bytes_read, buffer)) => {
+            match result_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok((fragments, end_pos, buffer)) => {
                     for f in fragments {
                         map.push(f);
                     }
 
-                    blocks_processed += bytes_read;
-                    pb.set_position(blocks_processed);
-
-                    if blocks_processed.is_multiple_of(PROGRESS_UPDATE_INTERVAL) {
-                        pb.set_message(format!("Found {} fragments", map.len()));
-                    }
-
                     scanner.recycle_buffer(buffer);
                     in_flight -= 1;
+
+                    let _ = end_pos;
                 }
-                Err(_) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
+        } else if !scanner_done {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
@@ -246,6 +250,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     println!("JPEG footers: {}", counts.jpeg_footers);
     println!("PNG headers:  {}", counts.png_headers);
     println!("PNG footers:  {}", counts.png_footers);
+    println!();
 
     map.sort_by_offset();
     map.dedup();
@@ -273,55 +278,56 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         style(recovered.len()).green().bold()
     ));
 
+    let recovered_offsets: HashSet<u64> = recovered.iter().map(|r| r.header_offset()).collect();
+
     if map.len() > recovered.len() * 2 {
-        let bifrag_total = map.jpeg_headers().len() + map.png_headers().len();
-        let pb_bifrag = ProgressBar::new(bifrag_total as u64);
-        
-        pb_bifrag.set_style(
+        let reasm_total = map.jpeg_headers().len() + map.png_headers().len();
+        let pb_reasm = ProgressBar::new(reasm_total as u64);
+
+        pb_reasm.set_style(
             ProgressStyle::default_bar()
-                .template("[{bar:40.magenta/white}] {pos}/{len} Bifragment carving ({percent}%)")?
+                .template("[{bar:40.magenta/white}] {pos}/{len} Fragment reassembly ({percent}%)")?
                 .progress_chars("=>-"),
         );
 
-        let bifrag_cb = |current: usize, _total: usize| {
-            pb_bifrag.set_position(current as u64);
+        let reasm_cb = |current: usize, _total: usize| {
+            pb_reasm.set_position(current as u64);
         };
 
-        let bifrag = carving::bifragment_carve(&map, &reader, Some(&bifrag_cb));
-        pb_bifrag.finish_with_message(format!(
-            "Bifragment carving complete — {} images found",
-            style(bifrag.len()).green().bold()
+        let reassembled =
+            reassembly::reassemble(&map, &reader, &recovered_offsets, Some(&reasm_cb));
+        pb_reasm.finish_with_message(format!(
+            "Fragment reassembly complete — {} images found",
+            style(reassembled.len()).green().bold()
         ));
 
-        let existing_offsets: HashSet<u64> = recovered.iter().map(|r| r.header_offset()).collect();
-        recovered.extend(
-            bifrag
-                .into_iter()
-                .filter(|r| !existing_offsets.contains(&r.header_offset())),
-        );
+        recovered.extend(reassembled);
     }
 
     let stats = RecoveryStats::from_recovered(&recovered);
 
+    println!();
     println!(
-        "\nFound {} recoverable images:",
+        "Found {} recoverable images:",
         style(stats.total_files()).green().bold()
     );
-    println!("JPEG (linear):     {}", stats.jpeg_linear);
-    println!("JPEG (bifragment): {}", stats.jpeg_bifragment);
-    println!("PNG (linear):      {}", stats.png_linear);
-    println!("PNG (bifragment):  {}", stats.png_bifragment);
+    println!("JPEG (linear):      {}", stats.jpeg_linear);
+    println!("JPEG (reassembled): {}", stats.jpeg_reassembled);
+    println!("PNG (linear):       {}", stats.png_linear);
+    println!("PNG (reassembled):  {}", stats.png_reassembled);
 
     if recovered.is_empty() {
         println!("\n[!] No recoverable images found.");
         return Ok(());
     }
 
+    println!();
     println!(
-        "\nExtracting {} validated images to {:?}...",
+        "Extracting {} validated images to {:?}...",
         recovered.len(),
         output_path
     );
+    println!();
 
     let pb = ProgressBar::new(recovered.len() as u64);
     pb.set_style(

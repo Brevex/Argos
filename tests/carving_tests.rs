@@ -30,11 +30,11 @@ fn test_recovery_stats() {
 }
 
 #[test]
-fn test_recovery_stats_bifragment() {
+fn test_recovery_stats_reassembled() {
     let files = vec![
         RecoveredFile::new(
-            FragmentRanges::Bifragment([0..500, 1000..1500]),
-            RecoveryMethod::Bifragment,
+            FragmentRanges::Multi(vec![0..500, 1000..1500]),
+            RecoveryMethod::Reassembled { depth: 2 },
             ImageFormat::Jpeg,
             7.8,
         ),
@@ -46,7 +46,7 @@ fn test_recovery_stats_bifragment() {
         ),
     ];
     let stats = RecoveryStats::from_recovered(&files);
-    assert_eq!(stats.jpeg_bifragment, 1);
+    assert_eq!(stats.jpeg_reassembled, 1);
     assert_eq!(stats.png_linear, 1);
     assert_eq!(stats.total_files(), 2);
 }
@@ -55,4 +55,20 @@ fn test_recovery_stats_bifragment() {
 fn test_recovery_stats_empty() {
     let stats = RecoveryStats::from_recovered(&[]);
     assert_eq!(stats.total_files(), 0);
+}
+
+#[test]
+fn test_fragment_ranges_multi() {
+    let ranges = FragmentRanges::Multi(vec![0..100, 200..400, 500..600]);
+    assert_eq!(ranges.fragment_count(), 3);
+    assert_eq!(ranges.start_offset(), 0);
+    assert_eq!(ranges.as_slice().len(), 3);
+}
+
+#[test]
+fn test_fragment_ranges_linear() {
+    let ranges = FragmentRanges::Linear(0..1000);
+    assert_eq!(ranges.fragment_count(), 1);
+    assert_eq!(ranges.start_offset(), 0);
+    assert_eq!(ranges.as_slice().len(), 1);
 }

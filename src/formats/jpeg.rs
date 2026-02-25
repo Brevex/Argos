@@ -7,6 +7,10 @@ const QUANTIZATION_HIGH_THRESHOLD: u16 = 25;
 const QUANTIZATION_LOW_THRESHOLD: u16 = 80;
 const SCAN_DATA_ENTROPY_SAMPLE: usize = 2048;
 const ZERO_GAP_THRESHOLD: usize = 4096;
+const ZERO_RUN_BREAK_THRESHOLD: usize = 512;
+const BREAK_ENTROPY_SAMPLE: usize = 256;
+const BREAK_LOW_ENTROPY: f32 = 4.0;
+const CONTINUATION_MIN_ENTROPY: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct JpegInfo {
@@ -274,4 +278,145 @@ fn assess_quantization_table(table_data: &[u8]) -> QuantizationQuality {
     } else {
         QuantizationQuality::Low
     }
+}
+
+pub fn find_sos_offset(data: &[u8]) -> Option<usize> {
+    if data.len() < 4 || data[0..2] != JPEG_SOI {
+        return None;
+    }
+
+    let mut pos = 2;
+
+    while pos + 1 < data.len() {
+        if data[pos] != 0xFF {
+            break;
+        }
+
+        let marker = data[pos + 1];
+
+        if marker == 0x00 || marker == 0xFF {
+            pos += if marker == 0xFF { 1 } else { 2 };
+            continue;
+        }
+
+        if matches!(marker, 0xD0..=0xD7) {
+            pos += 2;
+            continue;
+        }
+
+        if marker == 0xDA {
+            if pos + 3 >= data.len() {
+                return None;
+            }
+            let seg_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+            if seg_len < 2 {
+                return None;
+            }
+            let scan_start = pos + 2 + seg_len;
+            return (scan_start < data.len()).then_some(scan_start);
+        }
+
+        if marker == 0xD9 {
+            return None;
+        }
+
+        if pos + 3 >= data.len() {
+            break;
+        }
+
+        let seg_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        if seg_len < 2 {
+            break;
+        }
+
+        pos = pos + 2 + seg_len;
+    }
+
+    None
+}
+
+pub fn detect_jpeg_break(data: &[u8], scan_start: usize) -> Option<usize> {
+    if scan_start >= data.len() {
+        return None;
+    }
+
+    let mut i = scan_start;
+    let mut zero_run = 0usize;
+
+    while i < data.len() {
+        if data[i] == 0x00 {
+            zero_run += 1;
+            if zero_run >= ZERO_RUN_BREAK_THRESHOLD {
+                return Some(i + 1 - zero_run);
+            }
+            i += 1;
+            continue;
+        }
+        zero_run = 0;
+
+        if data[i] == 0xFF && i + 1 < data.len() {
+            let next = data[i + 1];
+            if next == 0x00 {
+                i += 2;
+                continue;
+            }
+            if matches!(next, 0xD0..=0xD7) {
+                i += 2;
+                continue;
+            }
+            if next == 0xD9 {
+                return None;
+            }
+            return Some(i);
+        }
+
+        i += 1;
+    }
+
+    if i > scan_start + BREAK_ENTROPY_SAMPLE {
+        let tail_start = data.len().saturating_sub(BREAK_ENTROPY_SAMPLE);
+        let tail_entropy = calculate_entropy(&data[tail_start..]);
+        if tail_entropy < BREAK_LOW_ENTROPY {
+            let mut probe = tail_start;
+            while probe > scan_start + BREAK_ENTROPY_SAMPLE {
+                let sample_entropy = calculate_entropy(&data[probe - BREAK_ENTROPY_SAMPLE..probe]);
+                if sample_entropy >= CONTINUATION_MIN_ENTROPY {
+                    return Some(probe);
+                }
+                probe = probe.saturating_sub(BREAK_ENTROPY_SAMPLE);
+            }
+            return Some(tail_start);
+        }
+    }
+
+    None
+}
+
+pub fn matches_jpeg_continuation(cluster_data: &[u8]) -> bool {
+    if cluster_data.len() < 16 {
+        return false;
+    }
+
+    let entropy = calculate_entropy(cluster_data);
+    if entropy < CONTINUATION_MIN_ENTROPY {
+        return false;
+    }
+
+    let mut i = 0;
+    while i + 1 < cluster_data.len() {
+        if cluster_data[i] == 0xFF {
+            let next = cluster_data[i + 1];
+            if next == 0x00 || matches!(next, 0xD0..=0xD7) {
+                i += 2;
+                continue;
+            }
+            if next == 0xD9 {
+                return true;
+            }
+            return false;
+        }
+        i += 1;
+    }
+
+    true
 }

@@ -6,8 +6,8 @@ use crate::types::{
 };
 
 const ENTROPY_SAMPLE_SIZE: usize = 1024;
-const EOI_CONTEXT_WINDOW: usize = 256;
-const EOI_MIN_CONTEXT_ENTROPY: f32 = 6.0;
+const EOI_CONTEXT_WINDOW: usize = 512;
+const EOI_MIN_CONTEXT_ENTROPY: f32 = 7.0;
 
 pub fn scan_block(offset: Offset, data: &[u8], collector: &mut impl FragmentCollector) {
     let expected_crc = IEND_CRC.to_be_bytes();
@@ -45,15 +45,17 @@ pub fn scan_block(offset: Offset, data: &[u8], collector: &mut impl FragmentColl
                             break 'eoi;
                         }
 
-                        if pos >= EOI_CONTEXT_WINDOW {
-                            let context = &data[pos - EOI_CONTEXT_WINDOW..pos];
-                            let context_entropy = calculate_entropy(context);
-                            if context_entropy < EOI_MIN_CONTEXT_ENTROPY {
-                                break 'eoi;
-                            }
-                            if !is_valid_scan_context(context) {
-                                break 'eoi;
-                            }
+                        if pos < EOI_CONTEXT_WINDOW {
+                            break 'eoi;
+                        }
+
+                        let context = &data[pos - EOI_CONTEXT_WINDOW..pos];
+                        let context_entropy = calculate_entropy(context);
+                        if context_entropy < EOI_MIN_CONTEXT_ENTROPY {
+                            break 'eoi;
+                        }
+                        if !is_valid_scan_context(context) {
+                            break 'eoi;
                         }
 
                         collector.collect(Fragment::new(
@@ -115,7 +117,7 @@ pub fn scan_block(offset: Offset, data: &[u8], collector: &mut impl FragmentColl
 }
 
 #[inline]
-fn is_valid_scan_context(context: &[u8]) -> bool {
+pub fn is_valid_scan_context(context: &[u8]) -> bool {
     let mut i = 0;
     while i + 1 < context.len() {
         if context[i] == 0xFF {

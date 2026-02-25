@@ -19,15 +19,22 @@ pub const MIN_PHOTO_HEIGHT: u32 = 480;
 pub const MIN_PHOTO_MEGAPIXELS: f32 = 0.2;
 pub const MIN_PHOTO_BYTES: u64 = 50 * KB;
 pub const LOW_ENTROPY_THRESHOLD: f32 = 5.5;
-pub const MIN_SCAN_DATA_ENTROPY: f32 = 7.0;
+pub const MIN_SCAN_DATA_ENTROPY: f32 = 6.5;
 pub const EXTREME_ASPECT_RATIO: u32 = 5;
-pub const LOW_MARKER_COUNT_THRESHOLD: u16 = 6;
-pub const LOW_QUALITY_MAX_DIMENSION: u32 = 1280;
+pub const LOW_MARKER_COUNT_THRESHOLD: u16 = 4;
+pub const LOW_QUALITY_MAX_DIMENSION: u32 = 640;
 pub const MIN_PNG_CHUNK_VARIETY: u8 = 3;
 pub const MIN_PNG_VARIETY_DIMENSION: u32 = 512;
 pub const CORRUPT_SECTOR_RATIO: usize = 4;
 pub const VALIDATION_HEADER_SIZE: usize = 16;
 pub const SMALL_BUFFER_SIZE: usize = 64 * 1024;
+pub const MAX_CHAIN_DEPTH: u8 = 4;
+pub const BREAK_DETECTION_READ_SIZE: usize = 256 * 1024;
+pub const CONTINUATION_SCAN_CLUSTER_SIZE: u64 = 4096;
+pub const CONTINUATION_MATCH_WINDOW: usize = 64;
+pub const MIN_FRAGMENT_SIZE: u64 = 512;
+pub const MAX_CONTINUATION_CANDIDATES: usize = 8;
+pub const REASSEMBLY_MAX_GAP: u64 = 100 * MB;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DimensionVerdict {
@@ -137,21 +144,28 @@ impl Fragment {
 #[derive(Debug)]
 pub enum FragmentRanges {
     Linear(Range<Offset>),
-    Bifragment([Range<Offset>; 2]),
+    Multi(Vec<Range<Offset>>),
 }
 
 impl FragmentRanges {
     pub fn as_slice(&self) -> &[Range<Offset>] {
         match self {
             FragmentRanges::Linear(r) => std::slice::from_ref(r),
-            FragmentRanges::Bifragment(arr) => arr,
+            FragmentRanges::Multi(v) => v,
         }
     }
 
     pub fn start_offset(&self) -> Offset {
         match self {
             FragmentRanges::Linear(r) => r.start,
-            FragmentRanges::Bifragment(arr) => arr[0].start,
+            FragmentRanges::Multi(v) => v[0].start,
+        }
+    }
+
+    pub fn fragment_count(&self) -> usize {
+        match self {
+            FragmentRanges::Linear(_) => 1,
+            FragmentRanges::Multi(v) => v.len(),
         }
     }
 }
@@ -184,11 +198,29 @@ impl RecoveredFile {
     }
 }
 
-#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryMethod {
     Linear,
-    Bifragment,
+    Reassembled { depth: u8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakConfidence {
+    Definite,
+    Probable,
+}
+
+#[derive(Debug, Clone)]
+pub struct BreakPoint {
+    pub break_offset: Offset,
+    pub confidence: BreakConfidence,
+    pub signature: ContinuationSignature,
+}
+
+#[derive(Debug, Clone)]
+pub enum ContinuationSignature {
+    JpegScanData,
+    PngIdat,
 }
 
 #[repr(u8)]

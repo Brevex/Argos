@@ -2,6 +2,8 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const SECTOR_SIZE: usize = 4096;
@@ -9,10 +11,11 @@ pub const BUFFER_SIZE: usize = 4 * 1024 * 1024;
 pub const OVERLAP: usize = SECTOR_SIZE;
 pub const ALIGNMENT_MASK: u64 = !(SECTOR_SIZE as u64 - 1);
 
-const BAD_SECTOR_BACKOFF_THRESHOLD: u64 = 10;
+const BAD_SECTOR_BACKOFF_THRESHOLD: u64 = 3;
 const MAX_JUMP_SIZE: u64 = 16 * 1024 * 1024;
-const MAX_CONSECUTIVE_FAILURES: u64 = 1000;
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CONSECUTIVE_FAILURES: u64 = 100;
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 static ZERO_SECTOR: [u8; SECTOR_SIZE] = [0u8; SECTOR_SIZE];
 
@@ -293,12 +296,19 @@ impl OwnedBlock {
     }
 }
 
+pub enum PollResult {
+    Block(OwnedBlock),
+    Pending,
+    Done,
+}
+
 pub struct DiskScanner {
     receiver: Option<crossbeam_channel::Receiver<ScanMessage>>,
     recycle_tx: Option<crossbeam_channel::Sender<AlignedBuffer>>,
     io_thread: Option<std::thread::JoinHandle<IoThreadResult>>,
     current_buffer: Option<AlignedBuffer>,
     finished_result: Option<IoThreadResult>,
+    progress: Arc<AtomicU64>,
 }
 
 impl DiskScanner {
@@ -310,7 +320,10 @@ impl DiskScanner {
             let _ = recycle_tx.send(AlignedBuffer::new());
         }
 
-        let io_thread = std::thread::spawn(move || io_producer(reader, data_tx, recycle_rx));
+        let progress = Arc::new(AtomicU64::new(0));
+        let progress_clone = progress.clone();
+        let io_thread =
+            std::thread::spawn(move || io_producer(reader, data_tx, recycle_rx, progress_clone));
 
         Self {
             receiver: Some(data_rx),
@@ -318,6 +331,7 @@ impl DiskScanner {
             io_thread: Some(io_thread),
             current_buffer: None,
             finished_result: None,
+            progress,
         }
     }
 
@@ -420,12 +434,49 @@ impl DiskScanner {
             let _ = tx.send(buffer);
         }
     }
+
+    pub fn disk_position(&self) -> u64 {
+        self.progress.load(Ordering::Relaxed)
+    }
+
+    pub fn poll_block(&mut self) -> io::Result<PollResult> {
+        let receiver = match &self.receiver {
+            Some(r) => r,
+            None => return Ok(PollResult::Done),
+        };
+
+        match receiver.recv_timeout(POLL_TIMEOUT) {
+            Ok(ScanMessage::Block {
+                offset,
+                buffer,
+                bytes_read,
+            }) => Ok(PollResult::Block(OwnedBlock {
+                offset,
+                buffer,
+                bytes_read,
+            })),
+            Ok(ScanMessage::FatalError(e)) => {
+                self.finish();
+                Err(e)
+            }
+            Ok(ScanMessage::Done) => {
+                self.finish();
+                Ok(PollResult::Done)
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(PollResult::Pending),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                self.finish();
+                Ok(PollResult::Done)
+            }
+        }
+    }
 }
 
 fn io_producer(
     reader: DiskReader,
     data_tx: crossbeam_channel::Sender<ScanMessage>,
     recycle_rx: crossbeam_channel::Receiver<AlignedBuffer>,
+    progress: Arc<AtomicU64>,
 ) -> IoThreadResult {
     let mut current_offset: u64 = 0;
     let mut bad_sectors = Vec::new();
@@ -489,6 +540,7 @@ fn io_producer(
                     jump_size = BUFFER_SIZE as u64;
                 }
                 current_offset = read_offset + n as u64;
+                progress.store(current_offset, Ordering::Relaxed);
                 if data_tx
                     .send(ScanMessage::Block {
                         offset: read_offset,
@@ -519,6 +571,7 @@ fn io_producer(
                 bad_sectors.push(current_offset);
                 consecutive_failures += 1;
                 current_offset += jump_size;
+                progress.store(current_offset, Ordering::Relaxed);
 
                 if consecutive_failures > BAD_SECTOR_BACKOFF_THRESHOLD {
                     jump_size = (jump_size * 2).min(MAX_JUMP_SIZE);
@@ -553,6 +606,7 @@ fn io_producer(
                 bad_sectors.push(current_offset);
                 consecutive_failures += 1;
                 current_offset += jump_size;
+                progress.store(current_offset, Ordering::Relaxed);
 
                 if consecutive_failures > BAD_SECTOR_BACKOFF_THRESHOLD {
                     jump_size = (jump_size * 2).min(MAX_JUMP_SIZE);

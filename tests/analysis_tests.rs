@@ -21,9 +21,9 @@ fn test_scan_block_finds_jpeg_header() {
 
 #[test]
 fn test_scan_block_finds_jpeg_footer() {
-    let mut data = high_entropy_data(1000);
-    data[500] = 0xFF;
-    data[501] = 0xD9;
+    let mut data = high_entropy_data(1500);
+    data[700] = 0xFF;
+    data[701] = 0xD9;
     let mut map = FragmentMap::new();
     scan_block(0, &data, &mut map);
     assert!(map.jpeg_footers().len() >= 1);

@@ -4,10 +4,12 @@ pub mod devices;
 pub mod extraction;
 pub mod formats;
 pub mod io;
+pub mod reassembly;
 pub mod types;
 
 pub use types::{
-    BlockDevice, DeviceType, DimensionVerdict, ExtractionReport, ExtractionResult, Fragment,
-    FragmentCounts, FragmentKind, FragmentMap, FragmentRanges, ImageFormat, JpegMetadata, Offset,
-    PngMetadata, QuantizationQuality, RecoveredFile, RecoveryMethod,
+    BlockDevice, BreakConfidence, BreakPoint, ContinuationSignature, DeviceType, DimensionVerdict,
+    ExtractionReport, ExtractionResult, Fragment, FragmentCounts, FragmentKind, FragmentMap,
+    FragmentRanges, ImageFormat, JpegMetadata, Offset, PngMetadata, QuantizationQuality,
+    RecoveredFile, RecoveryMethod,
 };
