@@ -1,4 +1,4 @@
-use crate::types::{BlockDevice, DeviceType};
+use crate::core::{BlockDevice, DeviceType};
 use std::fs;
 use std::path::Path;
 

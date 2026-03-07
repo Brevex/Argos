@@ -9,9 +9,7 @@ use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 #[derive(Debug, Clone)]
 pub struct FsHint {
     pub data_start: u64,
-
     pub data_size: u64,
-
     pub extents: Vec<(u64, u64)>,
 }
 

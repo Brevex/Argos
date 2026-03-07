@@ -6,11 +6,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use argos::carving::RecoveryStats;
-use argos::devices::{device_selection_options, discover_block_devices};
+use argos::recovery::carving::RecoveryStats;
+use argos::device::{device_selection_options, discover_block_devices};
 use argos::io::{DiskScanner, PollResult};
-use argos::types::FragmentMap;
-use argos::{analysis, carving, extraction, fs, io, reassembly};
+use argos::core::FragmentMap;
+use argos::{extraction, fs, io, recovery, scan};
 
 const PROGRESS_MSG_INTERVAL: u64 = 50 * 1024 * 1024;
 
@@ -185,7 +185,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
 
                     rayon::spawn(move || {
                         let mut local = Vec::new();
-                        analysis::scan_block(block.offset, block.data(), &mut local);
+                        scan::scan_block(block.offset, block.data(), &mut local);
                         let _ = tx.send((local, block.buffer));
                     });
 
@@ -262,7 +262,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         pb_linear.set_position(current as u64);
     };
 
-    let mut recovered = carving::linear_carve(&map, &reader, Some(&linear_cb));
+    let mut recovered = recovery::linear_carve(&map, &reader, Some(&linear_cb));
     pb_linear.finish_with_message(format!(
         "Linear carving complete — {} images found",
         style(recovered.len()).green().bold()
@@ -299,7 +299,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
             Some(&fs_hints)
         };
 
-        let reassembled = reassembly::reassemble(
+        let reassembled = recovery::reassemble(
             &map,
             &reader,
             &recovered_offsets,

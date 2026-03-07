@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
-use crate::analysis::is_valid_scan_context;
-use crate::formats::jpeg::candidate_score as jpeg_candidate_score;
-use crate::formats::png::candidate_score as png_candidate_score;
+use crate::scan::is_valid_scan_context;
+use crate::format::jpeg::candidate_score as jpeg_candidate_score;
+use crate::format::png::candidate_score as png_candidate_score;
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
-use crate::types::{
+use crate::core::{
     Fragment, FragmentMap, FragmentRanges, ImageFormat, RecoveredFile, RecoveryMethod,
     MIN_PHOTO_BYTES, SMALL_BUFFER_SIZE,
 };

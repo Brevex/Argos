@@ -1,6 +1,6 @@
-use crate::formats::jpeg::quick_jpeg_dimensions;
-use crate::formats::png::{validate_png_header, IEND_CRC, PNG_SIGNATURE};
-use crate::types::{
+use crate::format::jpeg::quick_jpeg_dimensions;
+use crate::format::png::{validate_png_header, IEND_CRC, PNG_SIGNATURE};
+use crate::core::{
     calculate_entropy, categorize_dimensions, DimensionVerdict, Fragment, FragmentCollector,
     FragmentKind, Offset, LOW_ENTROPY_THRESHOLD,
 };

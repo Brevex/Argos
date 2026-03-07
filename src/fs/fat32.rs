@@ -2,33 +2,21 @@ use super::FsHintMap;
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 
 const DELETED_MARKER: u8 = 0xE5;
-
 const MAX_DIR_ENTRIES: usize = 100_000;
-
 const MAX_CHAIN_LENGTH: usize = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct Fat32Info {
     pub partition_offset: u64,
-
     pub bytes_per_sector: u16,
-
     pub sectors_per_cluster: u8,
-
     pub reserved_sectors: u16,
-
     pub num_fats: u8,
-
     pub fat_size_sectors: u32,
-
     pub root_cluster: u32,
-
     pub cluster_size: u32,
-
     pub data_start: u64,
-
     pub fat_start: u64,
-
     pub total_data_clusters: u32,
 }
 

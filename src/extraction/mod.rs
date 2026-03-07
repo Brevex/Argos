@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::formats::jpeg::{JPEG_EOI, JPEG_SOI};
-use crate::formats::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
+use crate::format::jpeg::{JPEG_EOI, JPEG_SOI};
+use crate::format::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
 use crate::io::{is_recoverable_io_error, zero_sector, AlignedBuffer, DiskReader, ALIGNMENT_MASK};
-use crate::types::{
+use crate::core::{
     ConfidenceTier, ExtractionReport, ExtractionResult, ImageFormat, RecoveredFile,
     CORRUPT_SECTOR_RATIO, FINGERPRINT_SIZE, SMALL_BUFFER_SIZE, VALIDATION_HEADER_SIZE,
 };
@@ -98,8 +98,6 @@ pub fn extract_all(
             .then_with(|| files[a].header_offset().cmp(&files[b].header_offset()))
     });
 
-    // Compute fingerprints in parallel, then deduplicate sequentially
-    // to guarantee that higher-confidence files always survive.
     let fingerprints: Vec<Option<[u8; 32]>> = indices
         .par_iter()
         .map(|&i| {
@@ -278,8 +276,6 @@ fn extract_single(
         });
     }
 
-    // Early tail check: avoids writing a file only to discard it when the
-    // footer (JPEG EOI / PNG IEND) is already known to be missing on disk.
     let last_range = &ranges[ranges.len() - 1];
     if last_range.end >= VALIDATION_HEADER_SIZE as u64 {
         let tail_start = last_range.end - VALIDATION_HEADER_SIZE as u64;

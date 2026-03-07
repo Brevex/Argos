@@ -1,4 +1,4 @@
-use argos::formats::jpeg::{
+use argos::format::jpeg::{
     detect_jpeg_break, find_sos_offset, is_valid_marker, matches_jpeg_continuation, validate_jpeg,
 };
 

@@ -2,26 +2,18 @@ use super::{read_exact, FsHintMap};
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 
 const NTFS_OEM_ID: &[u8; 8] = b"NTFS    ";
-
 const FILE_SIGNATURE: &[u8; 4] = b"FILE";
-
 const ATTR_TYPE_DATA: u32 = 0x80;
 const ATTR_TYPE_END: u32 = 0xFFFF_FFFF;
-
 const MAX_MFT_ENTRIES: usize = 500_000;
 
 #[derive(Debug, Clone)]
 pub struct NtfsInfo {
     pub partition_offset: u64,
-
     pub bytes_per_sector: u16,
-
     pub sectors_per_cluster: u8,
-
     pub cluster_size: u32,
-
     pub mft_cluster: u64,
-
     pub mft_record_size: u32,
 }
 

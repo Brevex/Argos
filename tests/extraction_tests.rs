@@ -1,5 +1,5 @@
 use argos::extraction::generate_filename;
-use argos::types::ImageFormat;
+use argos::core::ImageFormat;
 #[test]
 fn test_generate_filename() {
     assert_eq!(

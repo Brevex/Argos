@@ -2,45 +2,27 @@ use super::{read_exact, FsHintMap};
 use crate::io::{AlignedBuffer, DiskReader};
 
 const EXT4_MAGIC: u16 = 0xEF53;
-
 const SUPERBLOCK_OFFSET: u64 = 1024;
-
 const SUPERBLOCK_SIZE: usize = 1024;
-
 const INCOMPAT_EXTENTS: u32 = 0x0040;
-
 const INCOMPAT_64BIT: u32 = 0x0080;
-
 const EXTENT_MAGIC: u16 = 0xF30A;
-
 const MAX_INODES_SCANNED: usize = 1_000_000;
-
 const MAX_EXTENT_DEPTH: u16 = 5;
-
 const MIN_USEFUL_SIZE: u64 = 50 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Ext4Info {
     pub partition_offset: u64,
-
     pub block_size: u32,
-
     pub blocks_per_group: u32,
-
     pub inodes_per_group: u32,
-
     pub inode_size: u16,
-
     pub inodes_count: u32,
-
     pub group_count: u32,
-
     pub has_extents: bool,
-
     pub is_64bit: bool,
-
     pub desc_size: u16,
-
     pub gdt_offset: u64,
 }
 

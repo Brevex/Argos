@@ -5,17 +5,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
-use crate::carving::read_at_offset;
-use crate::formats::jpeg::{
+use crate::recovery::carving::read_at_offset;
+use crate::format::jpeg::{
     candidate_score as jpeg_candidate_score, detect_jpeg_break, find_sos_offset,
     matches_jpeg_continuation,
 };
-use crate::formats::png::{
+use crate::format::png::{
     candidate_score as png_candidate_score, detect_png_break, matches_png_continuation, IEND_CRC,
 };
 use crate::fs::FsHintMap;
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
-use crate::types::{
+use crate::core::{
     BreakConfidence, BreakPoint, ContinuationSignature, Fragment, FragmentMap, FragmentRanges,
     ImageFormat, Offset, RecoveredFile, RecoveryMethod, BREAK_DETECTION_READ_SIZE,
     CONTINUATION_MATCH_WINDOW, CONTINUATION_SCAN_CLUSTER_SIZE, MAX_CHAIN_DEPTH,

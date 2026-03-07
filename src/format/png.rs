@@ -1,13 +1,11 @@
-use crate::types::{calculate_entropy, score_png, PngMetadata};
+use crate::core::{calculate_entropy, score_png, PngMetadata};
 
 pub const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 const SCREEN_PPM_LOWER: u32 = 2500;
-
 const SCREEN_PPM_UPPER: u32 = 3200;
 
 pub const IEND_CHUNK_TYPE: &[u8; 4] = b"IEND";
-
 pub const IEND_CRC: u32 = 0xAE426082;
 
 #[derive(Debug, Clone, Copy)]

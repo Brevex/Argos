@@ -1,5 +1,5 @@
-use argos::devices::{device_selection_options, format_device_table};
-use argos::types::{BlockDevice, DeviceType};
+use argos::device::{device_selection_options, format_device_table};
+use argos::core::{BlockDevice, DeviceType};
 
 #[test]
 fn test_format_device_table() {

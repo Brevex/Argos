@@ -1,4 +1,4 @@
-use argos::formats::png::{detect_png_break, matches_png_continuation, validate_png_header};
+use argos::format::png::{detect_png_break, matches_png_continuation, validate_png_header};
 
 #[test]
 fn test_validate_png_header_valid() {

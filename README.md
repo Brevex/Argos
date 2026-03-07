@@ -38,12 +38,13 @@ cargo build --release
 The binary will be at `target/release/argos`
 
 ## Tests
+Run all tests
 ```bash
-# Run all tests
 cargo test
 ```
+
+Run tests with verbose output
 ```bash
-# Run tests with verbose output
 cargo test -- --nocapture
 ```
 

@@ -1,5 +1,5 @@
-use argos::analysis::scan_block;
-use argos::types::FragmentMap;
+use argos::scan::scan_block;
+use argos::core::FragmentMap;
 
 fn high_entropy_data(size: usize) -> Vec<u8> {
     (0..size)

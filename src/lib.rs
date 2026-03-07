@@ -1,14 +1,13 @@
-pub mod analysis;
-pub mod carving;
-pub mod devices;
+pub mod core;
+pub mod device;
 pub mod extraction;
-pub mod formats;
+pub mod format;
 pub mod fs;
 pub mod io;
-pub mod reassembly;
-pub mod types;
+pub mod recovery;
+pub mod scan;
 
-pub use types::{
+pub use core::{
     BlockDevice, BreakConfidence, BreakPoint, ConfidenceTier, ContinuationSignature, DeviceType,
     DimensionVerdict, ExtractionReport, ExtractionResult, Fragment, FragmentCounts, FragmentKind,
     FragmentMap, FragmentRanges, ImageFormat, JpegMetadata, Offset, PngMetadata,

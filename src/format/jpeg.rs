@@ -1,4 +1,4 @@
-use crate::types::{calculate_entropy, score_jpeg, JpegMetadata, QuantizationQuality};
+use crate::core::{calculate_entropy, score_jpeg, JpegMetadata, QuantizationQuality};
 
 pub const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
 pub const JPEG_EOI: [u8; 2] = [0xFF, 0xD9];

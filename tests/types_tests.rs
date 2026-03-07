@@ -1,4 +1,4 @@
-use argos::types::{
+use argos::core::{
     BlockDevice, ConfidenceTier, DeviceType, Fragment, FragmentKind, FragmentMap, JpegMetadata,
     PngMetadata, QuantizationQuality,
 };
@@ -83,7 +83,7 @@ fn test_score_jpeg_high_confidence_photo() {
         has_sos: true,
         scan_data_entropy: 7.5,
     };
-    let score = argos::types::score_jpeg(2048, 1536, &metadata);
+    let score = argos::core::score_jpeg(2048, 1536, &metadata);
     assert!(
         score >= 60,
         "Camera photo should be high confidence, got {}",
@@ -102,7 +102,7 @@ fn test_score_jpeg_camera_phone_with_exif() {
         has_sos: true,
         scan_data_entropy: 7.0,
     };
-    let score = argos::types::score_jpeg(640, 480, &metadata);
+    let score = argos::core::score_jpeg(640, 480, &metadata);
     assert!(
         score >= 60,
         "Camera phone with EXIF should be high confidence, got {}",
@@ -113,7 +113,7 @@ fn test_score_jpeg_camera_phone_with_exif() {
 #[test]
 fn test_score_jpeg_favicon_vetoed() {
     let metadata = JpegMetadata::default();
-    let score = argos::types::score_jpeg(32, 32, &metadata);
+    let score = argos::core::score_jpeg(32, 32, &metadata);
     assert_eq!(score, 0, "Favicon should be hard-vetoed");
 }
 
@@ -128,7 +128,7 @@ fn test_score_jpeg_low_quality_thumbnail() {
         has_sos: true,
         scan_data_entropy: 7.0,
     };
-    let score = argos::types::score_jpeg(128, 128, &metadata);
+    let score = argos::core::score_jpeg(128, 128, &metadata);
     assert!(
         score <= 15,
         "System thumbnail should be capped low, got {}",
@@ -145,7 +145,7 @@ fn test_score_png_with_metadata() {
         is_screen_resolution: false,
         chunk_variety: 6,
     };
-    let score = argos::types::score_png(1920, 1080, &metadata, 10);
+    let score = argos::core::score_png(1920, 1080, &metadata, 10);
     assert!(
         score >= 60,
         "Rich PNG should be high confidence, got {}",
@@ -156,7 +156,7 @@ fn test_score_png_with_metadata() {
 #[test]
 fn test_score_png_no_idat_vetoed() {
     let metadata = PngMetadata::default();
-    let score = argos::types::score_png(800, 600, &metadata, 0);
+    let score = argos::core::score_png(800, 600, &metadata, 0);
     assert_eq!(score, 0, "PNG with no IDAT should be vetoed");
 }
 
@@ -169,7 +169,7 @@ fn test_score_png_screen_icon() {
         is_screen_resolution: true,
         chunk_variety: 2,
     };
-    let score = argos::types::score_png(128, 128, &metadata, 1);
+    let score = argos::core::score_png(128, 128, &metadata, 1);
     assert!(
         score < 30,
         "Screen icon should be low confidence, got {}",

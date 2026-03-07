@@ -1,11 +1,11 @@
 use std::fs;
 use tempfile::tempdir;
 
-use argos::analysis::scan_block;
-use argos::carving::{linear_carve, RecoveryStats};
+use argos::scan::scan_block;
+use argos::recovery::{linear_carve, RecoveryStats};
 use argos::extraction::extract_all;
 use argos::io::{DiskReader, DiskScanner};
-use argos::types::FragmentMap;
+use argos::core::FragmentMap;
 
 fn create_test_jpeg() -> Vec<u8> {
     let mut jpeg = Vec::new();
@@ -208,19 +208,19 @@ fn test_scanner_handles_partial_blocks() {
 fn test_fragment_map_sorting() {
     let mut map = FragmentMap::new();
 
-    map.push(argos::types::Fragment::new(
+    map.push(argos::core::Fragment::new(
         1000,
-        argos::types::FragmentKind::JpegHeader,
+        argos::core::FragmentKind::JpegHeader,
         7.5,
     ));
-    map.push(argos::types::Fragment::new(
+    map.push(argos::core::Fragment::new(
         500,
-        argos::types::FragmentKind::JpegHeader,
+        argos::core::FragmentKind::JpegHeader,
         7.6,
     ));
-    map.push(argos::types::Fragment::new(
+    map.push(argos::core::Fragment::new(
         2000,
-        argos::types::FragmentKind::JpegFooter,
+        argos::core::FragmentKind::JpegFooter,
         0.0,
     ));
 
