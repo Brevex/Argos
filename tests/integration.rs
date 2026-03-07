@@ -101,7 +101,9 @@ fn test_full_recovery_pipeline() {
     assert_eq!(stats.jpeg_linear, 3, "Should recover 3 JPEGs");
 
     let report = extract_all(&recovered, &reader, &output_dir, None).unwrap();
-    assert_eq!(report.extracted.len(), 3, "Should extract 3 files");
+
+    assert_eq!(report.extracted.len(), 1, "Dedup should keep 1 unique file");
+    assert_eq!(report.dedup_skipped, 2, "Should skip 2 duplicates");
 
     for path in &report.extracted {
         assert!(path.exists(), "File should exist: {:?}", path);
@@ -270,4 +272,85 @@ fn test_small_images_filtered_out() {
     let recovered = linear_carve(&map, &reader, None);
 
     assert_eq!(recovered.len(), 0, "32x32 icon should be filtered out");
+}
+
+#[test]
+fn test_dedup_distinct_images_kept() {
+    let dir = tempdir().unwrap();
+    let disk_path = dir.path().join("dedup_disk.img");
+    let output_dir = dir.path().join("recovered");
+
+    fn make_jpeg(seed: u8) -> Vec<u8> {
+        let mut jpeg = Vec::new();
+
+        jpeg.extend_from_slice(&[0xFF, 0xD8]);
+
+        jpeg.extend_from_slice(&[0xFF, 0xE1, 0x00, 0x10]);
+        jpeg.extend_from_slice(b"Exif\x00\x00");
+        jpeg.extend_from_slice(&[0x00; 8]);
+
+        jpeg.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+        for _ in 0..64 {
+            jpeg.push(10);
+        }
+
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08]);
+        jpeg.extend_from_slice(&[0x02, 0x00]);
+        jpeg.extend_from_slice(&[0x02, 0x80]);
+        jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+
+        jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x1F, 0x00]);
+        for i in 0u8..28 {
+            jpeg.push(i.wrapping_mul(37));
+        }
+
+        jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+
+        while jpeg.len() < 55_000 {
+            let idx = jpeg.len();
+            jpeg.push(((idx.wrapping_mul(131).wrapping_add(seed as usize * 7 + 17)) % 251) as u8);
+        }
+
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+        jpeg
+    }
+
+    let jpeg_a = make_jpeg(0);
+    let jpeg_b = make_jpeg(42);
+
+    let mut disk_data = vec![0u8; 4 * 1024 * 1024];
+
+    for i in 0..disk_data.len() {
+        disk_data[i] = ((i.wrapping_mul(97).wrapping_add(13)) % 256) as u8;
+    }
+
+    let offset_a = 512 * 1024;
+    let offset_b = 2 * 1024 * 1024;
+    disk_data[offset_a..offset_a + jpeg_a.len()].copy_from_slice(&jpeg_a);
+    disk_data[offset_b..offset_b + jpeg_b.len()].copy_from_slice(&jpeg_b);
+
+    fs::write(&disk_path, &disk_data).unwrap();
+
+    let reader = DiskReader::open(&disk_path).unwrap();
+    let mut scanner = DiskScanner::new(reader);
+    let mut map = FragmentMap::new();
+
+    while let Some((off, data)) = scanner.next_block().unwrap() {
+        scan_block(off, data, &mut map);
+    }
+
+    map.sort_by_offset();
+    map.dedup();
+    let reader = scanner.into_reader();
+    let recovered = linear_carve(&map, &reader, None);
+
+    assert_eq!(recovered.len(), 2, "Should find 2 distinct JPEGs");
+
+    let report = extract_all(&recovered, &reader, &output_dir, None).unwrap();
+    assert_eq!(
+        report.extracted.len(),
+        2,
+        "Both distinct JPEGs should survive dedup"
+    );
+    assert_eq!(report.dedup_skipped, 0, "No duplicates to skip");
 }

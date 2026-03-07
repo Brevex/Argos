@@ -7,20 +7,20 @@ use rayon::prelude::*;
 
 use crate::carving::read_at_offset;
 use crate::formats::jpeg::{
-    detect_jpeg_break, find_sos_offset, matches_jpeg_continuation, validate_jpeg, JpegInfo,
+    candidate_score as jpeg_candidate_score, detect_jpeg_break, find_sos_offset,
+    matches_jpeg_continuation,
 };
 use crate::formats::png::{
-    detect_png_break, matches_png_continuation, validate_png_header, PngInfo, IEND_CRC,
+    candidate_score as png_candidate_score, detect_png_break, matches_png_continuation, IEND_CRC,
 };
+use crate::fs::FsHintMap;
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 use crate::types::{
-    categorize_dimensions, is_metadata_asset_jpeg, is_metadata_asset_png, BreakConfidence,
-    BreakPoint, ContinuationSignature, DimensionVerdict, Fragment, FragmentMap, FragmentRanges,
-    ImageFormat, Offset, QuantizationQuality, RecoveredFile, RecoveryMethod,
-    BREAK_DETECTION_READ_SIZE, CONTINUATION_MATCH_WINDOW, CONTINUATION_SCAN_CLUSTER_SIZE,
-    LOW_MARKER_COUNT_THRESHOLD, LOW_QUALITY_MAX_DIMENSION, MAX_CONTINUATION_CANDIDATES,
-    MIN_FRAGMENT_SIZE, MIN_PHOTO_BYTES, MIN_PNG_CHUNK_VARIETY, MIN_PNG_VARIETY_DIMENSION,
-    MIN_SCAN_DATA_ENTROPY, REASSEMBLY_MAX_GAP, SMALL_BUFFER_SIZE,
+    BreakConfidence, BreakPoint, ContinuationSignature, Fragment, FragmentMap, FragmentRanges,
+    ImageFormat, Offset, RecoveredFile, RecoveryMethod, BREAK_DETECTION_READ_SIZE,
+    CONTINUATION_MATCH_WINDOW, CONTINUATION_SCAN_CLUSTER_SIZE, MAX_CHAIN_DEPTH,
+    MAX_CONTINUATION_CANDIDATES, MIN_FRAGMENT_SIZE, MIN_PHOTO_BYTES, REASSEMBLY_MAX_GAP,
+    SMALL_BUFFER_SIZE,
 };
 
 thread_local! {
@@ -50,6 +50,7 @@ pub fn reassemble(
     map: &FragmentMap,
     reader: &DiskReader,
     recovered_offsets: &HashSet<u64>,
+    hints: Option<&FsHintMap>,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Vec<RecoveredFile> {
     let total = map.jpeg_headers().len() + map.png_headers().len();
@@ -63,7 +64,8 @@ pub fn reassemble(
         recovered_offsets,
         detect_jpeg_break_at,
         matches_jpeg_continuation,
-        jpeg_header_passes,
+        jpeg_candidate_score,
+        hints,
         progress,
         &counter,
         total,
@@ -77,7 +79,8 @@ pub fn reassemble(
         recovered_offsets,
         detect_png_break_at,
         matches_png_continuation,
-        png_header_passes,
+        png_candidate_score,
+        hints,
         progress,
         &counter,
         total,
@@ -88,11 +91,11 @@ pub fn reassemble(
 
 fn detect_jpeg_break_at(data: &[u8]) -> Option<BreakPoint> {
     let sos_offset = find_sos_offset(data)?;
-    let relative = detect_jpeg_break(data, sos_offset)?;
+    let result = detect_jpeg_break(data, sos_offset)?;
     Some(BreakPoint {
-        break_offset: relative as Offset,
+        break_offset: result.offset as Offset,
         confidence: if data
-            .get(relative..relative + 512)
+            .get(result.offset..result.offset + 512)
             .is_some_and(|s| s.iter().all(|&b| b == 0))
         {
             BreakConfidence::Definite
@@ -100,6 +103,7 @@ fn detect_jpeg_break_at(data: &[u8]) -> Option<BreakPoint> {
             BreakConfidence::Probable
         },
         signature: ContinuationSignature::JpegScanData,
+        last_rst_index: result.last_rst_index,
     })
 }
 
@@ -116,65 +120,8 @@ fn detect_png_break_at(data: &[u8]) -> Option<BreakPoint> {
             BreakConfidence::Probable
         },
         signature: ContinuationSignature::PngIdat,
+        last_rst_index: None,
     })
-}
-
-fn jpeg_veto(info: &JpegInfo) -> bool {
-    match categorize_dimensions(info.width as u32, info.height as u32) {
-        DimensionVerdict::TooSmall | DimensionVerdict::Asset => return true,
-        DimensionVerdict::Photo => {}
-    }
-    if is_metadata_asset_jpeg(info.width as u32, info.height as u32, &info.metadata) {
-        return true;
-    }
-    if info.metadata.quantization_quality == QuantizationQuality::Low
-        && !info.metadata.has_exif
-        && !info.metadata.has_icc_profile
-        && info.width as u32 <= LOW_QUALITY_MAX_DIMENSION
-        && info.height as u32 <= LOW_QUALITY_MAX_DIMENSION
-    {
-        return true;
-    }
-    if info.metadata.marker_count < LOW_MARKER_COUNT_THRESHOLD && !info.metadata.has_exif {
-        return true;
-    }
-    info.metadata.has_sos
-        && info.metadata.scan_data_entropy > 0.0
-        && info.metadata.scan_data_entropy < MIN_SCAN_DATA_ENTROPY
-}
-
-fn png_veto(info: &PngInfo) -> bool {
-    if info.idat_count == 0 {
-        return true;
-    }
-    match categorize_dimensions(info.width, info.height) {
-        DimensionVerdict::TooSmall | DimensionVerdict::Asset => return true,
-        DimensionVerdict::Photo => {}
-    }
-    if is_metadata_asset_png(info.width, info.height, &info.metadata) {
-        return true;
-    }
-    if info.metadata.chunk_variety < MIN_PNG_CHUNK_VARIETY
-        && info.width <= MIN_PNG_VARIETY_DIMENSION
-        && info.height <= MIN_PNG_VARIETY_DIMENSION
-    {
-        return true;
-    }
-    false
-}
-
-fn jpeg_header_passes(data: &[u8]) -> bool {
-    match validate_jpeg(data) {
-        Some(info) => !jpeg_veto(&info),
-        None => false,
-    }
-}
-
-fn png_header_passes(data: &[u8]) -> bool {
-    match validate_png_header(data) {
-        Some(info) => !png_veto(&info),
-        None => false,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -186,7 +133,8 @@ fn reassemble_format(
     recovered_offsets: &HashSet<u64>,
     detect_break: fn(&[u8]) -> Option<BreakPoint>,
     matches_continuation: fn(&[u8]) -> bool,
-    header_passes: fn(&[u8]) -> bool,
+    header_score: fn(&[u8]) -> Option<u8>,
+    hints: Option<&FsHintMap>,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
     counter: &AtomicUsize,
     total: usize,
@@ -210,7 +158,8 @@ fn reassemble_format(
                             &mut detect_buf,
                             detect_break,
                             matches_continuation,
-                            header_passes,
+                            header_score,
+                            hints,
                         )
                     })
                 })
@@ -233,7 +182,8 @@ fn try_reassemble(
     detect_buf: &mut Vec<u8>,
     detect_break: fn(&[u8]) -> Option<BreakPoint>,
     matches_continuation: fn(&[u8]) -> bool,
-    header_passes: fn(&[u8]) -> bool,
+    header_score: fn(&[u8]) -> Option<u8>,
+    hints: Option<&FsHintMap>,
 ) -> Option<RecoveredFile> {
     detect_buf.clear();
 
@@ -245,9 +195,7 @@ fn try_reassemble(
         buffer,
     )?;
 
-    if !header_passes(detect_buf) {
-        return None;
-    }
+    let confidence = header_score(detect_buf)?;
 
     let bp = detect_break(detect_buf)?;
 
@@ -257,12 +205,60 @@ fn try_reassemble(
 
     let absolute_break = header.offset + bp.break_offset;
     let first_fragment = header.offset..absolute_break;
+    let first_size = bp.break_offset;
 
-    let search_end = (absolute_break + REASSEMBLY_MAX_GAP).min(reader.size());
+    build_chain(
+        header,
+        vec![first_fragment],
+        absolute_break,
+        first_size,
+        footers,
+        spec,
+        reader,
+        buffer,
+        detect_buf,
+        detect_break,
+        matches_continuation,
+        confidence,
+        hints,
+        1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_chain(
+    header: &Fragment,
+    fragments: Vec<Range<u64>>,
+    break_offset: u64,
+    total_size: u64,
+    footers: &[Fragment],
+    spec: &ReassemblySpec,
+    reader: &DiskReader,
+    buffer: &mut AlignedBuffer,
+    detect_buf: &mut Vec<u8>,
+    detect_break: fn(&[u8]) -> Option<BreakPoint>,
+    matches_continuation: fn(&[u8]) -> bool,
+    confidence: u8,
+    hints: Option<&FsHintMap>,
+    depth: u8,
+) -> Option<RecoveredFile> {
+    if depth == 1 {
+        if let Some(hint_map) = hints {
+            if let Some(hint) = hint_map.get(&header.offset) {
+                if let Some(result) = try_hint_guided(
+                    header, &fragments, total_size, hint, footers, spec, reader, buffer, confidence,
+                ) {
+                    return Some(result);
+                }
+            }
+        }
+    }
+
+    let search_end = (break_offset + REASSEMBLY_MAX_GAP).min(reader.size());
 
     let candidates = scan_for_continuations(
         reader,
-        absolute_break,
+        break_offset,
         search_end,
         buffer,
         matches_continuation,
@@ -272,19 +268,174 @@ fn try_reassemble(
         return None;
     }
 
-    for candidate_offset in &candidates {
-        let result = try_chain_with_footer(
+    for &candidate_offset in &candidates {
+        let result = try_complete_with_footer(
             header,
-            &first_fragment,
-            *candidate_offset,
+            &fragments,
+            candidate_offset,
+            total_size,
             footers,
             spec,
             reader,
             buffer,
+            confidence,
         );
         if result.is_some() {
             return result;
         }
+    }
+
+    if depth < MAX_CHAIN_DEPTH {
+        for &candidate_offset in &candidates {
+            let remaining_budget = spec.max_file_bytes.saturating_sub(total_size);
+            let read_size = (BREAK_DETECTION_READ_SIZE as u64).min(remaining_budget);
+            if read_size < MIN_FRAGMENT_SIZE {
+                continue;
+            }
+
+            detect_buf.clear();
+            if read_range(reader, candidate_offset, read_size, detect_buf, buffer).is_none() {
+                continue;
+            }
+
+            if let Some(bp) = detect_break(detect_buf) {
+                if bp.break_offset < MIN_FRAGMENT_SIZE {
+                    continue;
+                }
+
+                let new_break = candidate_offset + bp.break_offset;
+                let frag_size = bp.break_offset;
+                let new_total = total_size + frag_size;
+
+                if new_total > spec.max_file_bytes {
+                    continue;
+                }
+
+                let mut new_fragments = fragments.clone();
+                new_fragments.push(candidate_offset..new_break);
+
+                let result = build_chain(
+                    header,
+                    new_fragments,
+                    new_break,
+                    new_total,
+                    footers,
+                    spec,
+                    reader,
+                    buffer,
+                    detect_buf,
+                    detect_break,
+                    matches_continuation,
+                    confidence,
+                    hints,
+                    depth + 1,
+                );
+
+                if result.is_some() {
+                    return result;
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn try_hint_guided(
+    header: &Fragment,
+    first_fragments: &[Range<u64>],
+    prior_size: u64,
+    hint: &crate::fs::FsHint,
+    _footers: &[Fragment],
+    spec: &ReassemblySpec,
+    reader: &DiskReader,
+    buffer: &mut AlignedBuffer,
+    confidence: u8,
+) -> Option<RecoveredFile> {
+    if hint.extents.len() < 2 {
+        return None;
+    }
+
+    let mut all_fragments = first_fragments.to_vec();
+    let mut accumulated_size = prior_size;
+
+    for &(extent_offset, extent_len) in &hint.extents[1..] {
+        if accumulated_size >= hint.data_size {
+            break;
+        }
+        let len = extent_len.min(hint.data_size - accumulated_size);
+        all_fragments.push(extent_offset..extent_offset + len);
+        accumulated_size += len;
+    }
+
+    if all_fragments.len() < 2 {
+        return None;
+    }
+
+    let last_frag = all_fragments.last()?;
+    if !verify_tail(reader, last_frag.end, spec, buffer) {
+        return None;
+    }
+
+    if accumulated_size < MIN_PHOTO_BYTES || accumulated_size > spec.max_file_bytes {
+        return None;
+    }
+
+    let depth = all_fragments.len() as u8;
+    Some(RecoveredFile::new(
+        FragmentRanges::Multi(all_fragments),
+        RecoveryMethod::Reassembled { depth },
+        spec.format,
+        header.entropy,
+        confidence,
+    ))
+}
+
+fn try_complete_with_footer(
+    header: &Fragment,
+    fragments: &[Range<u64>],
+    continuation_offset: u64,
+    prior_size: u64,
+    footers: &[Fragment],
+    spec: &ReassemblySpec,
+    reader: &DiskReader,
+    buffer: &mut AlignedBuffer,
+    confidence: u8,
+) -> Option<RecoveredFile> {
+    let remaining_budget = spec.max_file_bytes.saturating_sub(prior_size);
+
+    let min_footer_offset = continuation_offset + MIN_FRAGMENT_SIZE;
+    let max_footer_offset = continuation_offset + remaining_budget;
+
+    let start_idx = footers.partition_point(|f| f.offset < min_footer_offset);
+
+    for footer in &footers[start_idx..] {
+        if footer.offset >= max_footer_offset {
+            break;
+        }
+
+        let frag_end = footer.offset + spec.footer_size;
+        let last_fragment = continuation_offset..frag_end;
+        let total_size = prior_size + (frag_end - continuation_offset);
+
+        if total_size > spec.max_file_bytes || total_size < MIN_PHOTO_BYTES {
+            continue;
+        }
+
+        if !verify_tail(reader, frag_end, spec, buffer) {
+            continue;
+        }
+
+        let mut all_fragments = fragments.to_vec();
+        all_fragments.push(last_fragment);
+        let depth = all_fragments.len() as u8;
+        return Some(RecoveredFile::new(
+            FragmentRanges::Multi(all_fragments),
+            RecoveryMethod::Reassembled { depth },
+            spec.format,
+            header.entropy,
+            confidence,
+        ));
     }
 
     None
@@ -323,53 +474,6 @@ fn scan_for_continuations(
     }
 
     candidates
-}
-
-fn try_chain_with_footer(
-    header: &Fragment,
-    first_fragment: &Range<u64>,
-    continuation_offset: u64,
-    footers: &[Fragment],
-    spec: &ReassemblySpec,
-    reader: &DiskReader,
-    buffer: &mut AlignedBuffer,
-) -> Option<RecoveredFile> {
-    let first_size = first_fragment.end - first_fragment.start;
-    let remaining_budget = spec.max_file_bytes.saturating_sub(first_size);
-
-    let min_footer_offset = continuation_offset + MIN_FRAGMENT_SIZE;
-    let max_footer_offset = continuation_offset + remaining_budget;
-
-    let start_idx = footers.partition_point(|f| f.offset < min_footer_offset);
-
-    for footer in &footers[start_idx..] {
-        if footer.offset >= max_footer_offset {
-            break;
-        }
-
-        let second_end = footer.offset + spec.footer_size;
-        let second_fragment = continuation_offset..second_end;
-        let total_size = first_size + (second_end - continuation_offset);
-
-        if total_size > spec.max_file_bytes || total_size < MIN_PHOTO_BYTES {
-            continue;
-        }
-
-        if !verify_tail(reader, second_end, spec, buffer) {
-            continue;
-        }
-
-        let fragments = vec![first_fragment.clone(), second_fragment];
-        let depth = fragments.len() as u8;
-        return Some(RecoveredFile::new(
-            FragmentRanges::Multi(fragments),
-            RecoveryMethod::Reassembled { depth },
-            spec.format,
-            header.entropy,
-        ));
-    }
-
-    None
 }
 
 fn verify_tail(

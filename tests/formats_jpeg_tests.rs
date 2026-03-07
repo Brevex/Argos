@@ -90,8 +90,8 @@ fn test_detect_jpeg_break_zero_run() {
 
     let bp = detect_jpeg_break(&data, scan_start);
     assert!(bp.is_some());
-    let bp_offset = bp.unwrap();
-    assert_eq!(bp_offset, zero_start);
+    let result = bp.unwrap();
+    assert_eq!(result.offset, zero_start);
 }
 
 #[test]

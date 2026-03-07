@@ -398,37 +398,6 @@ impl DiskScanner {
             .reader
     }
 
-    pub fn next_owned_block(&mut self) -> io::Result<Option<OwnedBlock>> {
-        let receiver = match &self.receiver {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        match receiver.recv() {
-            Ok(ScanMessage::Block {
-                offset,
-                buffer,
-                bytes_read,
-            }) => Ok(Some(OwnedBlock {
-                offset,
-                buffer,
-                bytes_read,
-            })),
-            Ok(ScanMessage::FatalError(e)) => {
-                self.finish();
-                Err(e)
-            }
-            Ok(ScanMessage::Done) => {
-                self.finish();
-                Ok(None)
-            }
-            Err(_) => {
-                self.finish();
-                Ok(None)
-            }
-        }
-    }
-
     pub fn recycle_buffer(&self, buffer: AlignedBuffer) {
         if let Some(tx) = &self.recycle_tx {
             let _ = tx.send(buffer);

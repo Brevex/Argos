@@ -10,7 +10,7 @@ use argos::carving::RecoveryStats;
 use argos::devices::{device_selection_options, discover_block_devices};
 use argos::io::{DiskScanner, PollResult};
 use argos::types::FragmentMap;
-use argos::{analysis, carving, extraction, io, reassembly};
+use argos::{analysis, carving, extraction, fs, io, reassembly};
 
 const PROGRESS_MSG_INTERVAL: u64 = 50 * 1024 * 1024;
 
@@ -158,16 +158,13 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     let mut scanner_done = false;
 
     loop {
-        while let Ok((fragments, end_pos, buffer)) = result_rx.try_recv() {
+        while let Ok((fragments, buffer)) = result_rx.try_recv() {
             for f in fragments {
                 map.push(f);
             }
 
             scanner.recycle_buffer(buffer);
             in_flight -= 1;
-
-            // end_pos is not used for progress — disk_position is the source of truth
-            let _ = end_pos;
         }
 
         let disk_pos = scanner.disk_position();
@@ -189,16 +186,13 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
                     rayon::spawn(move || {
                         let mut local = Vec::new();
                         analysis::scan_block(block.offset, block.data(), &mut local);
-                        let end = block.offset + block.bytes_read as u64;
-                        let _ = tx.send((local, end, block.buffer));
+                        let _ = tx.send((local, block.buffer));
                     });
 
                     in_flight += 1;
                     continue;
                 }
-                PollResult::Pending => {
-                    // IO thread busy (bad sectors / slow read) — loop to update progress
-                }
+                PollResult::Pending => {}
                 PollResult::Done => {
                     scanner_done = true;
                 }
@@ -207,15 +201,13 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
 
         if in_flight > 0 {
             match result_rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok((fragments, end_pos, buffer)) => {
+                Ok((fragments, buffer)) => {
                     for f in fragments {
                         map.push(f);
                     }
 
                     scanner.recycle_buffer(buffer);
                     in_flight -= 1;
-
-                    let _ = end_pos;
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -255,9 +247,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     map.sort_by_offset();
     map.dedup();
 
-    drop(scanner);
-    let reader = io::DiskReader::open_regular(device_path)
-        .context("Failed to reopen device for recovery")?;
+    let reader = scanner.into_reader();
 
     let linear_total = map.jpeg_headers().len() + map.png_headers().len();
     let pb_linear = ProgressBar::new(linear_total as u64);
@@ -280,6 +270,15 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
 
     let recovered_offsets: HashSet<u64> = recovered.iter().map(|r| r.header_offset()).collect();
 
+    println!("Scanning for filesystem metadata...");
+    let fs_hints = fs::collect_hints(&reader);
+    if !fs_hints.is_empty() {
+        println!(
+            "Found {} filesystem hints for deleted files",
+            style(fs_hints.len()).cyan()
+        );
+    }
+
     if map.len() > recovered.len() * 2 {
         let reasm_total = map.jpeg_headers().len() + map.png_headers().len();
         let pb_reasm = ProgressBar::new(reasm_total as u64);
@@ -294,8 +293,19 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
             pb_reasm.set_position(current as u64);
         };
 
-        let reassembled =
-            reassembly::reassemble(&map, &reader, &recovered_offsets, Some(&reasm_cb));
+        let hints_ref = if fs_hints.is_empty() {
+            None
+        } else {
+            Some(&fs_hints)
+        };
+
+        let reassembled = reassembly::reassemble(
+            &map,
+            &reader,
+            &recovered_offsets,
+            hints_ref,
+            Some(&reasm_cb),
+        );
         pb_reasm.finish_with_message(format!(
             "Fragment reassembly complete — {} images found",
             style(reassembled.len()).green().bold()
@@ -351,8 +361,47 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         "Images extracted: {}",
         style(report.extracted.len()).green()
     );
+    if report.high_confidence > 0 {
+        println!(
+            "  High confidence:    {}",
+            style(report.high_confidence).green()
+        );
+    }
+    if report.partial_confidence > 0 {
+        println!(
+            "  Partial confidence: {}",
+            style(report.partial_confidence).yellow()
+        );
+    }
+    if report.low_confidence > 0 {
+        println!(
+            "  Low confidence:     {}",
+            style(report.low_confidence).dim()
+        );
+    }
+    if report.dedup_skipped > 0 {
+        println!("Duplicates removed: {}", style(report.dedup_skipped).cyan());
+    }
     if report.failed > 0 {
         println!("Failed:           {}", style(report.failed).yellow());
+        if report.tail_check_failed > 0 {
+            println!(
+                "  No valid footer:  {}",
+                style(report.tail_check_failed).dim()
+            );
+        }
+        if report.head_validation_failed > 0 {
+            println!(
+                "  Invalid header:   {}",
+                style(report.head_validation_failed).dim()
+            );
+        }
+        if report.decode_failed > 0 {
+            println!(
+                "  Decode errors:    {} (kept as partial)",
+                style(report.decode_failed).dim()
+            );
+        }
     }
     if report.corrupt_discarded > 0 {
         println!(

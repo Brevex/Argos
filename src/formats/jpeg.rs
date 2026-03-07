@@ -1,4 +1,4 @@
-use crate::types::{calculate_entropy, JpegMetadata, QuantizationQuality};
+use crate::types::{calculate_entropy, score_jpeg, JpegMetadata, QuantizationQuality};
 
 pub const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
 pub const JPEG_EOI: [u8; 2] = [0xFF, 0xD9];
@@ -235,11 +235,14 @@ pub fn validate_jpeg(data: &[u8]) -> Option<JpegInfo> {
     })
 }
 
-pub fn validate_jpeg_full(data: &[u8]) -> Option<JpegInfo> {
-    if data.len() < 4 || data[data.len() - 2..] != JPEG_EOI {
-        return None;
+pub fn candidate_score(data: &[u8]) -> Option<u8> {
+    let info = validate_jpeg(data)?;
+    let score = score_jpeg(info.width, info.height, &info.metadata);
+    if score > 0 {
+        Some(score)
+    } else {
+        None
     }
-    validate_jpeg(data)
 }
 
 fn assess_quantization_table(table_data: &[u8]) -> QuantizationQuality {
@@ -335,19 +338,30 @@ pub fn find_sos_offset(data: &[u8]) -> Option<usize> {
     None
 }
 
-pub fn detect_jpeg_break(data: &[u8], scan_start: usize) -> Option<usize> {
+#[derive(Debug, Clone, Copy)]
+pub struct JpegBreakResult {
+    pub offset: usize,
+
+    pub last_rst_index: Option<u8>,
+}
+
+pub fn detect_jpeg_break(data: &[u8], scan_start: usize) -> Option<JpegBreakResult> {
     if scan_start >= data.len() {
         return None;
     }
 
     let mut i = scan_start;
     let mut zero_run = 0usize;
+    let mut last_rst: Option<u8> = None;
 
     while i < data.len() {
         if data[i] == 0x00 {
             zero_run += 1;
             if zero_run >= ZERO_RUN_BREAK_THRESHOLD {
-                return Some(i + 1 - zero_run);
+                return Some(JpegBreakResult {
+                    offset: i + 1 - zero_run,
+                    last_rst_index: last_rst,
+                });
             }
             i += 1;
             continue;
@@ -361,13 +375,17 @@ pub fn detect_jpeg_break(data: &[u8], scan_start: usize) -> Option<usize> {
                 continue;
             }
             if matches!(next, 0xD0..=0xD7) {
+                last_rst = Some(next - 0xD0);
                 i += 2;
                 continue;
             }
             if next == 0xD9 {
                 return None;
             }
-            return Some(i);
+            return Some(JpegBreakResult {
+                offset: i,
+                last_rst_index: last_rst,
+            });
         }
 
         i += 1;
@@ -381,11 +399,17 @@ pub fn detect_jpeg_break(data: &[u8], scan_start: usize) -> Option<usize> {
             while probe > scan_start + BREAK_ENTROPY_SAMPLE {
                 let sample_entropy = calculate_entropy(&data[probe - BREAK_ENTROPY_SAMPLE..probe]);
                 if sample_entropy >= CONTINUATION_MIN_ENTROPY {
-                    return Some(probe);
+                    return Some(JpegBreakResult {
+                        offset: probe,
+                        last_rst_index: last_rst,
+                    });
                 }
                 probe = probe.saturating_sub(BREAK_ENTROPY_SAMPLE);
             }
-            return Some(tail_start);
+            return Some(JpegBreakResult {
+                offset: tail_start,
+                last_rst_index: last_rst,
+            });
         }
     }
 

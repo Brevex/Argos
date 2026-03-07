@@ -4,14 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 
 use crate::analysis::is_valid_scan_context;
-use crate::formats::jpeg::{validate_jpeg, JpegInfo};
-use crate::formats::png::{validate_png_header, PngInfo};
+use crate::formats::jpeg::candidate_score as jpeg_candidate_score;
+use crate::formats::png::candidate_score as png_candidate_score;
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 use crate::types::{
-    categorize_dimensions, is_metadata_asset_jpeg, is_metadata_asset_png, DimensionVerdict,
-    Fragment, FragmentMap, FragmentRanges, ImageFormat, QuantizationQuality, RecoveredFile,
-    RecoveryMethod, LOW_MARKER_COUNT_THRESHOLD, LOW_QUALITY_MAX_DIMENSION, MIN_PHOTO_BYTES,
-    MIN_PNG_CHUNK_VARIETY, MIN_PNG_VARIETY_DIMENSION, MIN_SCAN_DATA_ENTROPY, SMALL_BUFFER_SIZE,
+    Fragment, FragmentMap, FragmentRanges, ImageFormat, RecoveredFile, RecoveryMethod,
+    MIN_PHOTO_BYTES, SMALL_BUFFER_SIZE,
 };
 
 const FADVISE_CHUNK: u64 = 256 * 1024 * 1024;
@@ -43,64 +41,6 @@ const PNG_SPEC: FormatSpec = FormatSpec {
     validate_footer_context: false,
 };
 
-fn jpeg_veto(info: &JpegInfo) -> bool {
-    match categorize_dimensions(info.width as u32, info.height as u32) {
-        DimensionVerdict::TooSmall | DimensionVerdict::Asset => return true,
-        DimensionVerdict::Photo => {}
-    }
-    if is_metadata_asset_jpeg(info.width as u32, info.height as u32, &info.metadata) {
-        return true;
-    }
-    if info.metadata.quantization_quality == QuantizationQuality::Low
-        && !info.metadata.has_exif
-        && !info.metadata.has_icc_profile
-        && info.width as u32 <= LOW_QUALITY_MAX_DIMENSION
-        && info.height as u32 <= LOW_QUALITY_MAX_DIMENSION
-    {
-        return true;
-    }
-    if info.metadata.marker_count < LOW_MARKER_COUNT_THRESHOLD && !info.metadata.has_exif {
-        return true;
-    }
-    info.metadata.has_sos
-        && info.metadata.scan_data_entropy > 0.0
-        && info.metadata.scan_data_entropy < MIN_SCAN_DATA_ENTROPY
-}
-
-fn png_veto(info: &PngInfo) -> bool {
-    if info.idat_count == 0 {
-        return true;
-    }
-    match categorize_dimensions(info.width, info.height) {
-        DimensionVerdict::TooSmall | DimensionVerdict::Asset => return true,
-        DimensionVerdict::Photo => {}
-    }
-    if is_metadata_asset_png(info.width, info.height, &info.metadata) {
-        return true;
-    }
-    if info.metadata.chunk_variety < MIN_PNG_CHUNK_VARIETY
-        && info.width <= MIN_PNG_VARIETY_DIMENSION
-        && info.height <= MIN_PNG_VARIETY_DIMENSION
-    {
-        return true;
-    }
-    false
-}
-
-fn jpeg_candidate_passes(data: &[u8]) -> bool {
-    match validate_jpeg(data) {
-        Some(info) => !jpeg_veto(&info),
-        None => false,
-    }
-}
-
-fn png_candidate_passes(data: &[u8]) -> bool {
-    match validate_png_header(data) {
-        Some(info) => !png_veto(&info),
-        None => false,
-    }
-}
-
 pub fn linear_carve(
     map: &FragmentMap,
     reader: &DiskReader,
@@ -114,7 +54,7 @@ pub fn linear_carve(
         map.jpeg_footers(),
         &JPEG_SPEC,
         reader,
-        jpeg_candidate_passes,
+        jpeg_candidate_score,
         progress,
         &counter,
         total,
@@ -125,7 +65,7 @@ pub fn linear_carve(
         map.png_footers(),
         &PNG_SPEC,
         reader,
-        png_candidate_passes,
+        png_candidate_score,
         progress,
         &counter,
         total,
@@ -140,7 +80,7 @@ fn linear_carve_format(
     footers: &[Fragment],
     spec: &FormatSpec,
     reader: &DiskReader,
-    candidate_passes: fn(&[u8]) -> bool,
+    candidate_score: fn(&[u8]) -> Option<u8>,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
     counter: &AtomicUsize,
     total: usize,
@@ -161,11 +101,10 @@ fn linear_carve_format(
         .filter_map(|header| {
             let result = CARVE_BUFFER.with(|cell| {
                 let mut buf = cell.borrow_mut();
-                if let Some(data) = read_at_offset(reader, header.offset, &mut buf) {
-                    if !candidate_passes(data) {
-                        return None;
-                    }
-                }
+                let confidence = match read_at_offset(reader, header.offset, &mut buf) {
+                    Some(data) => candidate_score(data)?,
+                    None => return None,
+                };
 
                 let footer = if spec.validate_footer_context {
                     find_best_footer(
@@ -185,6 +124,7 @@ fn linear_carve_format(
                     RecoveryMethod::Linear,
                     spec.format,
                     header.entropy,
+                    confidence,
                 ))
             });
             if let Some(cb) = progress {

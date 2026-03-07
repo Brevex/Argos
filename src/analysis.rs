@@ -18,10 +18,11 @@ pub fn scan_block(offset: Offset, data: &[u8], collector: &mut impl FragmentColl
                 if pos + 2 < data.len() && data[pos + 1] == 0xD8 && data[pos + 2] == 0xFF {
                     'soi: {
                         let verdict = if let Some((w, h)) = quick_jpeg_dimensions(&data[pos..]) {
-                            match categorize_dimensions(w as u32, h as u32) {
-                                DimensionVerdict::Photo => DimensionVerdict::Photo,
-                                _ => break 'soi,
+                            let v = categorize_dimensions(w as u32, h as u32);
+                            if v == DimensionVerdict::TooSmall {
+                                break 'soi;
                             }
+                            v
                         } else {
                             DimensionVerdict::Photo
                         };
@@ -70,10 +71,11 @@ pub fn scan_block(offset: Offset, data: &[u8], collector: &mut impl FragmentColl
                 if pos + 8 <= data.len() && data[pos..pos + 8] == PNG_SIGNATURE {
                     'png: {
                         let verdict = if let Some(info) = validate_png_header(&data[pos..]) {
-                            match categorize_dimensions(info.width, info.height) {
-                                DimensionVerdict::Photo => DimensionVerdict::Photo,
-                                _ => break 'png,
+                            let v = categorize_dimensions(info.width, info.height);
+                            if v == DimensionVerdict::TooSmall {
+                                break 'png;
                             }
+                            v
                         } else {
                             DimensionVerdict::Photo
                         };

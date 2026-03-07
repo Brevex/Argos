@@ -18,12 +18,15 @@ crc32fast = "1.5.0"
 memchr = "2.8.0"
 rayon = "1.11.0"
 crossbeam-channel = "0.5.15"
+blake3 = "1.8.3"
+jpeg-decoder = "0.3.2"
+png = "0.18.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [dev-dependencies]
-tempfile = "3.25.0"
+tempfile = "3.26.0"
 
 [profile.release]
 opt-level = 3

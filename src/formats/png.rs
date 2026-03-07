@@ -1,10 +1,10 @@
-use crate::types::{calculate_entropy, PngMetadata};
+use crate::types::{calculate_entropy, score_png, PngMetadata};
 
 pub const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 const SCREEN_PPM_LOWER: u32 = 2500;
+
 const SCREEN_PPM_UPPER: u32 = 3200;
-const IDAT_MIN_RATIO: u64 = 100;
 
 pub const IEND_CHUNK_TYPE: &[u8; 4] = b"IEND";
 
@@ -104,49 +104,14 @@ pub fn validate_png_header(data: &[u8]) -> Option<PngInfo> {
     })
 }
 
-pub fn validate_png_full(data: &[u8]) -> Option<PngInfo> {
+pub fn candidate_score(data: &[u8]) -> Option<u8> {
     let info = validate_png_header(data)?;
-
-    if info.idat_count == 0 {
-        return None;
+    let score = score_png(info.width, info.height, &info.metadata, info.idat_count);
+    if score > 0 {
+        Some(score)
+    } else {
+        None
     }
-
-    let pixel_count = info.width as u64 * info.height as u64;
-    if pixel_count > 0
-        && info.idat_total_bytes > 0
-        && info.idat_total_bytes < pixel_count / IDAT_MIN_RATIO
-    {
-        return None;
-    }
-
-    if !has_valid_iend(data) {
-        return None;
-    }
-
-    Some(info)
-}
-
-fn has_valid_iend(data: &[u8]) -> bool {
-    if data.len() < 12 {
-        return false;
-    }
-    let iend_start = data.len() - 12;
-    let iend_len = u32::from_be_bytes([
-        data[iend_start],
-        data[iend_start + 1],
-        data[iend_start + 2],
-        data[iend_start + 3],
-    ]);
-    if iend_len != 0 || &data[iend_start + 4..iend_start + 8] != IEND_CHUNK_TYPE {
-        return false;
-    }
-    let stored = u32::from_be_bytes([
-        data[iend_start + 8],
-        data[iend_start + 9],
-        data[iend_start + 10],
-        data[iend_start + 11],
-    ]);
-    IEND_CRC == stored
 }
 
 pub struct PngChunkIterator<'a> {

@@ -14,9 +14,10 @@ const MAX_FRAGMENT_CAPACITY: usize = FRAGMENT_BUDGET_BYTES / std::mem::size_of::
 
 pub const ICON_MAX_DIMENSION: u32 = 256;
 pub const ASSET_UPPER_DIMENSION: u32 = 512;
-pub const MIN_PHOTO_WIDTH: u32 = 640;
-pub const MIN_PHOTO_HEIGHT: u32 = 480;
-pub const MIN_PHOTO_MEGAPIXELS: f32 = 0.2;
+pub const FAVICON_MAX_DIMENSION: u32 = 64;
+pub const MIN_PHOTO_WIDTH: u32 = 320;
+pub const MIN_PHOTO_HEIGHT: u32 = 240;
+pub const MIN_PHOTO_MEGAPIXELS: f32 = 0.05;
 pub const MIN_PHOTO_BYTES: u64 = 50 * KB;
 pub const LOW_ENTROPY_THRESHOLD: f32 = 5.5;
 pub const MIN_SCAN_DATA_ENTROPY: f32 = 6.5;
@@ -33,8 +34,9 @@ pub const BREAK_DETECTION_READ_SIZE: usize = 256 * 1024;
 pub const CONTINUATION_SCAN_CLUSTER_SIZE: u64 = 4096;
 pub const CONTINUATION_MATCH_WINDOW: usize = 64;
 pub const MIN_FRAGMENT_SIZE: u64 = 512;
-pub const MAX_CONTINUATION_CANDIDATES: usize = 8;
+pub const MAX_CONTINUATION_CANDIDATES: usize = 16;
 pub const REASSEMBLY_MAX_GAP: u64 = 100 * MB;
+pub const FINGERPRINT_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DimensionVerdict {
@@ -43,22 +45,44 @@ pub enum DimensionVerdict {
     TooSmall,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfidenceTier {
+    High,
+    Partial,
+    Low,
+}
+
+impl ConfidenceTier {
+    pub fn from_score(score: u8) -> Self {
+        if score >= 60 {
+            ConfidenceTier::High
+        } else if score >= 30 {
+            ConfidenceTier::Partial
+        } else {
+            ConfidenceTier::Low
+        }
+    }
+
+    pub fn dirname(&self) -> &'static str {
+        match self {
+            ConfidenceTier::High => "high",
+            ConfidenceTier::Partial => "partial",
+            ConfidenceTier::Low => "low",
+        }
+    }
+}
+
 pub fn categorize_dimensions(width: u32, height: u32) -> DimensionVerdict {
     if width == 0 || height == 0 {
         return DimensionVerdict::TooSmall;
     }
 
+    if width <= FAVICON_MAX_DIMENSION && height <= FAVICON_MAX_DIMENSION {
+        return DimensionVerdict::TooSmall;
+    }
+
     if width <= ICON_MAX_DIMENSION && height <= ICON_MAX_DIMENSION {
         return DimensionVerdict::Asset;
-    }
-
-    if width < MIN_PHOTO_WIDTH && height < MIN_PHOTO_HEIGHT {
-        return DimensionVerdict::TooSmall;
-    }
-
-    let megapixels = (width as f32 * height as f32) / 1_000_000.0;
-    if megapixels < MIN_PHOTO_MEGAPIXELS {
-        return DimensionVerdict::TooSmall;
     }
 
     if (width > height && width / height > EXTREME_ASPECT_RATIO)
@@ -70,17 +94,135 @@ pub fn categorize_dimensions(width: u32, height: u32) -> DimensionVerdict {
     DimensionVerdict::Photo
 }
 
-pub fn is_metadata_asset_jpeg(width: u32, height: u32, metadata: &JpegMetadata) -> bool {
-    width <= ASSET_UPPER_DIMENSION
-        && height <= ASSET_UPPER_DIMENSION
-        && (width == height || (!metadata.has_exif && !metadata.has_icc_profile))
+pub fn score_jpeg(width: u16, height: u16, metadata: &JpegMetadata) -> u8 {
+    let w = width as u32;
+    let h = height as u32;
+    if w == 0 || h == 0 || (w <= FAVICON_MAX_DIMENSION && h <= FAVICON_MAX_DIMENSION) {
+        return 0;
+    }
+
+    let mut score: i32 = 0;
+
+    let max_dim = w.max(h);
+    score += if w <= 128 && h <= 128 {
+        5
+    } else if w <= 256 && h <= 256 {
+        10
+    } else if max_dim <= 512 {
+        15
+    } else if max_dim <= 768 {
+        20
+    } else if max_dim <= 1280 {
+        25
+    } else {
+        30
+    };
+
+    if metadata.has_exif {
+        score += 20;
+    }
+    if metadata.has_icc_profile {
+        score += 10;
+    }
+    if metadata.has_jfif {
+        score += 5;
+    }
+
+    match metadata.quantization_quality {
+        QuantizationQuality::High => score += 15,
+        QuantizationQuality::Medium => score += 5,
+        QuantizationQuality::Low => score -= 10,
+        QuantizationQuality::Unknown => {}
+    }
+
+    score += metadata.marker_count.min(10) as i32;
+
+    if metadata.has_sos && metadata.scan_data_entropy > 0.0 {
+        if metadata.scan_data_entropy >= 7.0 {
+            score += 10;
+        } else if metadata.scan_data_entropy >= MIN_SCAN_DATA_ENTROPY {
+            score += 5;
+        } else {
+            score -= 15;
+        }
+    }
+
+    let is_standard_thumb = matches!(
+        (w, h),
+        (128, 128) | (160, 120) | (256, 256) | (96, 96) | (120, 120)
+    );
+    if is_standard_thumb
+        && metadata.quantization_quality == QuantizationQuality::Low
+        && !metadata.has_exif
+    {
+        score = score.min(15);
+    }
+
+    if (w > h && h > 0 && w / h > EXTREME_ASPECT_RATIO)
+        || (h > w && w > 0 && h / w > EXTREME_ASPECT_RATIO)
+    {
+        score -= 15;
+    }
+
+    score.clamp(1, 100) as u8
 }
 
-pub fn is_metadata_asset_png(width: u32, height: u32, metadata: &PngMetadata) -> bool {
-    if metadata.has_physical_dimensions && metadata.is_screen_resolution {
-        return true;
+pub fn score_png(width: u32, height: u32, metadata: &PngMetadata, idat_count: usize) -> u8 {
+    if width == 0 || height == 0 || idat_count == 0 {
+        return 0;
     }
-    width <= ASSET_UPPER_DIMENSION && height <= ASSET_UPPER_DIMENSION && width == height
+    if width <= FAVICON_MAX_DIMENSION && height <= FAVICON_MAX_DIMENSION {
+        return 0;
+    }
+
+    let mut score: i32 = 0;
+
+    let max_dim = width.max(height);
+    score += if width <= 128 && height <= 128 {
+        5
+    } else if width <= 256 && height <= 256 {
+        10
+    } else if max_dim <= 512 {
+        15
+    } else if max_dim <= 768 {
+        20
+    } else if max_dim <= 1280 {
+        25
+    } else {
+        30
+    };
+
+    if metadata.has_text_chunks {
+        score += 10;
+    }
+    if metadata.has_icc_profile {
+        score += 10;
+    }
+    if metadata.has_physical_dimensions && !metadata.is_screen_resolution {
+        score += 5;
+    }
+
+    if metadata.is_screen_resolution {
+        score -= 10;
+    }
+
+    score += (metadata.chunk_variety.min(6) as i32) * 3;
+
+    if (width > height && height > 0 && width / height > EXTREME_ASPECT_RATIO)
+        || (height > width && width > 0 && height / width > EXTREME_ASPECT_RATIO)
+    {
+        score -= 15;
+    }
+
+    if width == height
+        && width <= ICON_MAX_DIMENSION
+        && !metadata.has_text_chunks
+        && !metadata.has_icc_profile
+    {
+        score = score.min(15);
+    }
+
+    score.clamp(1, 100) as u8
 }
 
 #[repr(u8)]
@@ -176,6 +318,7 @@ pub struct RecoveredFile {
     pub method: RecoveryMethod,
     pub format: ImageFormat,
     pub header_entropy: f32,
+    pub confidence: u8,
 }
 
 impl RecoveredFile {
@@ -184,12 +327,14 @@ impl RecoveredFile {
         method: RecoveryMethod,
         format: ImageFormat,
         header_entropy: f32,
+        confidence: u8,
     ) -> Self {
         Self {
             fragments,
             method,
             format,
             header_entropy,
+            confidence,
         }
     }
 
@@ -215,6 +360,8 @@ pub struct BreakPoint {
     pub break_offset: Offset,
     pub confidence: BreakConfidence,
     pub signature: ContinuationSignature,
+
+    pub last_rst_index: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -519,4 +666,11 @@ pub struct ExtractionReport {
     pub extracted: Vec<std::path::PathBuf>,
     pub failed: usize,
     pub corrupt_discarded: usize,
+    pub dedup_skipped: usize,
+    pub high_confidence: usize,
+    pub partial_confidence: usize,
+    pub low_confidence: usize,
+    pub tail_check_failed: usize,
+    pub head_validation_failed: usize,
+    pub decode_failed: usize,
 }

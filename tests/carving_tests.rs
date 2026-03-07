@@ -9,18 +9,21 @@ fn test_recovery_stats() {
             RecoveryMethod::Linear,
             ImageFormat::Jpeg,
             7.5,
+            80,
         ),
         RecoveredFile::new(
             FragmentRanges::Linear(2000..3000),
             RecoveryMethod::Linear,
             ImageFormat::Jpeg,
             7.6,
+            75,
         ),
         RecoveredFile::new(
             FragmentRanges::Linear(5000..6000),
             RecoveryMethod::Linear,
             ImageFormat::Png,
             7.2,
+            70,
         ),
     ];
     let stats = RecoveryStats::from_recovered(&files);
@@ -37,12 +40,14 @@ fn test_recovery_stats_reassembled() {
             RecoveryMethod::Reassembled { depth: 2 },
             ImageFormat::Jpeg,
             7.8,
+            65,
         ),
         RecoveredFile::new(
             FragmentRanges::Linear(2000..3000),
             RecoveryMethod::Linear,
             ImageFormat::Png,
             7.0,
+            70,
         ),
     ];
     let stats = RecoveryStats::from_recovered(&files);
