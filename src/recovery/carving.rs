@@ -3,14 +3,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
-use crate::scan::is_valid_scan_context;
-use crate::format::jpeg::candidate_score as jpeg_candidate_score;
-use crate::format::png::candidate_score as png_candidate_score;
-use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 use crate::core::{
     Fragment, FragmentMap, FragmentRanges, ImageFormat, RecoveredFile, RecoveryMethod,
     MIN_PHOTO_BYTES, SMALL_BUFFER_SIZE,
 };
+use crate::format::jpeg::candidate_score as jpeg_candidate_score;
+use crate::format::png::candidate_score as png_candidate_score;
+use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
+use crate::scan::is_valid_scan_context;
 
 const FADVISE_CHUNK: u64 = 256 * 1024 * 1024;
 const MAX_FOOTER_CANDIDATES: usize = 32;

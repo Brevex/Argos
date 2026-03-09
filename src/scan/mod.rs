@@ -1,9 +1,9 @@
-use crate::format::jpeg::quick_jpeg_dimensions;
-use crate::format::png::{validate_png_header, IEND_CRC, PNG_SIGNATURE};
 use crate::core::{
     calculate_entropy, categorize_dimensions, DimensionVerdict, Fragment, FragmentCollector,
     FragmentKind, Offset, LOW_ENTROPY_THRESHOLD,
 };
+use crate::format::jpeg::quick_jpeg_dimensions;
+use crate::format::png::{validate_png_header, IEND_CRC, PNG_SIGNATURE};
 
 const ENTROPY_SAMPLE_SIZE: usize = 1024;
 const EOI_CONTEXT_WINDOW: usize = 512;

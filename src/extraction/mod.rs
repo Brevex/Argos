@@ -1,13 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::format::jpeg::{JPEG_EOI, JPEG_SOI};
-use crate::format::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
-use crate::io::{is_recoverable_io_error, zero_sector, AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 use crate::core::{
     ConfidenceTier, ExtractionReport, ExtractionResult, ImageFormat, RecoveredFile,
     CORRUPT_SECTOR_RATIO, FINGERPRINT_SIZE, SMALL_BUFFER_SIZE, VALIDATION_HEADER_SIZE,
 };
+use crate::format::jpeg::{JPEG_EOI, JPEG_SOI};
+use crate::format::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
+use crate::io::{is_recoverable_io_error, zero_sector, AlignedBuffer, DiskReader, ALIGNMENT_MASK};
 use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -198,41 +198,39 @@ pub fn extract_all(
                 }
 
                 match hash_file(&output_path) {
-                    Ok(hash) => {
-                        match exact_hashes.entry(hash) {
-                            std::collections::hash_map::Entry::Vacant(e) => {
-                                e.insert((output_path.clone(), confidence));
-                            }
-                            std::collections::hash_map::Entry::Occupied(mut e) => {
-                                let (existing_path, existing_confidence) = e.get();
-                                if confidence > *existing_confidence {
-                                    let _ = fs::remove_file(existing_path);
+                    Ok(hash) => match exact_hashes.entry(hash) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert((output_path.clone(), confidence));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            let (existing_path, existing_confidence) = e.get();
+                            if confidence > *existing_confidence {
+                                let _ = fs::remove_file(existing_path);
 
-                                    report.extracted.retain(|p| p != existing_path);
+                                report.extracted.retain(|p| p != existing_path);
 
-                                    match ConfidenceTier::from_score(*existing_confidence) {
-                                        ConfidenceTier::High => {
-                                            report.high_confidence =
-                                                report.high_confidence.saturating_sub(1)
-                                        }
-                                        ConfidenceTier::Partial => {
-                                            report.partial_confidence =
-                                                report.partial_confidence.saturating_sub(1)
-                                        }
-                                        ConfidenceTier::Low => {
-                                            report.low_confidence =
-                                                report.low_confidence.saturating_sub(1)
-                                        }
+                                match ConfidenceTier::from_score(*existing_confidence) {
+                                    ConfidenceTier::High => {
+                                        report.high_confidence =
+                                            report.high_confidence.saturating_sub(1)
                                     }
-                                    e.insert((output_path.clone(), confidence));
-                                } else {
-                                    let _ = fs::remove_file(&output_path);
-                                    report.dedup_skipped += 1;
-                                    continue;
+                                    ConfidenceTier::Partial => {
+                                        report.partial_confidence =
+                                            report.partial_confidence.saturating_sub(1)
+                                    }
+                                    ConfidenceTier::Low => {
+                                        report.low_confidence =
+                                            report.low_confidence.saturating_sub(1)
+                                    }
                                 }
+                                e.insert((output_path.clone(), confidence));
+                            } else {
+                                let _ = fs::remove_file(&output_path);
+                                report.dedup_skipped += 1;
+                                continue;
                             }
                         }
-                    }
+                    },
                     Err(_) => {}
                 }
 

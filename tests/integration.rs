@@ -1,11 +1,11 @@
 use std::fs;
 use tempfile::tempdir;
 
-use argos::scan::scan_block;
-use argos::recovery::{linear_carve, RecoveryStats};
+use argos::core::FragmentMap;
 use argos::extraction::extract_all;
 use argos::io::{DiskReader, DiskScanner};
-use argos::core::FragmentMap;
+use argos::recovery::{linear_carve, RecoveryStats};
+use argos::scan::scan_block;
 
 fn create_test_jpeg() -> Vec<u8> {
     let mut jpeg = Vec::new();

@@ -83,7 +83,8 @@ pub fn detect_fat32(
         .saturating_sub(reserved_sectors as u32 + num_fats as u32 * fat_size_sectors);
     let total_data_clusters = data_sectors / sectors_per_cluster as u32;
 
-    if root_cluster < 2 || root_cluster >= 0x0FFF_FFF8 || (root_cluster - 2) >= total_data_clusters {
+    if root_cluster < 2 || root_cluster >= 0x0FFF_FFF8 || (root_cluster - 2) >= total_data_clusters
+    {
         return None;
     }
 

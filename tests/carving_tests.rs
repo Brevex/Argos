@@ -1,5 +1,5 @@
-use argos::recovery::carving::RecoveryStats;
 use argos::core::{FragmentRanges, ImageFormat, RecoveredFile, RecoveryMethod};
+use argos::recovery::carving::RecoveryStats;
 
 #[test]
 fn test_recovery_stats() {

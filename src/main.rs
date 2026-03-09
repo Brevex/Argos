@@ -6,10 +6,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use argos::recovery::carving::RecoveryStats;
+use argos::core::FragmentMap;
 use argos::device::{device_selection_options, discover_block_devices};
 use argos::io::{DiskScanner, PollResult};
-use argos::core::FragmentMap;
+use argos::recovery::carving::RecoveryStats;
 use argos::{extraction, fs, io, recovery, scan};
 
 const PROGRESS_MSG_INTERVAL: u64 = 50 * 1024 * 1024;
@@ -377,10 +377,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         );
     }
     if report.low_confidence > 0 {
-        println!(
-            "Low confidence:     {}",
-            style(report.low_confidence).dim()
-        );
+        println!("Low confidence:     {}", style(report.low_confidence).dim());
     }
     if report.dedup_skipped > 0 {
         println!("Duplicates removed: {}", style(report.dedup_skipped).cyan());

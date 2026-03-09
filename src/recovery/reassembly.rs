@@ -5,7 +5,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
-use crate::recovery::carving::read_at_offset;
+use crate::core::{
+    BreakConfidence, BreakPoint, ContinuationSignature, Fragment, FragmentMap, FragmentRanges,
+    ImageFormat, Offset, RecoveredFile, RecoveryMethod, BREAK_DETECTION_READ_SIZE,
+    CONTINUATION_MATCH_WINDOW, CONTINUATION_SCAN_CLUSTER_SIZE, MAX_CHAIN_DEPTH,
+    MAX_CONTINUATION_CANDIDATES, MIN_FRAGMENT_SIZE, MIN_PHOTO_BYTES, REASSEMBLY_MAX_GAP,
+    SMALL_BUFFER_SIZE,
+};
 use crate::format::jpeg::{
     candidate_score as jpeg_candidate_score, detect_jpeg_break, find_sos_offset,
     matches_jpeg_continuation,
@@ -15,13 +21,7 @@ use crate::format::png::{
 };
 use crate::fs::FsHintMap;
 use crate::io::{AlignedBuffer, DiskReader, ALIGNMENT_MASK};
-use crate::core::{
-    BreakConfidence, BreakPoint, ContinuationSignature, Fragment, FragmentMap, FragmentRanges,
-    ImageFormat, Offset, RecoveredFile, RecoveryMethod, BREAK_DETECTION_READ_SIZE,
-    CONTINUATION_MATCH_WINDOW, CONTINUATION_SCAN_CLUSTER_SIZE, MAX_CHAIN_DEPTH,
-    MAX_CONTINUATION_CANDIDATES, MIN_FRAGMENT_SIZE, MIN_PHOTO_BYTES, REASSEMBLY_MAX_GAP,
-    SMALL_BUFFER_SIZE,
-};
+use crate::recovery::carving::read_at_offset;
 
 thread_local! {
     static REASM_BUFFER: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_size(SMALL_BUFFER_SIZE));
