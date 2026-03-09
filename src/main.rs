@@ -358,6 +358,14 @@ fn run_scan(device_path: &Path, output_path: &Path) -> Result<()> {
 
     println!();
     println!();
+    if let Some(ref reason) = report.halted_reason {
+        println!(
+            "{} {}",
+            style("WARNING: Extraction halted early:").red().bold(),
+            style(reason).red()
+        );
+        println!();
+    }
     println!("{}", style("Recovery Complete!").green().bold());
     println!();
     println!(

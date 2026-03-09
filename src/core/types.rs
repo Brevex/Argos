@@ -442,6 +442,49 @@ pub struct ExtractionResult {
     pub bytes_written: usize,
 }
 
+#[derive(Debug)]
+pub enum ExtractionError {
+    DiskFull,
+    DeviceDisconnected,
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ExtractionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExtractionError::DiskFull => write!(f, "Destination disk is full"),
+            ExtractionError::DeviceDisconnected => write!(f, "Output device disconnected or I/O failure"),
+            ExtractionError::Io(e) => write!(f, "I/O error: {}", e),
+        }
+    }
+}
+
+impl From<std::io::Error> for ExtractionError {
+    fn from(e: std::io::Error) -> Self {
+        #[cfg(unix)]
+        {
+            if e.raw_os_error() == Some(libc::ENOSPC) {
+                return ExtractionError::DiskFull;
+            }
+            if e.raw_os_error() == Some(libc::EIO)
+                || e.raw_os_error() == Some(libc::ENXIO)
+            {
+                return ExtractionError::DeviceDisconnected;
+            }
+        }
+        if e.kind() == std::io::ErrorKind::WriteZero {
+            return ExtractionError::DiskFull;
+        }
+        ExtractionError::Io(e)
+    }
+}
+
+impl ExtractionError {
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, ExtractionError::DiskFull | ExtractionError::DeviceDisconnected)
+    }
+}
+
 pub struct ExtractionReport {
     pub extracted: Vec<std::path::PathBuf>,
     pub failed: usize,
@@ -453,6 +496,7 @@ pub struct ExtractionReport {
     pub tail_check_failed: usize,
     pub head_validation_failed: usize,
     pub decode_failed: usize,
+    pub halted_reason: Option<String>,
 }
 
 impl ExtractionReport {

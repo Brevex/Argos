@@ -2,8 +2,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::core::{
-    ConfidenceTier, ExtractionReport, ExtractionResult, ImageFormat, RecoveredFile,
-    CORRUPT_SECTOR_RATIO, FINGERPRINT_SIZE, SMALL_BUFFER_SIZE, VALIDATION_HEADER_SIZE,
+    ConfidenceTier, ExtractionError, ExtractionReport, ExtractionResult, ImageFormat,
+    RecoveredFile, CORRUPT_SECTOR_RATIO, FINGERPRINT_SIZE, SMALL_BUFFER_SIZE,
+    VALIDATION_HEADER_SIZE,
 };
 use crate::format::jpeg::{JPEG_EOI, JPEG_SOI};
 use crate::format::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
@@ -13,11 +14,62 @@ use crate::io::{
 use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 thread_local! {
     static EXTRACT_BUFFER: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_size(SMALL_BUFFER_SIZE));
+}
+
+const SPACE_CHECK_INTERVAL: usize = 50;
+const MINIMUM_SPACE_BYTES: u64 = 10 * 1024 * 1024;
+
+#[cfg(unix)]
+fn available_space(path: &Path) -> io::Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+
+    unsafe {
+        let mut stat: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c_path.as_ptr(), &mut stat) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    }
+}
+
+#[cfg(not(unix))]
+fn available_space(_path: &Path) -> io::Result<u64> {
+    Ok(u64::MAX)
+}
+
+#[cfg(unix)]
+fn try_preallocate(file: &File, size: u64) {
+    unsafe {
+        libc::posix_fallocate(file.as_raw_fd(), 0, size as libc::off_t);
+    }
+}
+
+#[cfg(not(unix))]
+fn try_preallocate(_file: &File, _size: u64) {}
+
+fn cleanup_stale_tmp_files(output_dir: &Path) {
+    for tier in &["high", "partial", "low"] {
+        let tier_dir = output_dir.join(tier);
+        if let Ok(entries) = fs::read_dir(&tier_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
 }
 
 fn compute_fingerprint(
@@ -89,6 +141,8 @@ pub fn extract_all(
         fs::create_dir_all(output_dir.join(tier))?;
     }
 
+    cleanup_stale_tmp_files(output_dir);
+
     let total = files.len();
     let counter = AtomicUsize::new(0);
 
@@ -133,29 +187,39 @@ pub fn extract_all(
     let mut sorted_extract: Vec<usize> = extract_indices;
     sorted_extract.sort_unstable_by_key(|&i| files[i].header_offset());
 
-    let mut exact_hashes: HashMap<[u8; 32], (std::path::PathBuf, u8)> = HashMap::new();
-
-    let results: Vec<_> = sorted_extract
-        .par_iter()
+    let estimated_bytes: u64 = sorted_extract
+        .iter()
         .map(|&i| {
-            let file = &files[i];
-            let tier = ConfidenceTier::from_score(file.confidence);
-            let filename = generate_filename(i, file.format);
-            let output_path = output_dir.join(tier.dirname()).join(&filename);
-
-            let extraction = EXTRACT_BUFFER.with(|cell| {
-                let mut buffer = cell.borrow_mut();
-                extract_single(file, reader, &output_path, &mut buffer)
-            });
-
-            if let Some(cb) = progress_callback {
-                let current = counter.fetch_add(1, Ordering::Relaxed);
-                cb(current, total);
-            }
-
-            (output_path, file.format, file.confidence, extraction)
+            files[i]
+                .fragments
+                .as_slice()
+                .iter()
+                .map(|r| r.end - r.start)
+                .sum::<u64>()
         })
-        .collect();
+        .sum();
+
+    let space_constrained = match available_space(output_dir) {
+        Ok(avail) => {
+            let headroom = avail.saturating_mul(95) / 100;
+            estimated_bytes > headroom
+        }
+        Err(_) => false,
+    };
+
+    let halted = AtomicBool::new(false);
+
+    let results: Vec<_> = if space_constrained {
+        sorted_extract
+            .iter()
+            .map(|&i| extract_one_file(i, files, reader, output_dir, &counter, total, progress_callback, &halted))
+            .collect()
+    } else {
+        sorted_extract
+            .par_iter()
+            .map(|&i| extract_one_file(i, files, reader, output_dir, &counter, total, progress_callback, &halted))
+            .collect()
+    };
 
     let mut report = ExtractionReport {
         extracted: Vec::with_capacity(files.len()),
@@ -168,9 +232,31 @@ pub fn extract_all(
         tail_check_failed: 0,
         head_validation_failed: 0,
         decode_failed: 0,
+        halted_reason: None,
     };
 
+    let mut exact_hashes: HashMap<[u8; 32], (std::path::PathBuf, u8)> = HashMap::new();
+    let mut files_since_space_check: usize = 0;
+
     for (output_path, format, confidence, extraction) in results {
+        if report.halted_reason.is_some() {
+            break;
+        }
+
+        files_since_space_check += 1;
+        if files_since_space_check >= SPACE_CHECK_INTERVAL {
+            files_since_space_check = 0;
+            if let Ok(avail) = available_space(output_dir) {
+                if avail < MINIMUM_SPACE_BYTES {
+                    report.halted_reason = Some(format!(
+                        "Destination disk critically low: {} bytes remaining",
+                        avail
+                    ));
+                    break;
+                }
+            }
+        }
+
         match extraction {
             Ok(result) => {
                 if result.bytes_written == 0 {
@@ -225,8 +311,12 @@ pub fn extract_all(
                 report.increment_tier(confidence);
                 report.extracted.push(output_path);
             }
-            Err(_) => {
+            Err(e) => {
                 let _ = fs::remove_file(&output_path);
+                if e.is_fatal() {
+                    report.halted_reason = Some(format!("{}", e));
+                    break;
+                }
                 report.failed += 1;
                 continue;
             }
@@ -241,12 +331,54 @@ pub fn extract_all(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn extract_one_file(
+    i: usize,
+    files: &[RecoveredFile],
+    reader: &DiskReader,
+    output_dir: &Path,
+    counter: &AtomicUsize,
+    total: usize,
+    progress_callback: Option<&(dyn Fn(usize, usize) + Sync)>,
+    halted: &AtomicBool,
+) -> (std::path::PathBuf, ImageFormat, u8, Result<ExtractionResult, ExtractionError>) {
+    let file = &files[i];
+    let tier = ConfidenceTier::from_score(file.confidence);
+    let filename = generate_filename(i, file.format);
+    let output_path = output_dir.join(tier.dirname()).join(&filename);
+
+    let extraction = if halted.load(Ordering::Relaxed) {
+        Err(ExtractionError::Io(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "pipeline halted",
+        )))
+    } else {
+        let result = EXTRACT_BUFFER.with(|cell| {
+            let mut buffer = cell.borrow_mut();
+            extract_single(file, reader, &output_path, &mut buffer)
+        });
+        if let Err(ref e) = result {
+            if e.is_fatal() {
+                halted.store(true, Ordering::Relaxed);
+            }
+        }
+        result
+    };
+
+    if let Some(cb) = progress_callback {
+        let current = counter.fetch_add(1, Ordering::Relaxed);
+        cb(current, total);
+    }
+
+    (output_path, file.format, file.confidence, extraction)
+}
+
 fn extract_single(
     file: &RecoveredFile,
     reader: &DiskReader,
     output_path: &Path,
     buffer: &mut AlignedBuffer,
-) -> io::Result<ExtractionResult> {
+) -> Result<ExtractionResult, ExtractionError> {
     let ranges = file.fragments.as_slice();
     if ranges.is_empty() {
         return Ok(ExtractionResult {
@@ -291,54 +423,107 @@ fn extract_single(
         }
     }
 
-    let mut out = File::create(output_path)?;
+    let first_range = &ranges[0];
+    let head_aligned = first_range.start & ALIGNMENT_MASK;
+    let head_skip = (first_range.start - head_aligned) as usize;
+    let valid_head = match reader.read_at(head_aligned, buffer) {
+        Ok(n) => {
+            if n > head_skip + VALIDATION_HEADER_SIZE {
+                let head_bytes = &buffer.as_slice()[head_skip..];
+                match file.format {
+                    ImageFormat::Jpeg => head_bytes[..2] == JPEG_SOI,
+                    ImageFormat::Png => head_bytes.len() >= 8 && head_bytes[..8] == PNG_SIGNATURE,
+                }
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    };
+    if !valid_head {
+        return Ok(ExtractionResult {
+            zero_filled_sectors: 0,
+            total_sectors: 0,
+            head: [0u8; VALIDATION_HEADER_SIZE],
+            tail: [0u8; VALIDATION_HEADER_SIZE],
+            bytes_written: 0,
+        });
+    }
+
+    let tmp_path = output_path.with_extension("tmp");
+    let mut out = File::create(&tmp_path).map_err(ExtractionError::from)?;
+
+    let estimated_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+    try_preallocate(&out, estimated_size);
+
     let mut zero_filled_sectors: usize = 0;
     let mut total_sectors: usize = 0;
     let mut head = [0u8; VALIDATION_HEADER_SIZE];
     let mut tail = [0u8; VALIDATION_HEADER_SIZE];
     let mut bytes_written: usize = 0;
 
-    for range in ranges {
-        let mut offset = range.start;
+    let write_result = (|| -> Result<(), ExtractionError> {
+        for range in ranges {
+            let mut offset = range.start;
 
-        while offset < range.end {
-            let aligned_offset = offset & ALIGNMENT_MASK;
-            let skip = (offset - aligned_offset) as usize;
-            total_sectors += 1;
+            while offset < range.end {
+                let aligned_offset = offset & ALIGNMENT_MASK;
+                let skip = (offset - aligned_offset) as usize;
+                total_sectors += 1;
 
-            let write_data;
-            let to_write;
+                let write_data;
+                let to_write;
 
-            match reader.read_at(aligned_offset, buffer) {
-                Ok(n) => {
-                    if n == 0 {
-                        break;
-                    }
-                    let available = n.saturating_sub(skip);
-                    let remaining = (range.end - offset) as usize;
-                    to_write = available.min(remaining);
-                    write_data = &buffer.as_slice()[skip..skip + to_write];
-                }
-                Err(e) => {
-                    if is_recoverable_io_error(&e) {
+                match reader.read_at(aligned_offset, buffer) {
+                    Ok(n) => {
+                        if n == 0 {
+                            break;
+                        }
+                        let available = n.saturating_sub(skip);
                         let remaining = (range.end - offset) as usize;
-                        to_write = remaining.min(SECTOR_SIZE - skip);
-                        write_data = &zero_sector()[..to_write];
-                        zero_filled_sectors += 1;
-                    } else {
-                        return Err(e);
+                        to_write = available.min(remaining);
+                        write_data = &buffer.as_slice()[skip..skip + to_write];
+                    }
+                    Err(e) => {
+                        if is_recoverable_io_error(&e) {
+                            let remaining = (range.end - offset) as usize;
+                            to_write = remaining.min(SECTOR_SIZE - skip);
+                            write_data = &zero_sector()[..to_write];
+                            zero_filled_sectors += 1;
+                        } else {
+                            return Err(ExtractionError::Io(e));
+                        }
                     }
                 }
-            }
 
-            if to_write > 0 {
-                out.write_all(write_data)?;
-                track_head_tail(write_data, bytes_written, &mut head, &mut tail);
-                bytes_written += to_write;
-            }
+                if to_write > 0 {
+                    out.write_all(write_data).map_err(ExtractionError::from)?;
+                    track_head_tail(write_data, bytes_written, &mut head, &mut tail);
+                    bytes_written += to_write;
+                }
 
-            offset += to_write as u64;
+                offset += to_write as u64;
+            }
         }
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        drop(out);
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    if let Err(e) = out.sync_all() {
+        drop(out);
+        let _ = fs::remove_file(&tmp_path);
+        return Err(ExtractionError::from(e));
+    }
+    drop(out);
+
+    if let Err(e) = fs::rename(&tmp_path, output_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(ExtractionError::from(e));
     }
 
     Ok(ExtractionResult {
