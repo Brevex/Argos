@@ -234,6 +234,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     }
 
     println!();
+    println!();
     println!("Analyzing fragments...");
 
     let counts = map.count_by_kind();
@@ -317,6 +318,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     let stats = RecoveryStats::from_recovered(&recovered);
 
     println!();
+    println!();
     println!(
         "Found {} recoverable images:",
         style(stats.total_files()).green().bold()
@@ -355,6 +357,7 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     pb.finish_with_message("done");
 
     println!();
+    println!();
     println!("{}", style("Recovery Complete!").green().bold());
     println!();
     println!(
@@ -363,19 +366,19 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
     );
     if report.high_confidence > 0 {
         println!(
-            "  High confidence:    {}",
+            "High confidence:    {}",
             style(report.high_confidence).green()
         );
     }
     if report.partial_confidence > 0 {
         println!(
-            "  Partial confidence: {}",
+            "Partial confidence: {}",
             style(report.partial_confidence).yellow()
         );
     }
     if report.low_confidence > 0 {
         println!(
-            "  Low confidence:     {}",
+            "Low confidence:     {}",
             style(report.low_confidence).dim()
         );
     }
@@ -383,33 +386,34 @@ fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
         println!("Duplicates removed: {}", style(report.dedup_skipped).cyan());
     }
     if report.failed > 0 {
-        println!("Failed:           {}", style(report.failed).yellow());
+        println!("Failed:             {}", style(report.failed).yellow());
         if report.tail_check_failed > 0 {
             println!(
-                "  No valid footer:  {}",
+                "No valid footer:    {}",
                 style(report.tail_check_failed).dim()
             );
         }
         if report.head_validation_failed > 0 {
             println!(
-                "  Invalid header:   {}",
+                "Invalid header:     {}",
                 style(report.head_validation_failed).dim()
             );
         }
         if report.decode_failed > 0 {
             println!(
-                "  Decode errors:    {} (kept as partial)",
+                "Decode errors:      {} (kept as partial)",
                 style(report.decode_failed).dim()
             );
         }
     }
     if report.corrupt_discarded > 0 {
         println!(
-            "Corrupt/dropped:  {}",
+            "Corrupt/dropped:    {}",
             style(report.corrupt_discarded).yellow()
         );
     }
-    println!("Output folder:    {:?}", output_path);
+    println!();
+    println!("Output folder:      {:?}", output_path);
     println!();
 
     Ok(())
