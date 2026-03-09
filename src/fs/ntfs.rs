@@ -71,7 +71,7 @@ pub fn detect_ntfs(
         1u32 << (-record_size_raw as u32)
     };
 
-    if mft_record_size < 256 || mft_record_size > 65536 {
+    if !(256..=65536).contains(&mft_record_size) {
         return None;
     }
 

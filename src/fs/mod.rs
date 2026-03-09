@@ -107,3 +107,14 @@ pub(crate) fn read_exact(
 
     true
 }
+
+#[inline]
+pub(crate) fn push_or_coalesce(extents: &mut Vec<(u64, u64)>, offset: u64, length: u64) {
+    if let Some((last_off, last_len)) = extents.last_mut() {
+        if *last_off + *last_len == offset {
+            *last_len += length;
+            return;
+        }
+    }
+    extents.push((offset, length));
+}

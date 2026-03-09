@@ -28,7 +28,7 @@ impl Fat32Info {
 
     #[inline]
     pub fn is_valid_cluster(&self, cluster: u32) -> bool {
-        cluster >= 2 && cluster < 0x0FFF_FFF8 && (cluster - 2) < self.total_data_clusters
+        (2..0x0FFF_FFF8).contains(&cluster) && (cluster - 2) < self.total_data_clusters
     }
 }
 
@@ -83,8 +83,7 @@ pub fn detect_fat32(
         .saturating_sub(reserved_sectors as u32 + num_fats as u32 * fat_size_sectors);
     let total_data_clusters = data_sectors / sectors_per_cluster as u32;
 
-    if root_cluster < 2 || root_cluster >= 0x0FFF_FFF8 || (root_cluster - 2) >= total_data_clusters
-    {
+    if !(2..0x0FFF_FFF8).contains(&root_cluster) || (root_cluster - 2) >= total_data_clusters {
         return None;
     }
 
@@ -124,7 +123,7 @@ pub fn collect_dir_hints(
         buffer,
         &mut dir_data,
     );
-    scan_directory_entries(&dir_data, info, &fat_cache, reader, buffer, hints);
+    scan_directory_entries(&dir_data, info, &fat_cache, hints);
 }
 
 fn load_fat_cache(
@@ -217,21 +216,11 @@ fn read_cluster_chain(
     }
 }
 
-fn scan_directory_entries(
-    dir_data: &[u8],
-    info: &Fat32Info,
-    fat: &[u32],
-    _reader: &DiskReader,
-    _buffer: &mut AlignedBuffer,
-    hints: &mut FsHintMap,
-) {
-    let mut scanned = 0usize;
-
-    for entry in dir_data.chunks_exact(32) {
+fn scan_directory_entries(dir_data: &[u8], info: &Fat32Info, fat: &[u32], hints: &mut FsHintMap) {
+    for (scanned, entry) in dir_data.chunks_exact(32).enumerate() {
         if scanned >= MAX_DIR_ENTRIES {
             break;
         }
-        scanned += 1;
 
         if entry[0] == 0x00 {
             break;
@@ -302,16 +291,7 @@ fn follow_chain_extents(
         let offset = info.cluster_to_offset(cluster);
         let len = cluster_bytes.min(remaining);
 
-        if let Some(last) = extents.last_mut() {
-            let (last_off, last_len): &mut (u64, u64) = last;
-            if *last_off + *last_len == offset {
-                *last_len += len;
-            } else {
-                extents.push((offset, len));
-            }
-        } else {
-            extents.push((offset, len));
-        }
+        super::push_or_coalesce(&mut extents, offset, len);
 
         remaining = remaining.saturating_sub(cluster_bytes);
         chain_len += 1;

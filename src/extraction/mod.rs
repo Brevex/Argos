@@ -7,7 +7,9 @@ use crate::core::{
 };
 use crate::format::jpeg::{JPEG_EOI, JPEG_SOI};
 use crate::format::png::{IEND_CHUNK_TYPE, PNG_SIGNATURE};
-use crate::io::{is_recoverable_io_error, zero_sector, AlignedBuffer, DiskReader, ALIGNMENT_MASK};
+use crate::io::{
+    is_recoverable_io_error, zero_sector, AlignedBuffer, DiskReader, ALIGNMENT_MASK, SECTOR_SIZE,
+};
 use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -197,8 +199,8 @@ pub fn extract_all(
                     report.decode_failed += 1;
                 }
 
-                match hash_file(&output_path) {
-                    Ok(hash) => match exact_hashes.entry(hash) {
+                if let Ok(hash) = hash_file(&output_path) {
+                    match exact_hashes.entry(hash) {
                         std::collections::hash_map::Entry::Vacant(e) => {
                             e.insert((output_path.clone(), confidence));
                         }
@@ -209,20 +211,7 @@ pub fn extract_all(
 
                                 report.extracted.retain(|p| p != existing_path);
 
-                                match ConfidenceTier::from_score(*existing_confidence) {
-                                    ConfidenceTier::High => {
-                                        report.high_confidence =
-                                            report.high_confidence.saturating_sub(1)
-                                    }
-                                    ConfidenceTier::Partial => {
-                                        report.partial_confidence =
-                                            report.partial_confidence.saturating_sub(1)
-                                    }
-                                    ConfidenceTier::Low => {
-                                        report.low_confidence =
-                                            report.low_confidence.saturating_sub(1)
-                                    }
-                                }
+                                report.decrement_tier(*existing_confidence);
                                 e.insert((output_path.clone(), confidence));
                             } else {
                                 let _ = fs::remove_file(&output_path);
@@ -230,15 +219,10 @@ pub fn extract_all(
                                 continue;
                             }
                         }
-                    },
-                    Err(_) => {}
+                    }
                 }
 
-                match ConfidenceTier::from_score(confidence) {
-                    ConfidenceTier::High => report.high_confidence += 1,
-                    ConfidenceTier::Partial => report.partial_confidence += 1,
-                    ConfidenceTier::Low => report.low_confidence += 1,
-                }
+                report.increment_tier(confidence);
                 report.extracted.push(output_path);
             }
             Err(_) => {
@@ -338,7 +322,7 @@ fn extract_single(
                 Err(e) => {
                     if is_recoverable_io_error(&e) {
                         let remaining = (range.end - offset) as usize;
-                        to_write = remaining.min(4096 - skip);
+                        to_write = remaining.min(SECTOR_SIZE - skip);
                         write_data = &zero_sector()[..to_write];
                         zero_filled_sectors += 1;
                     } else {

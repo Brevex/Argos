@@ -165,6 +165,7 @@ impl<'a> Iterator for PngChunkIterator<'a> {
 
 const PNG_BREAK_ZERO_THRESHOLD: usize = 512;
 const PNG_CONTINUATION_MIN_ENTROPY: f32 = 5.0;
+const MAX_IDAT_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn detect_png_break(data: &[u8]) -> Option<usize> {
     if data.len() < 8 || data[..8] != PNG_SIGNATURE {
@@ -260,8 +261,8 @@ pub fn matches_png_continuation(cluster_data: &[u8]) -> bool {
     }
 
     let total = 4 + 4 + length + 4;
-    if total > 16 * 1024 * 1024 || total > cluster_data.len() {
-        return length > 0 && length < 16 * 1024 * 1024;
+    if total > MAX_IDAT_CHUNK_SIZE || total > cluster_data.len() {
+        return length > 0 && length < MAX_IDAT_CHUNK_SIZE;
     }
 
     let mut hasher = crc32fast::Hasher::new();

@@ -89,19 +89,25 @@ pub fn reassemble(
     recovered
 }
 
+const ZERO_FILL_CHECK_SIZE: usize = 512;
+
+fn classify_break_confidence(data: &[u8], offset: usize) -> BreakConfidence {
+    if data
+        .get(offset..offset + ZERO_FILL_CHECK_SIZE)
+        .is_some_and(|s| s.iter().all(|&b| b == 0))
+    {
+        BreakConfidence::Definite
+    } else {
+        BreakConfidence::Probable
+    }
+}
+
 fn detect_jpeg_break_at(data: &[u8]) -> Option<BreakPoint> {
     let sos_offset = find_sos_offset(data)?;
     let result = detect_jpeg_break(data, sos_offset)?;
     Some(BreakPoint {
         break_offset: result.offset as Offset,
-        confidence: if data
-            .get(result.offset..result.offset + 512)
-            .is_some_and(|s| s.iter().all(|&b| b == 0))
-        {
-            BreakConfidence::Definite
-        } else {
-            BreakConfidence::Probable
-        },
+        confidence: classify_break_confidence(data, result.offset),
         signature: ContinuationSignature::JpegScanData,
         last_rst_index: result.last_rst_index,
     })
@@ -111,14 +117,7 @@ fn detect_png_break_at(data: &[u8]) -> Option<BreakPoint> {
     let relative = detect_png_break(data)?;
     Some(BreakPoint {
         break_offset: relative as Offset,
-        confidence: if data
-            .get(relative..relative + 512)
-            .is_some_and(|s| s.iter().all(|&b| b == 0))
-        {
-            BreakConfidence::Definite
-        } else {
-            BreakConfidence::Probable
-        },
+        confidence: classify_break_confidence(data, relative),
         signature: ContinuationSignature::PngIdat,
         last_rst_index: None,
     })
@@ -341,6 +340,7 @@ fn build_chain(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_hint_guided(
     header: &Fragment,
     first_fragments: &[Range<u64>],
@@ -391,6 +391,7 @@ fn try_hint_guided(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_complete_with_footer(
     header: &Fragment,
     fragments: &[Range<u64>],

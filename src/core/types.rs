@@ -12,19 +12,11 @@ const FRAGMENT_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FRAGMENT_CAPACITY: usize = FRAGMENT_BUDGET_BYTES / std::mem::size_of::<Fragment>();
 
 pub const ICON_MAX_DIMENSION: u32 = 256;
-pub const ASSET_UPPER_DIMENSION: u32 = 512;
 pub const FAVICON_MAX_DIMENSION: u32 = 64;
-pub const MIN_PHOTO_WIDTH: u32 = 320;
-pub const MIN_PHOTO_HEIGHT: u32 = 240;
-pub const MIN_PHOTO_MEGAPIXELS: f32 = 0.05;
 pub const MIN_PHOTO_BYTES: u64 = 50 * KB;
 pub const LOW_ENTROPY_THRESHOLD: f32 = 5.5;
 pub const MIN_SCAN_DATA_ENTROPY: f32 = 6.5;
 pub const EXTREME_ASPECT_RATIO: u32 = 5;
-pub const LOW_MARKER_COUNT_THRESHOLD: u16 = 4;
-pub const LOW_QUALITY_MAX_DIMENSION: u32 = 640;
-pub const MIN_PNG_CHUNK_VARIETY: u8 = 3;
-pub const MIN_PNG_VARIETY_DIMENSION: u32 = 512;
 pub const CORRUPT_SECTOR_RATIO: usize = 4;
 pub const VALIDATION_HEADER_SIZE: usize = 16;
 pub const SMALL_BUFFER_SIZE: usize = 64 * 1024;
@@ -119,13 +111,6 @@ impl Fragment {
             }
             _ => true,
         }
-    }
-
-    pub fn is_header(&self) -> bool {
-        matches!(
-            self.kind,
-            FragmentKind::JpegHeader | FragmentKind::PngHeader
-        )
     }
 }
 
@@ -232,7 +217,7 @@ impl ImageFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct JpegMetadata {
     pub has_exif: bool,
     pub has_icc_profile: bool,
@@ -243,26 +228,13 @@ pub struct JpegMetadata {
     pub scan_data_entropy: f32,
 }
 
-impl Default for JpegMetadata {
-    fn default() -> Self {
-        Self {
-            has_exif: false,
-            has_icc_profile: false,
-            has_jfif: false,
-            quantization_quality: QuantizationQuality::Unknown,
-            marker_count: 0,
-            has_sos: false,
-            scan_data_entropy: 0.0,
-        }
-    }
-}
-
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QuantizationQuality {
     High,
     Medium,
     Low,
+    #[default]
     Unknown,
 }
 
@@ -481,4 +453,24 @@ pub struct ExtractionReport {
     pub tail_check_failed: usize,
     pub head_validation_failed: usize,
     pub decode_failed: usize,
+}
+
+impl ExtractionReport {
+    pub fn increment_tier(&mut self, score: u8) {
+        match ConfidenceTier::from_score(score) {
+            ConfidenceTier::High => self.high_confidence += 1,
+            ConfidenceTier::Partial => self.partial_confidence += 1,
+            ConfidenceTier::Low => self.low_confidence += 1,
+        }
+    }
+
+    pub fn decrement_tier(&mut self, score: u8) {
+        match ConfidenceTier::from_score(score) {
+            ConfidenceTier::High => self.high_confidence = self.high_confidence.saturating_sub(1),
+            ConfidenceTier::Partial => {
+                self.partial_confidence = self.partial_confidence.saturating_sub(1)
+            }
+            ConfidenceTier::Low => self.low_confidence = self.low_confidence.saturating_sub(1),
+        }
+    }
 }

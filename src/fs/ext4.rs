@@ -50,64 +50,10 @@ pub fn detect_ext4(
         return None;
     }
 
-    let magic = u16::from_le_bytes([sb[0x38], sb[0x39]]);
-    if magic != EXT4_MAGIC {
-        return None;
-    }
-
-    let s_log_block_size = u32::from_le_bytes([sb[0x18], sb[0x19], sb[0x1A], sb[0x1B]]);
-    let block_size = 1024u32.checked_shl(s_log_block_size)?;
-
-    if !(1024..=65536).contains(&block_size) || !block_size.is_power_of_two() {
-        return None;
-    }
-
-    let inodes_count = u32::from_le_bytes([sb[0x00], sb[0x01], sb[0x02], sb[0x03]]);
-    let blocks_count_lo = u32::from_le_bytes([sb[0x04], sb[0x05], sb[0x06], sb[0x07]]);
-    let blocks_per_group = u32::from_le_bytes([sb[0x20], sb[0x21], sb[0x22], sb[0x23]]);
-    let inodes_per_group = u32::from_le_bytes([sb[0x28], sb[0x29], sb[0x2A], sb[0x2B]]);
-    let inode_size = u16::from_le_bytes([sb[0x58], sb[0x59]]);
-
-    if blocks_per_group == 0 || inodes_per_group == 0 || inode_size < 128 {
-        return None;
-    }
-
-    let s_feature_incompat = u32::from_le_bytes([sb[0x60], sb[0x61], sb[0x62], sb[0x63]]);
-    let has_extents = s_feature_incompat & INCOMPAT_EXTENTS != 0;
-    let is_64bit = s_feature_incompat & INCOMPAT_64BIT != 0;
-
-    let desc_size = if is_64bit {
-        let ds = u16::from_le_bytes([sb[0xFE], sb[0xFF]]);
-        if ds >= 64 {
-            ds
-        } else {
-            32
-        }
-    } else {
-        32
-    };
-
-    let group_count = (blocks_count_lo + blocks_per_group - 1) / blocks_per_group;
-    if group_count == 0 {
-        return None;
-    }
-
-    let gdt_block = if block_size == 1024 { 2 } else { 1 };
-    let gdt_offset = partition_offset + gdt_block as u64 * block_size as u64;
-
-    Some(Ext4Info {
-        partition_offset,
-        block_size,
-        blocks_per_group,
-        inodes_per_group,
-        inode_size,
-        inodes_count,
-        group_count,
-        has_extents,
-        is_64bit,
-        desc_size,
-        gdt_offset,
-    })
+    let mut info = parse_superblock_common(&sb)?;
+    info.partition_offset = partition_offset;
+    info.gdt_offset += partition_offset;
+    Some(info)
 }
 
 fn read_gdt(reader: &DiskReader, info: &Ext4Info, buffer: &mut AlignedBuffer) -> Vec<GroupDesc> {
@@ -186,15 +132,7 @@ fn parse_extent_leaves(data: &[u8], count: u16, info: &Ext4Info) -> Option<Vec<(
         let abs_offset = info.block_to_offset(phys_block);
         let length = len_blocks * info.block_size as u64;
 
-        if let Some(last) = extents.last_mut() {
-            let (last_off, last_len): &mut (u64, u64) = last;
-            if *last_off + *last_len == abs_offset {
-                *last_len += length;
-                continue;
-            }
-        }
-
-        extents.push((abs_offset, length));
+        super::push_or_coalesce(&mut extents, abs_offset, length);
     }
 
     if extents.is_empty() {
@@ -268,14 +206,7 @@ fn parse_extent_tree_block(
             parse_extent_tree_block(reader, info, child_block, remaining_depth - 1, buffer)
         {
             for extent in child_extents {
-                if let Some(last) = all_extents.last_mut() {
-                    let (last_off, last_len): &mut (u64, u64) = last;
-                    if *last_off + *last_len == extent.0 {
-                        *last_len += extent.1;
-                        continue;
-                    }
-                }
-                all_extents.push(extent);
+                super::push_or_coalesce(&mut all_extents, extent.0, extent.1);
             }
         }
     }
@@ -338,14 +269,7 @@ pub fn parse_full_extent_tree(
             parse_extent_tree_block(reader, info, child_block, eh_depth, buffer)
         {
             for extent in child_extents {
-                if let Some(last) = all_extents.last_mut() {
-                    let (last_off, last_len): &mut (u64, u64) = last;
-                    if *last_off + *last_len == extent.0 {
-                        *last_len += extent.1;
-                        continue;
-                    }
-                }
-                all_extents.push(extent);
+                super::push_or_coalesce(&mut all_extents, extent.0, extent.1);
             }
         }
     }
@@ -463,6 +387,10 @@ fn parse_deleted_inode_deep(
 }
 
 pub fn parse_superblock_bytes(sb: &[u8]) -> Option<Ext4Info> {
+    parse_superblock_common(sb)
+}
+
+fn parse_superblock_common(sb: &[u8]) -> Option<Ext4Info> {
     if sb.len() < 256 {
         return None;
     }
@@ -504,7 +432,7 @@ pub fn parse_superblock_bytes(sb: &[u8]) -> Option<Ext4Info> {
         32
     };
 
-    let group_count = (blocks_count_lo + blocks_per_group - 1) / blocks_per_group;
+    let group_count = blocks_count_lo.div_ceil(blocks_per_group);
 
     let gdt_block: u64 = if block_size == 1024 { 2 } else { 1 };
     let gdt_offset = gdt_block * block_size as u64;

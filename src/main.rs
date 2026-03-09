@@ -4,7 +4,7 @@ use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use argos::core::FragmentMap;
 use argos::device::{device_selection_options, discover_block_devices};
@@ -134,11 +134,11 @@ fn run_interactive_wizard(skip_confirm: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_scan(device_path: &PathBuf, output_path: &PathBuf) -> Result<()> {
+fn run_scan(device_path: &Path, output_path: &Path) -> Result<()> {
     println!();
 
     let reader = io::DiskReader::open(device_path)
-        .context(format!("Failed to open device: {:?}", device_path))?;
+        .with_context(|| format!("Failed to open device: {:?}", device_path))?;
 
     let disk_size = reader.size();
     let mut scanner = DiskScanner::new(reader);
