@@ -48,6 +48,11 @@ Run tests with verbose output
 cargo test -- --nocapture
 ```
 
+Run benchmark tests 
+```bash
+cargo bench
+```
+
 ## Warnings
 1. **Run as root**: Required to access block devices
 2. **Read-only operation**: Argos NEVER modifies the source device
