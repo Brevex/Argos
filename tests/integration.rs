@@ -19,6 +19,7 @@ fn create_test_jpeg() -> Vec<u8> {
     jpeg.extend_from_slice(&[0xFF, 0xDB]);
     jpeg.extend_from_slice(&[0x00, 0x43]);
     jpeg.extend_from_slice(&[0x00]);
+
     for _ in 0..64 {
         jpeg.push(10);
     }
@@ -34,6 +35,7 @@ fn create_test_jpeg() -> Vec<u8> {
     jpeg.extend_from_slice(&[0xFF, 0xC4]);
     jpeg.extend_from_slice(&[0x00, 0x1F]);
     jpeg.extend_from_slice(&[0x00]);
+
     for i in 0u8..28 {
         jpeg.push(i.wrapping_mul(37));
     }
@@ -56,6 +58,7 @@ fn create_test_jpeg() -> Vec<u8> {
 fn create_test_disk(size_mb: usize, jpeg_offsets: &[usize]) -> Vec<u8> {
     let size = size_mb * 1024 * 1024;
     let mut disk = Vec::with_capacity(size);
+
     for i in 0..size {
         disk.push(((i.wrapping_mul(97).wrapping_add(13)) % 256) as u8);
     }
@@ -353,4 +356,165 @@ fn test_dedup_distinct_images_kept() {
         "Both distinct JPEGs should survive dedup"
     );
     assert_eq!(report.dedup_skipped, 0, "No duplicates to skip");
+}
+
+#[test]
+fn test_png_recovery_pipeline() {
+    let dir = tempdir().unwrap();
+    let disk_path = dir.path().join("png_disk.img");
+    let output_dir = dir.path().join("recovered");
+    let png = create_test_png();
+    let mut disk_data = vec![0u8; 2 * 1024 * 1024];
+
+    for i in 0..disk_data.len() {
+        disk_data[i] = ((i.wrapping_mul(79).wrapping_add(31)) % 256) as u8;
+    }
+
+    let offset = 512 * 1024;
+    disk_data[offset..offset + png.len()].copy_from_slice(&png);
+    fs::write(&disk_path, &disk_data).unwrap();
+
+    let reader = DiskReader::open(&disk_path).unwrap();
+    let mut scanner = DiskScanner::new(reader);
+    let mut map = FragmentMap::new();
+    while let Some((off, data)) = scanner.next_block().unwrap() {
+        scan_block(off, data, &mut map);
+    }
+    map.sort_by_offset();
+    map.dedup();
+    let reader = scanner.into_reader();
+    let recovered = linear_carve(&map, &reader, None);
+    let stats = RecoveryStats::from_recovered(&recovered);
+
+    assert!(
+        map.png_headers().len() >= 1 || stats.png_linear >= 1,
+        "Scanner should find at least the PNG header (found {} headers, {} footers, {} recovered)",
+        map.png_headers().len(),
+        map.png_footers().len(),
+        stats.png_linear
+    );
+
+    if !recovered.is_empty() {
+        let report = extract_all(&recovered, &reader, &output_dir, None).unwrap();
+        for path in &report.extracted {
+            let data = fs::read(path).unwrap();
+            assert_eq!(
+                &data[0..8],
+                &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                "Should start with PNG signature"
+            );
+        }
+    }
+}
+
+fn create_test_png() -> Vec<u8> {
+    let width: u32 = 200;
+    let height: u32 = 200;
+    let sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    let mut ihdr_payload = Vec::new();
+    ihdr_payload.extend_from_slice(&width.to_be_bytes());
+    ihdr_payload.extend_from_slice(&height.to_be_bytes());
+    ihdr_payload.push(8);
+    ihdr_payload.push(2);
+    ihdr_payload.extend_from_slice(&[0, 0, 0]);
+
+    let ihdr_chunk = make_chunk(b"IHDR", &ihdr_payload);
+    let text_chunk = make_chunk(b"tEXt", b"Comment\x00Test Image");
+    let mut raw_data = Vec::new();
+
+    for row in 0..height {
+        raw_data.push(0);
+        for col in 0..(width * 3) {
+            raw_data.push(((row * 3 + col).wrapping_mul(97).wrapping_add(13) % 251) as u8);
+        }
+    }
+
+    use std::io::Write as _;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&raw_data).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let idat_chunk = make_chunk(b"IDAT", &compressed);
+    let iend_chunk = make_chunk(b"IEND", &[]);
+
+    let mut png = Vec::new();
+    png.extend_from_slice(&sig);
+    png.extend_from_slice(&ihdr_chunk);
+    png.extend_from_slice(&text_chunk);
+    png.extend_from_slice(&idat_chunk);
+    png.extend_from_slice(&iend_chunk);
+    png
+}
+
+fn make_chunk(chunk_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut chunk = Vec::new();
+    chunk.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(chunk_type);
+    chunk.extend_from_slice(payload);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(chunk_type);
+    hasher.update(payload);
+    let crc = hasher.finalize();
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    chunk
+}
+
+#[test]
+fn test_scan_block_finds_no_fragments_in_zeros() {
+    let data = vec![0u8; 4096 * 10];
+    let mut map = FragmentMap::new();
+    scan_block(0, &data, &mut map);
+    assert!(map.is_empty(), "All-zero data should yield no fragments");
+}
+
+#[test]
+fn test_scan_block_finds_jpeg_header() {
+    let jpeg = create_test_jpeg();
+    let mut data = vec![0u8; 4096];
+
+    for i in 0..data.len() {
+        data[i] = ((i.wrapping_mul(131).wrapping_add(7)) % 256) as u8;
+    }
+    data[0..jpeg.len().min(4096)].copy_from_slice(&jpeg[..jpeg.len().min(4096)]);
+
+    let mut frags = Vec::new();
+    scan_block(0, &data, &mut frags);
+    assert!(
+        frags
+            .iter()
+            .any(|f| f.kind == argos::core::FragmentKind::JpegHeader),
+        "Should find JPEG header"
+    );
+}
+
+#[test]
+fn test_recovery_stats_zeroes_when_empty() {
+    let recovered = vec![];
+    let stats = RecoveryStats::from_recovered(&recovered);
+    assert_eq!(stats.jpeg_linear, 0);
+    assert_eq!(stats.png_linear, 0);
+}
+
+#[test]
+fn test_output_directory_creation() {
+    let dir = tempdir().unwrap();
+    let disk_path = dir.path().join("disk.img");
+    let output_dir = dir.path().join("nested").join("deep").join("recovered");
+
+    let disk_data = create_test_disk(2, &[4096]);
+    fs::write(&disk_path, &disk_data).unwrap();
+
+    let reader = DiskReader::open(&disk_path).unwrap();
+    let mut scanner = DiskScanner::new(reader);
+    let mut map = FragmentMap::new();
+    while let Some((off, data)) = scanner.next_block().unwrap() {
+        scan_block(off, data, &mut map);
+    }
+    map.sort_by_offset();
+    map.dedup();
+    let reader = scanner.into_reader();
+    let recovered = linear_carve(&map, &reader, None);
+    let _report = extract_all(&recovered, &reader, &output_dir, None).unwrap();
+    assert!(output_dir.exists(), "Output directory should be created");
 }

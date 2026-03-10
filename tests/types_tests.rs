@@ -1,6 +1,6 @@
 use argos::core::{
-    BlockDevice, ConfidenceTier, DeviceType, Fragment, FragmentKind, FragmentMap, JpegMetadata,
-    PngMetadata, QuantizationQuality,
+    BlockDevice, ConfidenceTier, DeviceType, ExtractionError, Fragment, FragmentKind, FragmentMap,
+    ImageFormat, JpegMetadata, PngMetadata, QuantizationQuality,
 };
 
 #[test]
@@ -175,4 +175,184 @@ fn test_score_png_screen_icon() {
         "Screen icon should be low confidence, got {}",
         score
     );
+}
+
+#[test]
+fn test_fragment_map_sort_by_offset() {
+    let mut map = FragmentMap::new();
+    map.push(Fragment::new(3000, FragmentKind::JpegHeader, 7.0));
+    map.push(Fragment::new(1000, FragmentKind::JpegHeader, 7.5));
+    map.push(Fragment::new(2000, FragmentKind::JpegHeader, 7.2));
+    map.sort_by_offset();
+    let offsets: Vec<_> = map.jpeg_headers().iter().map(|f| f.offset).collect();
+    assert_eq!(offsets, vec![1000, 2000, 3000]);
+}
+
+#[test]
+fn test_fragment_map_dedup_removes_same_offset() {
+    let mut map = FragmentMap::new();
+    map.push(Fragment::new(1000, FragmentKind::PngHeader, 7.0));
+    map.push(Fragment::new(1000, FragmentKind::PngHeader, 7.5));
+    map.push(Fragment::new(2000, FragmentKind::PngHeader, 7.0));
+    map.sort_by_offset();
+    map.dedup();
+    assert_eq!(map.png_headers().len(), 2);
+}
+
+#[test]
+fn test_fragment_map_count_by_kind() {
+    let mut map = FragmentMap::new();
+    map.push(Fragment::new(0, FragmentKind::JpegHeader, 7.0));
+    map.push(Fragment::new(100, FragmentKind::JpegFooter, 0.0));
+    map.push(Fragment::new(200, FragmentKind::PngHeader, 6.5));
+    map.push(Fragment::new(300, FragmentKind::PngIend, 0.0));
+    map.push(Fragment::new(400, FragmentKind::PngHeader, 7.0));
+    let counts = map.count_by_kind();
+    assert_eq!(counts.jpeg_headers, 1);
+    assert_eq!(counts.jpeg_footers, 1);
+    assert_eq!(counts.png_headers, 2);
+    assert_eq!(counts.png_footers, 1);
+}
+
+#[test]
+fn test_fragment_map_is_empty() {
+    let map = FragmentMap::new();
+    assert!(map.is_empty());
+    assert_eq!(map.len(), 0);
+}
+
+#[test]
+fn test_fragment_map_default() {
+    let map = FragmentMap::default();
+    assert!(map.is_empty());
+}
+
+#[test]
+fn test_fragment_map_with_disk_estimate() {
+    let map = FragmentMap::with_disk_estimate(1_000_000_000);
+    assert!(map.is_empty());
+    assert_eq!(map.len(), 0);
+}
+
+#[test]
+fn test_fragment_map_viable_headers() {
+    let mut map = FragmentMap::new();
+    map.push(Fragment::new(0, FragmentKind::PngHeader, 7.0));
+    map.push(Fragment::new(100, FragmentKind::PngHeader, 3.0));
+    map.push(Fragment::new(200, FragmentKind::PngHeader, 6.8));
+    assert_eq!(map.viable_png_headers().count(), 2);
+}
+
+#[test]
+fn test_image_format_extension_jpeg() {
+    assert_eq!(ImageFormat::Jpeg.extension(), "jpg");
+}
+
+#[test]
+fn test_image_format_extension_png() {
+    assert_eq!(ImageFormat::Png.extension(), "png");
+}
+
+#[test]
+fn test_extraction_error_from_io_write_zero() {
+    let io_err = std::io::Error::new(std::io::ErrorKind::WriteZero, "full");
+    let err = ExtractionError::from(io_err);
+    assert!(matches!(err, ExtractionError::DiskFull));
+}
+
+#[test]
+fn test_extraction_error_is_fatal() {
+    assert!(ExtractionError::DiskFull.is_fatal());
+    assert!(ExtractionError::DeviceDisconnected.is_fatal());
+    let io_err = std::io::Error::new(std::io::ErrorKind::Other, "something");
+    assert!(!ExtractionError::from(io_err).is_fatal());
+}
+
+#[test]
+fn test_extraction_error_display() {
+    assert!(format!("{}", ExtractionError::DiskFull).contains("full"));
+    assert!(format!("{}", ExtractionError::DeviceDisconnected).contains("disconnect"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_extraction_error_from_enospc() {
+    let io_err = std::io::Error::from_raw_os_error(libc::ENOSPC);
+    let err = ExtractionError::from(io_err);
+    assert!(matches!(err, ExtractionError::DiskFull));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_extraction_error_from_eio() {
+    let io_err = std::io::Error::from_raw_os_error(libc::EIO);
+    let err = ExtractionError::from(io_err);
+    assert!(matches!(err, ExtractionError::DeviceDisconnected));
+}
+
+#[test]
+fn test_fragment_has_viable_entropy() {
+    let high = Fragment::new(0, FragmentKind::JpegHeader, 7.5);
+    let low = Fragment::new(0, FragmentKind::JpegHeader, 3.0);
+    assert!(high.has_viable_entropy());
+    assert!(!low.has_viable_entropy());
+}
+
+#[test]
+fn test_confidence_tier_boundaries() {
+    assert_eq!(ConfidenceTier::from_score(0), ConfidenceTier::Low);
+    assert_eq!(ConfidenceTier::from_score(255), ConfidenceTier::High);
+}
+
+#[test]
+fn test_block_device_size_human_bytes() {
+    let dev = BlockDevice {
+        name: "x".into(),
+        device_type: DeviceType::Unknown,
+        size: 500,
+        path: "/dev/x".into(),
+    };
+    assert!(dev.size_human().contains("B"));
+}
+
+#[test]
+fn test_block_device_size_human_kb() {
+    let dev = BlockDevice {
+        name: "x".into(),
+        device_type: DeviceType::Unknown,
+        size: 2048,
+        path: "/dev/x".into(),
+    };
+    assert!(dev.size_human().contains("KB"));
+}
+
+#[test]
+fn test_block_device_size_human_mb() {
+    let dev = BlockDevice {
+        name: "x".into(),
+        device_type: DeviceType::Unknown,
+        size: 5_000_000,
+        path: "/dev/x".into(),
+    };
+    assert!(dev.size_human().contains("MB"));
+}
+
+#[test]
+fn test_block_device_size_human_gb() {
+    let dev = BlockDevice {
+        name: "x".into(),
+        device_type: DeviceType::Unknown,
+        size: 5_000_000_000,
+        path: "/dev/x".into(),
+    };
+    assert!(dev.size_human().contains("GB"));
+}
+
+#[test]
+fn test_device_type_display() {
+    assert_eq!(format!("{}", DeviceType::Hdd), "HDD");
+    assert_eq!(format!("{}", DeviceType::Ssd), "SSD");
+    assert_eq!(format!("{}", DeviceType::NVMe), "NVMe");
+    assert_eq!(format!("{}", DeviceType::Usb), "USB");
+    assert_eq!(format!("{}", DeviceType::Unknown), "Unknown");
 }

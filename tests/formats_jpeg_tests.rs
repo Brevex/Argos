@@ -1,5 +1,6 @@
 use argos::format::jpeg::{
-    detect_jpeg_break, find_sos_offset, is_valid_marker, matches_jpeg_continuation, validate_jpeg,
+    candidate_score, detect_jpeg_break, find_sos_offset, is_valid_marker,
+    matches_jpeg_continuation, validate_jpeg,
 };
 
 #[test]
@@ -119,4 +120,154 @@ fn test_matches_jpeg_continuation_high_entropy() {
 fn test_matches_jpeg_continuation_low_entropy() {
     let data = vec![0x00u8; 64];
     assert!(!matches_jpeg_continuation(&data));
+}
+
+#[test]
+fn test_validate_jpeg_minimum_size() {
+    let data = [0xFF, 0xD8, 0xFF, 0xE0, 0x00];
+    assert!(validate_jpeg(&data).is_none());
+}
+
+#[test]
+fn test_validate_jpeg_no_soi() {
+    let data = [
+        0x00, 0x00, 0xFF, 0xE0, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    assert!(validate_jpeg(&data).is_none());
+}
+
+#[test]
+fn test_validate_jpeg_truncated_segment_length() {
+    let mut jpeg = Vec::new();
+    jpeg.extend_from_slice(&[0xFF, 0xD8]);
+    jpeg.extend_from_slice(&[0xFF, 0xE0, 0x10, 0x00]);
+    jpeg.extend_from_slice(&[0x00; 14]);
+
+    let _ = validate_jpeg(&jpeg);
+}
+
+#[test]
+fn test_validate_jpeg_progressive_sof() {
+    let mut jpeg = Vec::new();
+    jpeg.extend_from_slice(&[0xFF, 0xD8]);
+    jpeg.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x0B, 0x08]);
+    jpeg.extend_from_slice(&[0x03, 0x00]);
+    jpeg.extend_from_slice(&[0x04, 0x00]);
+    jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+
+    let info = validate_jpeg(&jpeg);
+    assert!(
+        info.is_some(),
+        "Progressive JPEG (SOF2) should be recognized"
+    );
+    let info = info.unwrap();
+    assert_eq!(info.width, 1024);
+    assert_eq!(info.height, 768);
+}
+
+#[test]
+fn test_is_valid_marker_full_range() {
+    for m in 0xC0..=0xCF {
+        assert!(is_valid_marker(m), "0x{:02X} should be valid", m);
+    }
+    for m in 0xD0..=0xD9 {
+        assert!(is_valid_marker(m), "0x{:02X} should be valid", m);
+    }
+    assert!(is_valid_marker(0xDA));
+    assert!(is_valid_marker(0xDB));
+    for m in 0xE0..=0xEF {
+        assert!(is_valid_marker(m), "APP{} should be valid", m - 0xE0);
+    }
+    assert!(is_valid_marker(0xFE));
+    assert!(!is_valid_marker(0x00));
+    assert!(!is_valid_marker(0x01));
+    assert!(!is_valid_marker(0x50));
+}
+
+#[test]
+fn test_quick_jpeg_dimensions_no_sof() {
+    let mut jpeg = Vec::new();
+    jpeg.extend_from_slice(&[0xFF, 0xD8]);
+    jpeg.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x10]);
+    jpeg.extend_from_slice(b"JFIF\x00\x01\x01\x00\x00\x48\x00\x48\x00\x00");
+
+    assert!(argos::format::jpeg::quick_jpeg_dimensions(&jpeg).is_none());
+}
+
+#[test]
+fn test_candidate_score_returns_none_for_veto() {
+    let mut jpeg = Vec::new();
+    jpeg.extend_from_slice(&[0xFF, 0xD8]);
+    jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08]);
+    jpeg.extend_from_slice(&[0x00, 0x20]);
+    jpeg.extend_from_slice(&[0x00, 0x20]);
+    jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+
+    assert!(candidate_score(&jpeg).is_none());
+}
+
+#[test]
+fn test_detect_jpeg_break_no_scan_data() {
+    let data: Vec<u8> = (0..2000).map(|i| ((i * 131 + 17) % 251) as u8).collect();
+    let _ = detect_jpeg_break(&data, 0);
+}
+
+#[test]
+fn test_matches_jpeg_continuation_too_short() {
+    let data = vec![0xAA; 15];
+    assert!(!matches_jpeg_continuation(&data));
+}
+
+#[test]
+fn test_matches_jpeg_continuation_all_zeros() {
+    let data = vec![0x00; 64];
+    assert!(
+        !matches_jpeg_continuation(&data),
+        "All zeros should have too low entropy"
+    );
+}
+
+#[test]
+fn test_validate_jpeg_with_icc_profile() {
+    let mut jpeg = Vec::new();
+    jpeg.extend_from_slice(&[0xFF, 0xD8]);
+    jpeg.extend_from_slice(&[0xFF, 0xE2, 0x00, 0x10]);
+    jpeg.extend_from_slice(b"ICC_PROFILE\x00");
+    jpeg.extend_from_slice(&[0x01, 0x01]);
+    jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08]);
+    jpeg.extend_from_slice(&[0x02, 0x00]);
+    jpeg.extend_from_slice(&[0x03, 0x00]);
+    jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+
+    let info = validate_jpeg(&jpeg);
+    assert!(info.is_some());
+    let info = info.unwrap();
+    assert!(info.metadata.has_icc_profile);
+}
+
+#[test]
+fn test_detect_jpeg_break_rst_tracking() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&[0xFF, 0xD8]);
+    data.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+    let scan_start = data.len();
+
+    for i in 0..300 {
+        data.push(((i * 131 + 17) % 251) as u8);
+    }
+    data.extend_from_slice(&[0xFF, 0xD0]);
+    for i in 0..300 {
+        data.push(((i * 97 + 31) % 251) as u8);
+    }
+    data.extend_from_slice(&[0xFF, 0xD1]);
+    for i in 0..300 {
+        data.push(((i * 67 + 43) % 251) as u8);
+    }
+
+    data.extend_from_slice(&[0x00; 600]);
+
+    let bp = detect_jpeg_break(&data, scan_start);
+    assert!(bp.is_some());
+    let result = bp.unwrap();
+    assert!(result.last_rst_index.is_some());
 }

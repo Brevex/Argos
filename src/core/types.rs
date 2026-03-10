@@ -453,7 +453,9 @@ impl std::fmt::Display for ExtractionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExtractionError::DiskFull => write!(f, "Destination disk is full"),
-            ExtractionError::DeviceDisconnected => write!(f, "Output device disconnected or I/O failure"),
+            ExtractionError::DeviceDisconnected => {
+                write!(f, "Output device disconnected or I/O failure")
+            }
             ExtractionError::Io(e) => write!(f, "I/O error: {}", e),
         }
     }
@@ -466,9 +468,7 @@ impl From<std::io::Error> for ExtractionError {
             if e.raw_os_error() == Some(libc::ENOSPC) {
                 return ExtractionError::DiskFull;
             }
-            if e.raw_os_error() == Some(libc::EIO)
-                || e.raw_os_error() == Some(libc::ENXIO)
-            {
+            if e.raw_os_error() == Some(libc::EIO) || e.raw_os_error() == Some(libc::ENXIO) {
                 return ExtractionError::DeviceDisconnected;
             }
         }
@@ -481,7 +481,10 @@ impl From<std::io::Error> for ExtractionError {
 
 impl ExtractionError {
     pub fn is_fatal(&self) -> bool {
-        matches!(self, ExtractionError::DiskFull | ExtractionError::DeviceDisconnected)
+        matches!(
+            self,
+            ExtractionError::DiskFull | ExtractionError::DeviceDisconnected
+        )
     }
 }
 

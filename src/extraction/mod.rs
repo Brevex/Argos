@@ -212,12 +212,34 @@ pub fn extract_all(
     let results: Vec<_> = if space_constrained {
         sorted_extract
             .iter()
-            .map(|&i| extract_one_file(i, files, reader, output_dir, &counter, total, progress_callback, &halted))
+            .map(|&i| {
+                extract_one_file(
+                    i,
+                    files,
+                    reader,
+                    output_dir,
+                    &counter,
+                    total,
+                    progress_callback,
+                    &halted,
+                )
+            })
             .collect()
     } else {
         sorted_extract
             .par_iter()
-            .map(|&i| extract_one_file(i, files, reader, output_dir, &counter, total, progress_callback, &halted))
+            .map(|&i| {
+                extract_one_file(
+                    i,
+                    files,
+                    reader,
+                    output_dir,
+                    &counter,
+                    total,
+                    progress_callback,
+                    &halted,
+                )
+            })
             .collect()
     };
 
@@ -341,7 +363,12 @@ fn extract_one_file(
     total: usize,
     progress_callback: Option<&(dyn Fn(usize, usize) + Sync)>,
     halted: &AtomicBool,
-) -> (std::path::PathBuf, ImageFormat, u8, Result<ExtractionResult, ExtractionError>) {
+) -> (
+    std::path::PathBuf,
+    ImageFormat,
+    u8,
+    Result<ExtractionResult, ExtractionError>,
+) {
     let file = &files[i];
     let tier = ConfidenceTier::from_score(file.confidence);
     let filename = generate_filename(i, file.format);

@@ -12,19 +12,12 @@ fn make_superblock(
     let mut sb = vec![0u8; 1024];
 
     sb[0x00..0x04].copy_from_slice(&inodes_count.to_le_bytes());
-
     sb[0x04..0x08].copy_from_slice(&blocks_count.to_le_bytes());
-
     sb[0x18..0x1C].copy_from_slice(&block_size_log.to_le_bytes());
-
     sb[0x20..0x24].copy_from_slice(&blocks_per_group.to_le_bytes());
-
     sb[0x28..0x2C].copy_from_slice(&inodes_per_group.to_le_bytes());
-
     sb[0x38..0x3A].copy_from_slice(&0xEF53u16.to_le_bytes());
-
     sb[0x58..0x5A].copy_from_slice(&inode_size.to_le_bytes());
-
     sb[0x60..0x64].copy_from_slice(&feature_incompat.to_le_bytes());
 
     sb
