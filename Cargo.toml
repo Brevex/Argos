@@ -27,21 +27,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win
 
 [dev-dependencies]
 tempfile = "3.26.0"
-criterion = { version = "0.8.2", features = ["html_reports"] }
 flate2 = "1.1.9"
-proptest = "1.10.0"
-
-[[bench]]
-name = "carving_bench"
-harness = false
-
-[[bench]]
-name = "format_bench"
-harness = false
-
-[[bench]]
-name = "io_bench"
-harness = false
 
 [profile.release]
 opt-level = 3
