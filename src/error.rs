@@ -13,6 +13,27 @@ pub enum ArgosError {
 
     #[error("pattern build error")]
     PatternBuild(#[from] aho_corasick::BuildError),
+
+    #[error("validation failed: {kind}")]
+    Validation { kind: ValidationKind },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationKind {
+    MissingSoi,
+    MissingEoi,
+    InvalidMarker,
+    TruncatedSegment,
+    BadHuffmanTable,
+    BadHuffmanCode,
+    BadEntropyStream,
+    BadDctCoefficient,
+}
+
+impl std::fmt::Display for ValidationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
 }
 
 impl From<rustix::io::Errno> for ArgosError {
