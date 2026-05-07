@@ -10,6 +10,9 @@ pub enum ArgosError {
 
     #[error("unsupported platform")]
     Unsupported,
+
+    #[error("pattern build error")]
+    PatternBuild(#[from] aho_corasick::BuildError),
 }
 
 impl From<rustix::io::Errno> for ArgosError {
