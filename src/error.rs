@@ -16,6 +16,9 @@ pub enum ArgosError {
 
     #[error("validation failed: {kind}")]
     Validation { kind: ValidationKind },
+
+    #[error("audit serialization error")]
+    AuditSerialization(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,10 @@ pub enum ValidationKind {
     BadHuffmanCode,
     BadEntropyStream,
     BadDctCoefficient,
+    MissingIhdr,
+    MissingIend,
+    BadCrc32,
+    TruncatedChunk,
 }
 
 impl std::fmt::Display for ValidationKind {
