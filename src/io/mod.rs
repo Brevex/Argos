@@ -103,6 +103,12 @@ impl SourceDevice {
             .map_err(ArgosError::from)?;
         Ok(n)
     }
+
+    pub fn read_range(&self, buf: &mut [u8], offset: u64) -> Result<usize, ArgosError> {
+        let n = pread(&self.fd, buf, offset)
+            .map_err(ArgosError::from)?;
+        Ok(n)
+    }
 }
 
 impl fmt::Debug for SourceDevice {

@@ -1,5 +1,9 @@
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,6 +113,75 @@ impl std::fmt::Debug for ScopedPath {
         f.debug_struct("ScopedPath").finish_non_exhaustive()
     }
 }
+
+pub struct Session {
+    pub id: u64,
+    pub cancel: AtomicBool,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct SessionManager {
+    next_id: AtomicU64,
+    sessions: RwLock<HashMap<u64, Arc<Session>>>,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionManager {
+    pub fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            sessions: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn create(&self) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let session = Arc::new(Session {
+            id,
+            cancel: AtomicBool::new(false),
+        });
+        self.sessions.write().insert(id, session);
+        id
+    }
+
+    pub fn get(&self, id: u64) -> Option<Arc<Session>> {
+        self.sessions.read().get(&id).cloned()
+    }
+
+    pub fn cancel(&self, id: u64) -> bool {
+        if let Some(session) = self.get(id) {
+            session.cancel.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove(&self, id: u64) {
+        self.sessions.write().remove(&id);
+    }
+}
+
+impl std::fmt::Debug for SessionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionManager").finish_non_exhaustive()
+    }
+}
+
+pub mod commands;
+pub mod runner;
 
 #[cfg(test)]
 mod tests {
