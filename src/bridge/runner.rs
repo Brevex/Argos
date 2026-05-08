@@ -12,11 +12,75 @@ use crate::io::{AlignedBuf, BlockReader, SourceDevice};
 use crate::reassemble::reassemble_ssd;
 use crate::validate;
 
+#[derive(Debug)]
+pub struct RecoveryReport {
+    pub bytes_scanned: u64,
+    pub candidates_found: u64,
+    pub artifacts_recovered: u64,
+    pub recovered_files: Vec<String>,
+}
+
 pub fn run(
     source_path: &Path,
     output_path: &Path,
     session: &Session,
     app: &AppHandle,
+) -> Result<(), ArgosError> {
+    run_with_callbacks(
+        source_path,
+        output_path,
+        session,
+        |event| {
+            app.emit("progress", event).ok();
+        },
+        |event| {
+            app.emit("artifact", event).ok();
+        },
+    )?;
+    Ok(())
+}
+
+pub fn run_test(
+    source_path: &Path,
+    output_path: &Path,
+) -> Result<RecoveryReport, ArgosError> {
+    let session = crate::bridge::Session {
+        id: 0,
+        cancel: std::sync::atomic::AtomicBool::new(false),
+    };
+    let mut report = RecoveryReport {
+        bytes_scanned: 0,
+        candidates_found: 0,
+        artifacts_recovered: 0,
+        recovered_files: Vec::new(),
+    };
+
+    run_with_callbacks(
+        source_path,
+        output_path,
+        &session,
+        |event| {
+            report.bytes_scanned = event.bytes_scanned;
+            report.candidates_found = event.candidates_found;
+            report.artifacts_recovered = event.artifacts_recovered;
+        },
+        |event| {
+            report.recovered_files.push(format!(
+                "{}@{}:{}:{:.2}",
+                event.format, event.offset, event.length, event.score
+            ));
+        },
+    )?;
+
+    Ok(report)
+}
+
+fn run_with_callbacks(
+    source_path: &Path,
+    output_path: &Path,
+    session: &Session,
+    mut on_progress: impl FnMut(ProgressEvent),
+    mut on_artifact: impl FnMut(ArtifactEvent),
 ) -> Result<(), ArgosError> {
     let device = SourceDevice::open(source_path)?;
     let size = device.size()?;
@@ -40,7 +104,7 @@ pub fn run(
     let (all_candidates, bytes_scanned) = match device_class {
         DeviceClass::Ssd => {
             let buf = AlignedBuf::with_capacity(1024 * 1024, sector_size)?;
-            let mut reader = BlockReader::new(device, buf, size);
+            let mut reader = BlockReader::new(&device, buf, size);
             let mut scanner = Scanner::new()?;
             let mut bytes_scanned: u64 = 0;
             let mut candidates_found: u64 = 0;
@@ -52,7 +116,12 @@ pub fn run(
                 bytes_scanned += block.len() as u64;
                 let found = scanner.scan_block(block)?;
                 candidates_found += found.len() as u64;
-                emit_progress(app, session.id, bytes_scanned, candidates_found, 0);
+                on_progress(ProgressEvent {
+                    session_id: session.id,
+                    bytes_scanned,
+                    candidates_found,
+                    artifacts_recovered: 0,
+                });
             }
 
             for (offset, length) in reader.bad_sectors() {
@@ -64,6 +133,12 @@ pub fn run(
         DeviceClass::Hdd => {
             let candidates = crate::carve::hdd::scan(source_path, sector_size)?;
             let bytes_scanned = size;
+            on_progress(ProgressEvent {
+                session_id: session.id,
+                bytes_scanned,
+                candidates_found: candidates.len() as u64,
+                artifacts_recovered: 0,
+            });
             (candidates, bytes_scanned)
         }
     };
@@ -81,8 +156,7 @@ pub fn run(
         }
 
         let mut extract_buf = vec![0u8; artifact.length as usize];
-        let extract_device = SourceDevice::open(source_path)?;
-        let _ = extract_device.read_range(&mut extract_buf, artifact.offset)?;
+        let _ = device.read_range(&mut extract_buf, artifact.offset)?;
 
         let score = match artifact.format {
             ImageFormat::Jpeg => validate::jpeg::validate(&extract_buf)?,
@@ -107,13 +181,24 @@ pub fn run(
             audit.append(AuditEntry::new(
                 Operation::Recover,
                 source_path.to_string_lossy().into_owned(),
-                Some(name),
+                Some(name.clone()),
                 Some((artifact.offset, artifact.length)),
                 Status::Ok,
             ))?;
 
-            emit_artifact(app, session.id, artifact.offset, artifact.length, artifact.format, score);
-            emit_progress(app, session.id, bytes_scanned, candidates_found, recovered);
+            on_artifact(ArtifactEvent {
+                session_id: session.id,
+                offset: artifact.offset,
+                length: artifact.length,
+                format: format!("{:?}", artifact.format),
+                score,
+            });
+            on_progress(ProgressEvent {
+                session_id: session.id,
+                bytes_scanned,
+                candidates_found,
+                artifacts_recovered: recovered,
+            });
         }
     }
 
@@ -144,20 +229,4 @@ pub fn emit_progress(
     app.emit("progress", event).ok();
 }
 
-fn emit_artifact(
-    app: &AppHandle,
-    session_id: u64,
-    offset: u64,
-    length: u64,
-    format: ImageFormat,
-    score: f32,
-) {
-    let event = ArtifactEvent {
-        session_id,
-        offset,
-        length,
-        format: format!("{format:?}"),
-        score,
-    };
-    app.emit("artifact", event).ok();
-}
+

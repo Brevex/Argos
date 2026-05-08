@@ -80,7 +80,8 @@ pub fn run(
                 continue;
             }
 
-            let block = &mmap[next as usize * block_size..(next as usize + 1) * block_size.min(mmap.len())];
+            let end = ((next as usize + 1) * block_size).min(mmap.len());
+            let block = &mmap[next as usize * block_size..end];
             let score = continuation_score(&path, block);
 
             if score > 0.0 {

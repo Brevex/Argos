@@ -157,8 +157,8 @@ impl fmt::Debug for OutputSink {
     }
 }
 
-pub struct BlockReader {
-    device: SourceDevice,
+pub struct BlockReader<'a> {
+    device: &'a SourceDevice,
     buf: AlignedBuf,
     offset: u64,
     end: u64,
@@ -166,8 +166,8 @@ pub struct BlockReader {
     bad_sectors: Vec<(u64, u64)>,
 }
 
-impl BlockReader {
-    pub fn new(device: SourceDevice, buf: AlignedBuf, end: u64) -> Self {
+impl<'a> BlockReader<'a> {
+    pub fn new(device: &'a SourceDevice, buf: AlignedBuf, end: u64) -> Self {
         let sector_size = device.sector_size();
         Self {
             device,
@@ -209,7 +209,7 @@ impl BlockReader {
     }
 }
 
-impl fmt::Debug for BlockReader {
+impl fmt::Debug for BlockReader<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockReader")
             .field("offset", &self.offset)
@@ -324,7 +324,7 @@ mod tests {
         let dev = SourceDevice::from_file(file, 4096);
 
         let buf = AlignedBuf::with_capacity(4096, 4096)?;
-        let mut reader = BlockReader::new(dev, buf, 8192);
+        let mut reader = BlockReader::new(&dev, buf, 8192);
 
         let b1 = reader.try_next()?.unwrap();
         assert_eq!(b1.len(), 4096);
