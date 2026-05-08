@@ -69,6 +69,21 @@ pub struct ProgressEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionStatus {
+    Ok,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCompletedEvent {
+    pub session_id: u64,
+    pub status: SessionStatus,
+    pub error: Option<BridgeError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactEvent {
     pub session_id: u64,
     pub offset: u64,
@@ -181,6 +196,7 @@ impl std::fmt::Debug for SessionManager {
 }
 
 pub mod commands;
+pub mod devices;
 pub mod runner;
 
 #[cfg(test)]

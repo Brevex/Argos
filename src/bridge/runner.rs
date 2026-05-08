@@ -4,7 +4,9 @@ use std::sync::atomic::Ordering;
 use rayon::prelude::*;
 use tauri::{AppHandle, Emitter};
 
-use crate::bridge::{ArtifactEvent, ProgressEvent, Session};
+use crate::bridge::{
+    ArtifactEvent, BridgeError, ProgressEvent, Session, SessionCompletedEvent, SessionStatus,
+};
 use crate::carve::ssd::Scanner;
 use crate::carve::{DeviceClass, ImageFormat};
 use crate::custody::{AuditEntry, AuditLog, BadSectorMap, Operation, Status};
@@ -227,20 +229,18 @@ fn run_with_callbacks(
     Ok(())
 }
 
-pub fn emit_progress(
+pub fn emit_completed(
     app: &AppHandle,
     session_id: u64,
-    bytes_scanned: u64,
-    candidates_found: u64,
-    artifacts_recovered: u64,
+    status: SessionStatus,
+    error: Option<BridgeError>,
 ) {
-    let event = ProgressEvent {
+    let event = SessionCompletedEvent {
         session_id,
-        bytes_scanned,
-        candidates_found,
-        artifacts_recovered,
+        status,
+        error,
     };
-    app.emit("progress", event).ok();
+    app.emit("session_completed", event).ok();
 }
 
 

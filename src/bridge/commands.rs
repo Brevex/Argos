@@ -1,10 +1,30 @@
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tauri::{AppHandle, State};
 
 use crate::bridge::{
-    BridgeError, CancelRequest, ScopedPath, SessionManager, StartRequest, StartResponse,
+    BridgeError, CancelRequest, ScopedPath, SessionManager, SessionStatus, StartRequest,
+    StartResponse,
+    devices::{self, DeviceInfo},
 };
+
+#[cfg(target_os = "linux")]
+const SOURCE_SCOPES: &[&str] = &["/dev", "/tmp", "/var/tmp", "/home", "/media", "/mnt", "/run/media"];
+
+#[cfg(target_os = "linux")]
+const OUTPUT_SCOPES: &[&str] = &["/tmp", "/var/tmp", "/home", "/media", "/mnt", "/run/media"];
+
+#[cfg(not(target_os = "linux"))]
+const SOURCE_SCOPES: &[&str] = &[];
+
+#[cfg(not(target_os = "linux"))]
+const OUTPUT_SCOPES: &[&str] = &[];
+
+fn scope_paths<'a>(prefixes: &'a [&'a str]) -> Vec<&'a Path> {
+    prefixes.iter().map(Path::new).collect()
+}
 
 #[tauri::command]
 pub async fn start_recovery(
@@ -12,9 +32,10 @@ pub async fn start_recovery(
     manager: State<'_, SessionManager>,
     app: AppHandle,
 ) -> Result<StartResponse, BridgeError> {
-    let tmp = std::env::temp_dir();
-    let source = ScopedPath::new(&request.source, &[&tmp])?;
-    let output = ScopedPath::new(&request.output, &[&tmp])?;
+    let source_scopes = scope_paths(SOURCE_SCOPES);
+    let output_scopes = scope_paths(OUTPUT_SCOPES);
+    let source = ScopedPath::new(&request.source, &source_scopes)?;
+    let output = ScopedPath::new(&request.output, &output_scopes)?;
 
     let session_id = manager.create();
     let session = manager.get(session_id).ok_or_else(|| BridgeError {
@@ -28,13 +49,25 @@ pub async fn start_recovery(
 
     rayon::spawn(move || {
         let result = crate::bridge::runner::run(&src, &out, &session, app.as_ref());
-        if let Err(ref e) = result {
-            tracing::error!(error = ?e, session_id, "runner failed");
-        }
-        crate::bridge::runner::emit_progress(app.as_ref(), session_id, 0, 0, 0);
+        let (status, error) = match result {
+            Err(e) => {
+                tracing::error!(error = ?e, session_id, "runner failed");
+                (SessionStatus::Failed, Some(BridgeError::from(e)))
+            }
+            Ok(()) if session.cancel.load(Ordering::Relaxed) => {
+                (SessionStatus::Cancelled, None)
+            }
+            Ok(()) => (SessionStatus::Ok, None),
+        };
+        crate::bridge::runner::emit_completed(app.as_ref(), session_id, status, error);
     });
 
     Ok(StartResponse { session_id })
+}
+
+#[tauri::command]
+pub async fn list_devices() -> Result<Vec<DeviceInfo>, BridgeError> {
+    Ok(devices::list()?)
 }
 
 #[tauri::command]

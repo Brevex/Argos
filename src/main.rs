@@ -19,6 +19,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::start_recovery,
             commands::cancel_recovery,
+            commands::list_devices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

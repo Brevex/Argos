@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::Path;
 use std::slice;
 
-use rustix::fs::{fstat, open, Mode, OFlags};
+use rustix::fs::{fstat, open, seek, Mode, OFlags, SeekFrom};
 use rustix::io::{pread, Errno};
 
 use crate::error::ArgosError;
@@ -95,7 +95,10 @@ impl SourceDevice {
 
     pub fn size(&self) -> Result<u64, ArgosError> {
         let stat = fstat(&self.fd)?;
-        Ok(stat.st_size as u64)
+        if stat.st_size > 0 {
+            return Ok(stat.st_size as u64);
+        }
+        Ok(seek(&self.fd, SeekFrom::End(0))?)
     }
 
     fn read_at(&self, buf: &mut AlignedBuf, offset: u64) -> Result<usize, ArgosError> {
