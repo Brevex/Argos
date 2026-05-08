@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tauri::{AppHandle, State};
 
 use crate::bridge::{
@@ -15,17 +17,21 @@ pub async fn start_recovery(
     let output = ScopedPath::new(&request.output, &[&tmp])?;
 
     let session_id = manager.create();
-    let session = manager.get(session_id).unwrap();
+    let session = manager.get(session_id).ok_or_else(|| BridgeError {
+        kind: crate::bridge::BridgeErrorKind::Denied,
+        detail: "session creation failed".into(),
+    })?;
 
     let src = source.as_path().to_path_buf();
     let out = output.as_path().to_path_buf();
+    let app = Arc::new(app);
 
-    std::thread::spawn(move || {
-        let result = crate::bridge::runner::run(&src, &out, &session, &app);
+    rayon::spawn(move || {
+        let result = crate::bridge::runner::run(&src, &out, &session, app.as_ref());
         if let Err(ref e) = result {
             tracing::error!(error = ?e, session_id, "runner failed");
         }
-        crate::bridge::runner::emit_progress(&app, session_id, 0, 0, 0);
+        crate::bridge::runner::emit_progress(app.as_ref(), session_id, 0, 0, 0);
     });
 
     Ok(StartResponse { session_id })

@@ -1,5 +1,7 @@
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
+use rayon::prelude::*;
 use tauri::{AppHandle, Emitter};
 
 use crate::bridge::{ArtifactEvent, ProgressEvent, Session};
@@ -149,57 +151,69 @@ fn run_with_callbacks(
     let artifacts = reassemble_ssd(all_candidates);
     let candidates_found = artifacts.len() as u64;
 
-    let mut recovered: u64 = 0;
-    for artifact in &artifacts {
-        if session.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+    let validated: Vec<_> = artifacts
+        .par_iter()
+        .filter_map(|artifact| {
+            if session.cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+
+            let mut extract_buf = vec![0u8; artifact.length as usize];
+            if device.read_range(&mut extract_buf, artifact.offset).is_err() {
+                return None;
+            }
+
+            let score = match artifact.format {
+                ImageFormat::Jpeg => validate::jpeg::validate(&extract_buf).ok()?,
+                ImageFormat::Png => validate::png::validate(&extract_buf).ok()?,
+            };
+
+            if score > 0.0 {
+                let hash = crate::custody::hash(&extract_buf);
+                Some((artifact, score, extract_buf, hash))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (recovered, (artifact, score, extract_buf, hash)) in (1_u64..).zip(validated) {
+        if session.cancel.load(Ordering::Relaxed) {
             break;
         }
 
-        let mut extract_buf = vec![0u8; artifact.length as usize];
-        let _ = device.read_range(&mut extract_buf, artifact.offset)?;
+        let name = format!(
+            "{}_{}_{}_{:.2}.bin",
+            hex::encode(&hash[..4]),
+            artifact.offset,
+            artifact.length,
+            score
+        );
+        let mut writer = sink.create_file(&name)?;
+        std::io::Write::write_all(&mut writer, &extract_buf)?;
+        drop(writer);
 
-        let score = match artifact.format {
-            ImageFormat::Jpeg => validate::jpeg::validate(&extract_buf)?,
-            ImageFormat::Png => validate::png::validate(&extract_buf)?,
-        };
+        audit.append(AuditEntry::new(
+            Operation::Recover,
+            source_path.to_string_lossy().into_owned(),
+            Some(name.clone()),
+            Some((artifact.offset, artifact.length)),
+            Status::Ok,
+        ))?;
 
-        if score > 0.0 {
-            let hash = crate::custody::hash(&extract_buf);
-            let name = format!(
-                "{}_{}_{}_{:.2}.bin",
-                hex::encode(&hash[..4]),
-                artifact.offset,
-                artifact.length,
-                score
-            );
-            let mut writer = sink.create_file(&name)?;
-            std::io::Write::write_all(&mut writer, &extract_buf)?;
-            drop(writer);
-
-            recovered += 1;
-
-            audit.append(AuditEntry::new(
-                Operation::Recover,
-                source_path.to_string_lossy().into_owned(),
-                Some(name.clone()),
-                Some((artifact.offset, artifact.length)),
-                Status::Ok,
-            ))?;
-
-            on_artifact(ArtifactEvent {
-                session_id: session.id,
-                offset: artifact.offset,
-                length: artifact.length,
-                format: format!("{:?}", artifact.format),
-                score,
-            });
-            on_progress(ProgressEvent {
-                session_id: session.id,
-                bytes_scanned,
-                candidates_found,
-                artifacts_recovered: recovered,
-            });
-        }
+        on_artifact(ArtifactEvent {
+            session_id: session.id,
+            offset: artifact.offset,
+            length: artifact.length,
+            format: format!("{:?}", artifact.format),
+            score,
+        });
+        on_progress(ProgressEvent {
+            session_id: session.id,
+            bytes_scanned,
+            candidates_found,
+            artifacts_recovered: recovered,
+        });
     }
 
     audit.append(AuditEntry::new(
