@@ -2,8 +2,8 @@ use crate::error::{ArgosError, ValidationKind};
 
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
-const DHT: u8 = 0xC4;
-const SOF0: u8 = 0xC0;
+pub const DHT: u8 = 0xC4;
+pub const SOF0: u8 = 0xC0;
 const SOS: u8 = 0xDA;
 
 #[derive(Debug, Clone)]
@@ -90,7 +90,7 @@ pub fn validate(data: &[u8]) -> Result<f32, ArgosError> {
     Ok(score)
 }
 
-fn parse_segments(data: &[u8]) -> Result<Vec<Segment>, ArgosError> {
+pub fn parse_segments(data: &[u8]) -> Result<Vec<Segment>, ArgosError> {
     if data.len() < 4 || data[0] != 0xFF || data[1] != SOI {
         return Err(ArgosError::Validation {
             kind: ValidationKind::MissingSoi,
@@ -152,7 +152,7 @@ fn parse_segments(data: &[u8]) -> Result<Vec<Segment>, ArgosError> {
     Ok(segments)
 }
 
-fn parse_huffman_table(data: &[u8]) -> Result<HuffmanTable, ArgosError> {
+pub fn parse_huffman_table(data: &[u8]) -> Result<HuffmanTable, ArgosError> {
     if data.is_empty() {
         return Err(ArgosError::Validation {
             kind: ValidationKind::BadHuffmanTable,
@@ -322,6 +322,17 @@ fn decode_huffman_value(bits: &mut BitStream, table: &HuffmanTable) -> Result<u8
     Err(ArgosError::Validation {
         kind: ValidationKind::BadHuffmanCode,
     })
+}
+
+pub fn continuation_score(state: &DecoderState, block: &[u8]) -> f32 {
+    let max_mcus = estimate_mcus(state);
+    if max_mcus == 0 {
+        return 0.0;
+    }
+    match decode_entropy(block, state) {
+        Ok(mcus) => (mcus as f32 / max_mcus as f32).min(1.0),
+        Err(_) => 0.0,
+    }
 }
 
 #[cfg(test)]

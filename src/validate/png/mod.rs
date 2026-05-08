@@ -126,6 +126,60 @@ fn is_iend(t: &[u8; 4]) -> bool {
     t == b"IEND"
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PartialChunk {
+    pub pending: Vec<u8>,
+    pub chunk_type: [u8; 4],
+    pub expected_len: u32,
+}
+
+pub fn continuation_score(partial: &mut PartialChunk, block: &[u8]) -> f32 {
+    partial.pending.extend_from_slice(block);
+
+    if partial.pending.len() < 8 {
+        return 0.5;
+    }
+
+    if partial.expected_len == 0 && partial.pending.len() >= 8 {
+        partial.expected_len = u32::from_be_bytes([
+            partial.pending[0],
+            partial.pending[1],
+            partial.pending[2],
+            partial.pending[3],
+        ]);
+        partial.chunk_type = [
+            partial.pending[4],
+            partial.pending[5],
+            partial.pending[6],
+            partial.pending[7],
+        ];
+    }
+
+    let total_needed = 12 + partial.expected_len as usize;
+    if partial.pending.len() < total_needed {
+        return 0.5 + 0.5 * (partial.pending.len() as f32 / total_needed as f32);
+    }
+
+    let data = &partial.pending[8..8 + partial.expected_len as usize];
+    let stored_crc = u32::from_be_bytes([
+        partial.pending[8 + partial.expected_len as usize],
+        partial.pending[9 + partial.expected_len as usize],
+        partial.pending[10 + partial.expected_len as usize],
+        partial.pending[11 + partial.expected_len as usize],
+    ]);
+
+    let mut hasher = Hasher::new();
+    hasher.update(&partial.chunk_type);
+    hasher.update(data);
+    let computed_crc = hasher.finalize();
+
+    if computed_crc == stored_crc {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 #[cfg(test)]
 fn make_crc(chunk_type: &[u8; 4], data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();

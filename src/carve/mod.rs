@@ -13,3 +13,9 @@ pub enum ImageFormat {
     Jpeg,
     Png,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceClass {
+    Hdd,
+    Ssd,
+}

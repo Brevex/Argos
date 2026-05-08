@@ -4,7 +4,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::bridge::{ArtifactEvent, ProgressEvent, Session};
 use crate::carve::ssd::Scanner;
-use crate::carve::ImageFormat;
+use crate::carve::{DeviceClass, ImageFormat};
 use crate::custody::{AuditEntry, AuditLog, BadSectorMap, Operation, Status};
 use crate::io::OutputSink;
 use crate::error::ArgosError;
@@ -35,34 +35,44 @@ pub fn run(
     let sink = OutputSink::create(output_path)?;
     let mut bad_map = BadSectorMap::new();
 
-    let buf = AlignedBuf::with_capacity(1024 * 1024, sector_size)?;
-    let mut reader = BlockReader::new(device, buf, size);
-    let mut scanner = Scanner::new()?;
+    let device_class = crate::io::detect_device_class(source_path);
 
-    let mut bytes_scanned: u64 = 0;
-    let mut candidates_found: u64 = 0;
+    let (all_candidates, bytes_scanned) = match device_class {
+        DeviceClass::Ssd => {
+            let buf = AlignedBuf::with_capacity(1024 * 1024, sector_size)?;
+            let mut reader = BlockReader::new(device, buf, size);
+            let mut scanner = Scanner::new()?;
+            let mut bytes_scanned: u64 = 0;
+            let mut candidates_found: u64 = 0;
 
-    while let Some(block) = reader.try_next()? {
-        if session.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
+            while let Some(block) = reader.try_next()? {
+                if session.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                bytes_scanned += block.len() as u64;
+                let found = scanner.scan_block(block)?;
+                candidates_found += found.len() as u64;
+                emit_progress(app, session.id, bytes_scanned, candidates_found, 0);
+            }
+
+            for (offset, length) in reader.bad_sectors() {
+                bad_map.record(*offset, *length);
+            }
+
+            (scanner.finish(), bytes_scanned)
         }
-
-        bytes_scanned += block.len() as u64;
-        let found = scanner.scan_block(block)?;
-        candidates_found += found.len() as u64;
-
-        emit_progress(app, session.id, bytes_scanned, candidates_found, 0);
-    }
-
-    for (offset, length) in reader.bad_sectors() {
-        bad_map.record(*offset, *length);
-    }
+        DeviceClass::Hdd => {
+            let candidates = crate::carve::hdd::scan(source_path, sector_size)?;
+            let bytes_scanned = size;
+            (candidates, bytes_scanned)
+        }
+    };
 
     let bad_path = output_path.join("bad_sectors.csv");
     bad_map.write_to(&bad_path)?;
 
-    let all_candidates = scanner.finish();
     let artifacts = reassemble_ssd(all_candidates);
+    let candidates_found = artifacts.len() as u64;
 
     let mut recovered: u64 = 0;
     for artifact in &artifacts {

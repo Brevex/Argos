@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.argos.app",
   "build": {
-    "frontendDist": "../dist",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "./frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "cd frontend && npm run build",
+    "beforeDevCommand": ""
   },
   "app": {
     "windows": [
@@ -16,6 +18,13 @@
       }
     ],
     "security": {
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "'self'",
+        "img-src": "'self' asset: http://asset.localhost",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'"
+      },
       "assetProtocol": {
         "enable": true,
         "scope": []

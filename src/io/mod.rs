@@ -229,6 +229,32 @@ fn is_bad_sector_error(e: &std::io::Error) -> bool {
     e.raw_os_error() == expected.raw_os_error()
 }
 
+pub fn detect_device_class(path: &Path) -> crate::carve::DeviceClass {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            let sys_path = format!("/sys/block/{name}/queue/rotational");
+            if let Ok(content) = std::fs::read_to_string(&sys_path) {
+                if content.trim() == "1" {
+                    return crate::carve::DeviceClass::Hdd;
+                } else if content.trim() == "0" {
+                    return crate::carve::DeviceClass::Ssd;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Storage::FileSystem::STORAGE_PROPERTY_QUERY;
+        return crate::carve::DeviceClass::Hdd;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return crate::carve::DeviceClass::Hdd;
+    }
+    crate::carve::DeviceClass::Hdd
+}
+
 #[cfg(test)]
 impl SourceDevice {
     fn from_file(file: std::fs::File, sector_size: usize) -> Self {
