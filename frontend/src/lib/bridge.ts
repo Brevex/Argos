@@ -84,16 +84,16 @@ export const isBridgeError = (value: unknown): value is BridgeError =>
   'detail' in value;
 
 const ERROR_MESSAGES: Record<BridgeErrorKind, string> = {
-  io: 'Falha ao acessar o dispositivo. Em Linux, abrir /dev/* sem ser root exige as capabilities cap_dac_read_search, cap_sys_rawio e cap_fowner — aplique setcap cap_dac_read_search,cap_sys_rawio,cap_fowner+ep no binário, ou rode com sudo.',
-  allocation: 'Memória insuficiente para alinhar buffers do dispositivo.',
-  unsupported: 'Plataforma não suportada para esta operação.',
-  pattern_build: 'Falha ao construir padrões de busca.',
-  validation: 'Os bytes recuperados falharam na validação estrutural.',
-  audit_serialization: 'Falha ao serializar a trilha de auditoria.',
-  denied: 'Caminho fora do escopo permitido ou sessão inválida.',
+  io: 'Failed to access the device. Argos needs elevated privileges to read raw block devices — run the bundled launcher (it requests admin/UAC by default), or apply the platform-specific capabilities manually.',
+  allocation: 'Insufficient memory to align device buffers.',
+  unsupported: 'This platform is not supported for the requested operation.',
+  pattern_build: 'Failed to build the search patterns used for carving.',
+  validation: 'Recovered bytes failed structural validation and were discarded.',
+  audit_serialization: 'Failed to serialize the audit trail.',
+  denied: 'The selected path is outside the allowed scope or the session is no longer valid.',
 };
 
 export const friendlyError = (value: unknown): string => {
   if (isBridgeError(value)) return ERROR_MESSAGES[value.kind];
-  return 'Erro inesperado.';
+  return 'Unexpected error.';
 };

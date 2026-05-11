@@ -38,7 +38,7 @@ const COMPLETED_PHASE: Record<SessionCompletionStatus, SessionPhase> = {
 
 const NON_FAILURE_MESSAGE: Record<'ok' | 'cancelled', string | null> = {
   ok: null,
-  cancelled: 'Sessão cancelada antes da conclusão.',
+  cancelled: 'Session cancelled before completion.',
 };
 
 export function createRecoverySession(): RecoverySession {
