@@ -13,8 +13,8 @@ These rules cover dependencies, auditing, and the threat surface. They complemen
 
 ## Frontend dependencies
 
-- Pinned via `pnpm-lock.yaml`. Lockfile is committed.
-- `pnpm audit` runs in CI; high-severity advisories block merge.
+- Pinned via `frontend/package-lock.json`. Lockfile is committed.
+- `npm audit` runs in CI; high-severity advisories block merge.
 - No remote-loaded scripts. No CDN imports.
 - Preference for small, audited libraries with active maintenance.
 

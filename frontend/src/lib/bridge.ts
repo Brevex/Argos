@@ -51,10 +51,15 @@ export interface BridgeError {
 
 export const listDevices = (): Promise<DeviceInfo[]> => invoke('list_devices');
 
+export interface StartResponse {
+  session_id: number;
+  warning?: string;
+}
+
 export const startRecovery = (
   source: string,
   output: string,
-): Promise<{ session_id: number }> =>
+): Promise<StartResponse> =>
   invoke('start_recovery', { request: { source, output } });
 
 export const cancelRecovery = (sessionId: number): Promise<void> =>

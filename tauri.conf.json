@@ -1,22 +1,21 @@
 {
-  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "Argos",
   "version": "0.1.0",
-  "identifier": "com.argos.app",
+  "identifier": "com.argos",
   "build": {
     "frontendDist": "./frontend/dist",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cd frontend && npm run build",
-    "beforeDevCommand": ""
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev"
   },
   "app": {
     "windows": [
       {
         "title": "Argos",
-        "width": 1120,
-        "height": 700,
-        "minWidth": 820,
-        "minHeight": 580
+        "width": 1000,
+        "height": 615,
+        "minWidth": 1000,
+        "minHeight": 615
       }
     ],
     "security": {
@@ -34,7 +33,40 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["nsis", "deb", "rpm"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    },
+    "linux": {
+      "deb": {
+        "desktopTemplate": "resources/argos.desktop",
+        "postInstallScript": "scripts/postinst.sh",
+        "files": {
+          "/usr/share/polkit-1/actions/com.argos.policy": "resources/linux/com.argos.policy"
+        }
+      },
+      "rpm": {
+        "desktopTemplate": "resources/argos.desktop",
+        "postInstallScript": "scripts/postinst.sh",
+        "files": {
+          "/usr/share/polkit-1/actions/com.argos.policy": "resources/linux/com.argos.policy"
+        }
+      }
+    }
   },
   "plugins": {}
 }

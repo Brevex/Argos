@@ -30,7 +30,7 @@ Data flows in one direction: from device through the pipeline, out via the bridg
 ### `io/`
 
 - Owns raw device access. The only place that opens source devices.
-- Exposes `SourceDevice` (read-only, sector-aligned, direct I/O) and `OutputSink` (writable, distinct filesystem).
+- Exposes `SourceDevice` (read-only, sector-aligned, direct I/O) and `OutputSink` (writable, ideally distinct filesystem).
 - Provides typed handle constructors that pin the OS-specific flags. `SourceDevice` does not implement `Write`.
 - Block-iterator API streams `&[u8]` of sector-aligned size.
 
@@ -88,9 +88,20 @@ A recovery session is a typed `Session` value owned by the bridge. It holds:
 
 Cancelling a session aborts in-flight work and finalizes the audit log. No state escapes a cancelled session.
 
+## Privileges
+
+Argos refuses to run without administrator/root privileges. The pipeline opens raw block devices, which is unconditionally privileged on every supported OS. The strategy is one of native, declarative mechanisms with a single runtime guard:
+
+- **Windows:** an embedded application manifest (`resources/windows/Argos.manifest`) declares `requestedExecutionLevel level="requireAdministrator"`. UAC prompts before the binary's entry point runs. `build.rs` embeds the manifest via `embed-manifest`.
+- **Linux:** the `.desktop` entry runs `pkexec /usr/bin/argos`. The Polkit action `com.argos.run` is packaged at `/usr/share/polkit-1/actions/com.argos.policy` with defaults `auth_admin_keep`, so the operator authenticates once per session.
+- **macOS:** unsupported in this release. The `elevation` module emits a `compile_error!` on macOS targets. See ADR 0009.
+
+The runtime guard lives in `src/elevation/` and is the first thing `main()` does. If the process is not elevated, the Linux backend re-execs through `pkexec`; the Windows backend exits with an explicit error because the manifest should have triggered UAC. Either way, no Argos code that touches a device runs unelevated.
+
 ## What does not exist (and won't, without an ADR)
 
 - A plugin system.
 - Filesystem-aware recovery (NTFS MFT walking, ext4 journal scanning) as a primary path. May be added later as optional hint sources, not as the trust root.
 - Network access of any kind.
 - A configuration file format with comments. Configuration is structured TOML, parsed into typed structs.
+- macOS support. Deferred by ADR 0009; will be reintroduced when a SMJobBless or `osascript` trampoline is designed against Gatekeeper/notarization constraints.

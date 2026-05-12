@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Argos
+Comment=Forensic image recovery tool
+Exec=pkexec /usr/bin/argos
+Type=Application
+Terminal=false
+Categories=System;Filesystem;Security;
+Icon=argos
+StartupNotify=true

@@ -53,6 +53,7 @@ pub struct StartRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartResponse {
     pub session_id: u64,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

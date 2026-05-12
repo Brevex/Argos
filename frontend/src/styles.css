@@ -1074,3 +1074,46 @@ button:focus-visible {
     transform: translateY(0) scale(1);
   }
 }
+
+.warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 184, 107, 0.14),
+    rgba(255, 184, 107, 0.06)
+  );
+  border: 1px solid rgba(255, 184, 107, 0.35);
+  color: #ffd9a8;
+  font-size: 12.5px;
+  line-height: 1.45;
+  margin-bottom: 14px;
+}
+
+.warning-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.warning-banner-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 150ms ease;
+}
+
+.warning-banner-close:hover {
+  background: rgba(255, 255, 255, 0.14);
+}

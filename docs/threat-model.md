@@ -36,9 +36,10 @@ We do not assume:
 | Risk | Mitigation |
 |------|------------|
 | Accidental write to source | `SourceDevice` handle does not implement `Write`. OS flags enforce read-only. |
-| Source/output on same filesystem | Runtime check refuses to start. |
+| Source/output on same filesystem | Warning shown; session proceeds at user discretion. |
 | Parser exploit | `proptest` for parsers; `cargo-fuzz` for pattern matching, Huffman, CRC. `panic = "abort"`. |
-| Frontend escalation | `ScopedPath` on every path argument. Capabilities are explicit allow-lists. CSP forbids inline scripts. |
+| Insufficient privileges at runtime | `elevation::ensure()` runs before any device-touching code. Windows: embedded UAC manifest; Linux: `pkexec` via `.desktop` and Polkit action `com.argos.run`. See ADR 0009. |
+| Frontend escalation inside elevated process | The renderer runs inside a root/administrator process. `ScopedPath` and the capability allow-list are the only barrier to arbitrary writes; both are mandatory for every bridge command. CSP forbids inline scripts. |
 | Path traversal | `ScopedPath` rejects `..`, symlinks outside scope, absolute paths not under the scope root. |
 | Logged sensitive data | `tracing` redaction layer at startup. Audit log is structured, not free-text. |
 | Tampered audit log | Hash-chained entries. Final entry signed at session close. |
@@ -50,6 +51,7 @@ We do not assume:
 - Anti-anti-forensics (detecting that an adversary has scrubbed a disk before Argos runs). Argos reports what is recoverable; it does not certify completeness.
 - Cryptographic recovery (key recovery, encrypted-volume defeat). Out of scope; would require a separate threat model.
 - Cloud / network forensics.
+- macOS deployment. Deferred by ADR 0009 until a privileged-helper design is ratified.
 
 ## Review cadence
 

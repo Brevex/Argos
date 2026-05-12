@@ -26,6 +26,41 @@ fn scope_paths<'a>(prefixes: &'a [&'a str]) -> Vec<&'a Path> {
     prefixes.iter().map(Path::new).collect()
 }
 
+fn same_device_warning(source: &Path, output: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let source_meta = std::fs::metadata(source).ok()?;
+        let output_meta = std::fs::metadata(output).ok()?;
+        let source_dev = if source_meta.file_type().is_block_device()
+            || source_meta.file_type().is_char_device()
+        {
+            source_meta.rdev()
+        } else {
+            source_meta.dev()
+        };
+        let output_dev = output_meta.dev();
+        if source_dev == output_dev {
+            return Some(
+                "Source and output are on the same filesystem. Writing recovered data to the analyzed device is not recommended because it may overwrite recoverable data."
+                    .into(),
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        let source_prefix = source.components().next()?;
+        let output_prefix = output.components().next()?;
+        if source_prefix == output_prefix {
+            return Some(
+                "Source and output are on the same volume. Writing recovered data to the analyzed device is not recommended because it may overwrite recoverable data."
+                    .into(),
+            );
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn start_recovery(
     request: StartRequest,
@@ -37,7 +72,12 @@ pub async fn start_recovery(
     let source = ScopedPath::new(&request.source, &source_scopes)?;
     let output = ScopedPath::new(&request.output, &output_scopes)?;
 
+    let warning = same_device_warning(source.as_path(), output.as_path());
+
     let session_id = manager.create();
+    if warning.is_some() {
+        tracing::warn!(same_device_warning = true, session_id);
+    }
     let session = manager.get(session_id).ok_or_else(|| BridgeError {
         kind: crate::bridge::BridgeErrorKind::Denied,
         detail: "session creation failed".into(),
@@ -62,7 +102,7 @@ pub async fn start_recovery(
         crate::bridge::runner::emit_completed(app.as_ref(), session_id, status, error);
     });
 
-    Ok(StartResponse { session_id })
+    Ok(StartResponse { session_id, warning })
 }
 
 #[tauri::command]

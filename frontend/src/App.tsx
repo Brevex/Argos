@@ -5,6 +5,7 @@ import DevicePicker from './components/DevicePicker';
 import OutputPicker from './components/OutputPicker';
 import StatusPanel from './components/StatusPanel';
 import IntegrityFooter from './components/IntegrityFooter';
+import WarningBanner from './components/WarningBanner';
 import ErrorModal from './components/ErrorModal';
 import type { DeviceInfo } from './lib/bridge';
 import { createRecoverySession } from './lib/recovery';
@@ -45,6 +46,7 @@ export default function App() {
     <div class="app-shell">
       <Background />
       <div class="workspace">
+        <WarningBanner message={session.warningMessage()} />
         <header class="workspace-hero">
           <h1>Image Recovery</h1>
           <p>

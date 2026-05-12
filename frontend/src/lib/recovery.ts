@@ -25,6 +25,7 @@ export interface RecoverySession {
   bytesRecovered: () => number;
   elapsedMs: () => number;
   errorMessage: () => string | null;
+  warningMessage: () => string | null;
   start: (source: string, output: string) => Promise<void>;
   cancel: () => Promise<void>;
   reset: () => void;
@@ -47,6 +48,7 @@ export function createRecoverySession(): RecoverySession {
   const [bytesRecovered, setBytesRecovered] = createSignal(0);
   const [elapsedMs, setElapsedMs] = createSignal(0);
   const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
+  const [warningMessage, setWarningMessage] = createSignal<string | null>(null);
   const [sessionId, setSessionId] = createSignal<number | null>(null);
 
   let unlistenProgress: UnlistenFn | undefined;
@@ -91,6 +93,7 @@ export function createRecoverySession(): RecoverySession {
       setBytesRecovered(0);
       setElapsedMs(0);
       setErrorMessage(null);
+      setWarningMessage(null);
       setSessionId(null);
     });
   };
@@ -127,6 +130,7 @@ export function createRecoverySession(): RecoverySession {
       const response = await startRecovery(source, output);
       batch(() => {
         setSessionId(response.session_id);
+        setWarningMessage(response.warning ?? null);
         setPhase('running');
       });
       startTick();
@@ -166,6 +170,7 @@ export function createRecoverySession(): RecoverySession {
     bytesRecovered,
     elapsedMs,
     errorMessage,
+    warningMessage,
     start,
     cancel,
     reset,

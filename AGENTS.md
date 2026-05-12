@@ -104,7 +104,7 @@ Forbidden in hot paths (carving, validation, matching, reassembly):
 - `cargo test` and `cargo test --release` for hot-path code.
 - `cargo bench` for any change touching `carve/`, `reassemble/`, or `validate/`.
 - `cargo fmt --check`, `cargo deny check`, `cargo audit`, `cargo machete`, `cargo udeps` are CI gates.
-- `pnpm tauri dev` for frontend; `pnpm typecheck` and `pnpm lint` are gates.
+- `cargo tauri dev` starts the full application (backend + frontend). `npm run build` and `npm run preview` (in `frontend/`) are gates for frontend changes.
 
 ## Modular Instructions
 

@@ -20,18 +20,23 @@ memmap2 = "0.9"
 aho-corasick = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rustix = { version = "1.0", features = ["fs"] }
+rustix = { version = "1.0", features = ["fs", "process"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    "Win32_Security",
+    "Win32_System_Threading",
 ] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-manifest = "1.4"
 
 [dev-dependencies]
 proptest = "1.6"

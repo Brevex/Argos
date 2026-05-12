@@ -13,6 +13,7 @@
 pub mod bridge;
 pub mod carve;
 pub mod custody;
+pub mod elevation;
 pub mod error;
 pub mod io;
 pub mod reassemble;
