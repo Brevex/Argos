@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -9,6 +9,8 @@ use crate::bridge::{
     StartResponse,
     devices::{self, DeviceInfo},
 };
+
+const RECOVERED_SUBDIR: &str = "Argos_Recovered";
 
 #[cfg(target_os = "linux")]
 const SOURCE_SCOPES: &[&str] = &["/dev", "/tmp", "/var/tmp", "/home", "/media", "/mnt", "/run/media"];
@@ -84,7 +86,7 @@ pub async fn start_recovery(
     })?;
 
     let src = source.as_path().to_path_buf();
-    let out = output.as_path().to_path_buf();
+    let out = output.as_path().join(RECOVERED_SUBDIR);
     let app = Arc::new(app);
 
     rayon::spawn(move || {
@@ -123,4 +125,37 @@ pub async fn cancel_recovery(
             detail: "session not found".into(),
         })
     }
+}
+
+#[tauri::command]
+pub async fn default_output_dir() -> Result<String, BridgeError> {
+    Ok(default_output_path().to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn default_output_path() -> PathBuf {
+    invoking_user_home().unwrap_or_else(|| PathBuf::from("/home"))
+}
+
+#[cfg(target_os = "windows")]
+fn default_output_path() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\"))
+}
+
+#[cfg(target_os = "linux")]
+fn invoking_user_home() -> Option<PathBuf> {
+    let uid: u32 = std::env::var("PKEXEC_UID").ok()?.parse().ok()?;
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in passwd.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        if parts[2].parse::<u32>().ok() == Some(uid) {
+            return Some(PathBuf::from(parts[5]));
+        }
+    }
+    None
 }

@@ -232,165 +232,23 @@ fn is_bad_sector_error(e: &std::io::Error) -> bool {
     e.raw_os_error() == expected.raw_os_error()
 }
 
+#[cfg(target_os = "linux")]
 pub fn detect_device_class(path: &Path) -> crate::carve::DeviceClass {
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            let sys_path = format!("/sys/block/{name}/queue/rotational");
-            if let Ok(content) = std::fs::read_to_string(&sys_path) {
-                if content.trim() == "1" {
-                    return crate::carve::DeviceClass::Hdd;
-                } else if content.trim() == "0" {
-                    return crate::carve::DeviceClass::Ssd;
-                }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let sys_path = format!("/sys/block/{name}/queue/rotational");
+        if let Ok(content) = std::fs::read_to_string(&sys_path) {
+            if content.trim() == "1" {
+                return crate::carve::DeviceClass::Hdd;
+            } else if content.trim() == "0" {
+                return crate::carve::DeviceClass::Ssd;
             }
         }
     }
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::Storage::FileSystem::STORAGE_PROPERTY_QUERY;
-        return crate::carve::DeviceClass::Hdd;
-    }
-#[cfg(target_os = "macos")]
-fn detect_device_class_macos(path: &Path) -> crate::carve::DeviceClass {
-    use std::ffi::{c_void, CString};
-
-    #[repr(C)]
-    struct CFStringRef(*const c_void);
-
-    #[repr(C)]
-    struct CFBooleanRef(*const c_void);
-
-    #[repr(C)]
-    struct CFNumberRef(*const c_void);
-
-    type CFTypeRef = *const c_void;
-    type CFAllocatorRef = *const c_void;
-    type CFStringEncoding = u32;
-    type CFIndex = isize;
-    type CFNumberType = CFIndex;
-
-    const K_CF_STRING_ENCODING_UTF8: CFStringEncoding = 0x08000100;
-    const K_CF_NUMBER_S_INT64_TYPE: CFNumberType = 4;
-
-    extern "C" {
-        fn CFStringCreateWithCString(
-            alloc: CFAllocatorRef,
-            cstr: *const libc::c_char,
-            encoding: CFStringEncoding,
-        ) -> CFStringRef;
-        fn CFRelease(cf: CFTypeRef);
-        fn CFBooleanGetValue(boolean: CFBooleanRef) -> libc::Boolean;
-        fn CFNumberGetValue(
-            number: CFNumberRef,
-            the_type: CFNumberType,
-            value_ptr: *mut c_void,
-        ) -> libc::Boolean;
-    }
-
-    extern "C" {
-        fn IOBSDNameMatching(
-            master_port: libc::mach_port_t,
-            options: u32,
-            bsd_name: *const libc::c_char,
-        ) -> *mut libc::c_void;
-        fn IOServiceGetMatchingService(
-            master_port: libc::mach_port_t,
-            matching: *mut libc::c_void,
-        ) -> libc::mach_port_t;
-        fn IORegistryEntryCreateCFProperty(
-            entry: libc::mach_port_t,
-            key: CFStringRef,
-            allocator: CFAllocatorRef,
-            options: u32,
-        ) -> CFTypeRef;
-        fn IOObjectRelease(object: libc::mach_port_t) -> libc::kern_return_t;
-    }
-
-    let bsd_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| {
-            let trimmed = n.strip_prefix('r').unwrap_or(n);
-            Some(trimmed)
-        });
-
-    let bsd_name = match bsd_name {
-        Some(name) => name,
-        None => return crate::carve::DeviceClass::Hdd,
-    };
-
-    let c_name = match CString::new(bsd_name) {
-        Ok(s) => s,
-        Err(_) => return crate::carve::DeviceClass::Hdd,
-    };
-
-    let matching = unsafe { IOBSDNameMatching(0, 0, c_name.as_ptr()) };
-    if matching.is_null() {
-        return crate::carve::DeviceClass::Hdd;
-    }
-
-    let service = unsafe { IOServiceGetMatchingService(0, matching) };
-    if service == 0 {
-        return crate::carve::DeviceClass::Hdd;
-    }
-
-    let rotational_key = unsafe {
-        CFStringCreateWithCString(
-            std::ptr::null(),
-            "IOMediaIsRotational\0".as_ptr() as *const _,
-            K_CF_STRING_ENCODING_UTF8,
-        )
-    };
-    let rotational = unsafe {
-        IORegistryEntryCreateCFProperty(service, rotational_key, std::ptr::null(), 0)
-    };
-    unsafe { CFRelease(rotational_key.0) };
-
-    if !rotational.is_null() {
-        let is_rotational = unsafe { CFBooleanGetValue(CFBooleanRef(rotational)) };
-        unsafe { CFRelease(rotational) };
-        unsafe { IOObjectRelease(service) };
-        return if is_rotational != 0 {
-            crate::carve::DeviceClass::Hdd
-        } else {
-            crate::carve::DeviceClass::Ssd
-        };
-    }
-
-    let rate_key = unsafe {
-        CFStringCreateWithCString(
-            std::ptr::null(),
-            "Rotation Rate\0".as_ptr() as *const _,
-            K_CF_STRING_ENCODING_UTF8,
-        )
-    };
-    let rate = unsafe { IORegistryEntryCreateCFProperty(service, rate_key, std::ptr::null(), 0) };
-    unsafe { CFRelease(rate_key.0) };
-
-    let result = if !rate.is_null() {
-        let mut rate_val: i64 = 0;
-        let got = unsafe {
-            CFNumberGetValue(
-                CFNumberRef(rate),
-                K_CF_NUMBER_S_INT64_TYPE,
-                &mut rate_val as *mut _ as *mut _,
-            )
-        };
-        unsafe { CFRelease(rate) };
-        if got != 0 && rate_val == 0 {
-            crate::carve::DeviceClass::Ssd
-        } else {
-            crate::carve::DeviceClass::Hdd
-        }
-    } else {
-        crate::carve::DeviceClass::Hdd
-    };
-
-    unsafe { IOObjectRelease(service) };
-
-    result
+    crate::carve::DeviceClass::Hdd
 }
+
+#[cfg(target_os = "windows")]
+pub fn detect_device_class(_path: &Path) -> crate::carve::DeviceClass {
     crate::carve::DeviceClass::Hdd
 }
 

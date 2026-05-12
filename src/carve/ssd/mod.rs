@@ -103,10 +103,6 @@ impl Scanner {
 
         Ok(completed)
     }
-
-    pub fn finish(self) -> Vec<Candidate> {
-        Vec::new()
-    }
 }
 
 impl std::fmt::Debug for Scanner {

@@ -34,6 +34,7 @@ fn run_application() -> ExitCode {
             commands::start_recovery,
             commands::cancel_recovery,
             commands::list_devices,
+            commands::default_output_dir,
         ])
         .run(tauri::generate_context!());
 

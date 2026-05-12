@@ -43,7 +43,7 @@ impl Ord for Path {
 
 pub fn run(
     seeds: &[Seed],
-    mmap: &memmap2::Mmap,
+    data: &[u8],
     block_size: usize,
     max_blocks: usize,
 ) -> Vec<Candidate> {
@@ -63,7 +63,7 @@ pub fn run(
             jpeg_state: None,
             png_partial: None,
         };
-        initialize_state(&mut path, mmap, block_size);
+        initialize_state(&mut path, data, block_size);
         queue.push(path);
     }
 
@@ -76,12 +76,12 @@ pub fn run(
         let mut best_next: Option<(u64, f64)> = None;
 
         for next in [last + 1, last + 2] {
-            if consumed.contains(&next) || next as usize * block_size >= mmap.len() {
+            if consumed.contains(&next) || next as usize * block_size >= data.len() {
                 continue;
             }
 
-            let end = ((next as usize + 1) * block_size).min(mmap.len());
-            let block = &mmap[next as usize * block_size..end];
+            let end = ((next as usize + 1) * block_size).min(data.len());
+            let block = &data[next as usize * block_size..end];
             let score = continuation_score(&path, block);
 
             if score > 0.0 {
@@ -95,7 +95,7 @@ pub fn run(
         if let Some((next, weight)) = best_next {
             path.blocks.push(next);
             path.weight = weight;
-            let block = &mmap[next as usize * block_size..((next as usize + 1) * block_size).min(mmap.len())];
+            let block = &data[next as usize * block_size..((next as usize + 1) * block_size).min(data.len())];
             update_sprt(&mut path, block);
 
             match path.sprt.decision() {
@@ -137,12 +137,12 @@ pub fn run(
     completed
 }
 
-fn initialize_state(path: &mut Path, mmap: &memmap2::Mmap, block_size: usize) {
+fn initialize_state(path: &mut Path, data: &[u8], block_size: usize) {
     match path.format {
         ImageFormat::Jpeg => {
             let start = path.blocks[0] as usize * block_size;
-            let end = ((path.blocks[0] as usize + 1) * block_size).min(mmap.len());
-            let block = &mmap[start..end];
+            let end = ((path.blocks[0] as usize + 1) * block_size).min(data.len());
+            let block = &data[start..end];
             if let Ok(segments) = jpeg::parse_segments(block) {
                 let mut state = jpeg::DecoderState::default();
                 for seg in segments {

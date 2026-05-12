@@ -35,6 +35,13 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "deb", "rpm"],
+    "license": "GPL-3.0-only",
+    "licenseFile": "LICENSE",
+    "publisher": "Argos Authors",
+    "copyright": "Copyright (C) 2026 Argos Authors",
+    "homepage": "https://github.com/argos",
+    "shortDescription": "Forensic image recovery tool",
+    "longDescription": "Argos is a desktop forensic tool that recovers permanently-deleted image files from storage devices. It uses Parallel Unique Path (PUP) and Sequential Hypothesis Testing (SHT) for HDD reassembly, and an Aho-Corasick streaming carver for SSDs.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

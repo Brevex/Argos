@@ -2,6 +2,8 @@
 name = "argos"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
+description = "Forensic recovery of permanently-deleted image files from storage devices."
 
 [dependencies]
 anyhow = "1.0"

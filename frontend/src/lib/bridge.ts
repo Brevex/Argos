@@ -51,6 +51,8 @@ export interface BridgeError {
 
 export const listDevices = (): Promise<DeviceInfo[]> => invoke('list_devices');
 
+export const defaultOutputDir = (): Promise<string> => invoke('default_output_dir');
+
 export interface StartResponse {
   session_id: number;
   warning?: string;

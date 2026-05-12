@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
+use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use tauri::{AppHandle, Emitter};
 
@@ -8,10 +9,10 @@ use crate::bridge::{
     ArtifactEvent, BridgeError, ProgressEvent, Session, SessionCompletedEvent, SessionStatus,
 };
 use crate::carve::ssd::Scanner;
-use crate::carve::{DeviceClass, ImageFormat};
+use crate::carve::{Candidate, DeviceClass, ImageFormat};
 use crate::custody::{AuditEntry, AuditLog, BadSectorMap, Operation, Status};
-use crate::io::OutputSink;
 use crate::error::ArgosError;
+use crate::io::OutputSink;
 use crate::io::{AlignedBuf, BlockReader, SourceDevice};
 use crate::reassemble::reassemble_ssd;
 use crate::validate;
@@ -79,6 +80,12 @@ pub fn run_test(
     Ok(report)
 }
 
+fn open_extraction_mmap(source_path: &Path, size: u64) -> Result<Mmap, ArgosError> {
+    let file = std::fs::File::open(source_path)?;
+    let mmap = unsafe { MmapOptions::new().len(size as usize).map(&file)? };
+    Ok(mmap)
+}
+
 fn run_with_callbacks(
     source_path: &Path,
     output_path: &Path,
@@ -90,6 +97,8 @@ fn run_with_callbacks(
     let size = device.size()?;
     let sector_size = device.sector_size();
 
+    let sink = OutputSink::create(output_path)?;
+
     let audit_path = output_path.join("audit.log");
     let mut audit = AuditLog::open(&audit_path)?;
     audit.append(AuditEntry::new(
@@ -100,51 +109,21 @@ fn run_with_callbacks(
         Status::Ok,
     ))?;
 
-    let sink = OutputSink::create(output_path)?;
+    let extraction = open_extraction_mmap(source_path, size)?;
     let mut bad_map = BadSectorMap::new();
 
     let device_class = crate::io::detect_device_class(source_path);
 
     let (all_candidates, bytes_scanned) = match device_class {
-        DeviceClass::Ssd => {
-            let buf = AlignedBuf::with_capacity(1024 * 1024, sector_size)?;
-            let mut reader = BlockReader::new(&device, buf, size);
-            let mut scanner = Scanner::new()?;
-            let mut bytes_scanned: u64 = 0;
-            let mut candidates_found: u64 = 0;
-
-            while let Some(block) = reader.try_next()? {
-                if session.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                bytes_scanned += block.len() as u64;
-                let found = scanner.scan_block(block)?;
-                candidates_found += found.len() as u64;
-                on_progress(ProgressEvent {
-                    session_id: session.id,
-                    bytes_scanned,
-                    candidates_found,
-                    artifacts_recovered: 0,
-                });
-            }
-
-            for (offset, length) in reader.bad_sectors() {
-                bad_map.record(*offset, *length);
-            }
-
-            (scanner.finish(), bytes_scanned)
-        }
-        DeviceClass::Hdd => {
-            let candidates = crate::carve::hdd::scan(source_path, sector_size)?;
-            let bytes_scanned = size;
-            on_progress(ProgressEvent {
-                session_id: session.id,
-                bytes_scanned,
-                candidates_found: candidates.len() as u64,
-                artifacts_recovered: 0,
-            });
-            (candidates, bytes_scanned)
-        }
+        DeviceClass::Ssd => scan_ssd(
+            &device,
+            size,
+            sector_size,
+            session,
+            &mut bad_map,
+            &mut on_progress,
+        )?,
+        DeviceClass::Hdd => scan_hdd(&extraction, sector_size, session, size, &mut on_progress)?,
     };
 
     let bad_path = output_path.join("bad_sectors.csv");
@@ -159,27 +138,23 @@ fn run_with_callbacks(
             if session.cancel.load(Ordering::Relaxed) {
                 return None;
             }
-
-            let mut extract_buf = vec![0u8; artifact.length as usize];
-            if device.read_range(&mut extract_buf, artifact.offset).is_err() {
-                return None;
-            }
+            let bytes = extraction_slice(&extraction, artifact.offset, artifact.length)?;
 
             let score = match artifact.format {
-                ImageFormat::Jpeg => validate::jpeg::validate(&extract_buf).ok()?,
-                ImageFormat::Png => validate::png::validate(&extract_buf).ok()?,
+                ImageFormat::Jpeg => validate::jpeg::validate(bytes).ok()?,
+                ImageFormat::Png => validate::png::validate(bytes).ok()?,
             };
 
             if score > 0.0 {
-                let hash = crate::custody::hash(&extract_buf);
-                Some((artifact, score, extract_buf, hash))
+                let hash = crate::custody::hash(bytes);
+                Some((artifact, score, bytes, hash))
             } else {
                 None
             }
         })
         .collect();
 
-    for (recovered, (artifact, score, extract_buf, hash)) in (1_u64..).zip(validated) {
+    for (recovered, (artifact, score, bytes, hash)) in (1_u64..).zip(validated) {
         if session.cancel.load(Ordering::Relaxed) {
             break;
         }
@@ -192,7 +167,7 @@ fn run_with_callbacks(
             score
         );
         let mut writer = sink.create_file(&name)?;
-        std::io::Write::write_all(&mut writer, &extract_buf)?;
+        std::io::Write::write_all(&mut writer, bytes)?;
         drop(writer);
 
         audit.append(AuditEntry::new(
@@ -229,6 +204,71 @@ fn run_with_callbacks(
     Ok(())
 }
 
+fn extraction_slice(mmap: &Mmap, offset: u64, length: u64) -> Option<&[u8]> {
+    let start = usize::try_from(offset).ok()?;
+    let len = usize::try_from(length).ok()?;
+    let end = start.checked_add(len)?;
+    if end > mmap.len() {
+        return None;
+    }
+    Some(&mmap[start..end])
+}
+
+fn scan_ssd(
+    device: &SourceDevice,
+    size: u64,
+    sector_size: usize,
+    session: &Session,
+    bad_map: &mut BadSectorMap,
+    on_progress: &mut impl FnMut(ProgressEvent),
+) -> Result<(Vec<Candidate>, u64), ArgosError> {
+    let buf = AlignedBuf::with_capacity(1024 * 1024, sector_size)?;
+    let mut reader = BlockReader::new(device, buf, size);
+    let mut scanner = Scanner::new()?;
+    let mut bytes_scanned: u64 = 0;
+    let mut candidates_found: u64 = 0;
+    let mut all_candidates: Vec<Candidate> = Vec::new();
+
+    while let Some(block) = reader.try_next()? {
+        if session.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        bytes_scanned += block.len() as u64;
+        let found = scanner.scan_block(block)?;
+        candidates_found += found.len() as u64;
+        all_candidates.extend(found);
+        on_progress(ProgressEvent {
+            session_id: session.id,
+            bytes_scanned,
+            candidates_found,
+            artifacts_recovered: 0,
+        });
+    }
+
+    for (offset, length) in reader.bad_sectors() {
+        bad_map.record(*offset, *length);
+    }
+
+    Ok((all_candidates, bytes_scanned))
+}
+
+fn scan_hdd(
+    data: &[u8],
+    block_size: usize,
+    session: &Session,
+    size: u64,
+    on_progress: &mut impl FnMut(ProgressEvent),
+) -> Result<(Vec<Candidate>, u64), ArgosError> {
+    let candidates = crate::carve::hdd::scan(data, block_size)?;
+    on_progress(ProgressEvent {
+        session_id: session.id,
+        bytes_scanned: size,
+        candidates_found: candidates.len() as u64,
+        artifacts_recovered: 0,
+    });
+    Ok((candidates, size))
+}
+
 pub fn emit_completed(
     app: &AppHandle,
     session_id: u64,
@@ -242,5 +282,3 @@ pub fn emit_completed(
     };
     app.emit("session_completed", event).ok();
 }
-
-
