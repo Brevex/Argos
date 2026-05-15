@@ -4,15 +4,7 @@ use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::format::Writer;
 
 const SENSITIVE: &[&str] = &[
-    "path",
-    "hash",
-    "content",
-    "exif",
-    "metadata",
-    "data",
-    "artifact",
-    "output",
-    "input",
+    "path", "hash", "content", "exif", "metadata", "data", "artifact", "output", "input",
 ];
 
 fn is_sensitive(name: &str) -> bool {
@@ -78,11 +70,7 @@ impl<'a> RedactVisitor<'a> {
         self.writer.write_str("[REDACTED]")
     }
 
-    fn write_value<T: fmt::Display>(
-        &mut self,
-        field: &Field,
-        value: T,
-    ) -> fmt::Result {
+    fn write_value<T: fmt::Display>(&mut self, field: &Field, value: T) -> fmt::Result {
         if is_sensitive(field.name()) {
             self.write_redacted(field)
         } else {

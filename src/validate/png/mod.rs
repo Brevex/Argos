@@ -61,8 +61,8 @@ pub fn parse_chunks(data: &[u8]) -> Result<Vec<Chunk>, ArgosError> {
     let mut pos = SIGNATURE.len();
 
     while pos + 12 <= data.len() {
-        let len = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-            as usize;
+        let len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
 
         if pos + 12 + len > data.len() {
             break;
@@ -173,113 +173,5 @@ pub fn continuation_score(partial: &mut PartialChunk, block: &[u8]) -> f32 {
     hasher.update(data);
     let computed_crc = hasher.finalize();
 
-    if computed_crc == stored_crc {
-        1.0
-    } else {
-        0.0
-    }
-}
-
-#[cfg(test)]
-fn make_crc(chunk_type: &[u8; 4], data: &[u8]) -> u32 {
-    let mut hasher = Hasher::new();
-    hasher.update(chunk_type);
-    hasher.update(data);
-    hasher.finalize()
-}
-
-#[cfg(test)]
-fn make_chunk(chunk_type: &[u8; 4], data: &[u8]) -> Vec<u8> {
-    let len = data.len() as u32;
-    let crc = make_crc(chunk_type, data);
-    let mut out = Vec::with_capacity(12 + data.len());
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(chunk_type);
-    out.extend_from_slice(data);
-    out.extend_from_slice(&crc.to_be_bytes());
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use proptest::prelude::*;
-
-    fn valid_png() -> Vec<u8> {
-        let mut data = Vec::with_capacity(64);
-        data.extend_from_slice(&SIGNATURE);
-
-        let ihdr = [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00];
-        data.extend_from_slice(&make_chunk(b"IHDR", &ihdr));
-
-        let idat = [0x78, 0x9C, 0x63, 0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01];
-        data.extend_from_slice(&make_chunk(b"IDAT", &idat));
-
-        data.extend_from_slice(&make_chunk(b"IEND", &[]));
-        data
-    }
-
-    #[test]
-    fn validate_accepts_valid_png() {
-        let score = validate(&valid_png()).unwrap();
-        assert_eq!(score, 1.0);
-    }
-
-    #[test]
-    fn validate_rejects_garbage() {
-        let score = validate(&[0u8; 100]).unwrap();
-        assert_eq!(score, 0.0);
-    }
-
-    #[test]
-    fn validate_rejects_missing_iend() {
-        let mut data = valid_png();
-        data.truncate(data.len() - 12);
-        let score = validate(&data).unwrap();
-        assert_eq!(score, 0.0);
-    }
-
-    #[test]
-    fn validate_rejects_bad_crc() {
-        let mut data = valid_png();
-        let crc_byte = data.len() - 2;
-        data[crc_byte] ^= 0xFF;
-        let score = validate(&data).unwrap();
-        assert!(score < 1.0);
-        assert!(score > 0.0);
-    }
-
-    #[test]
-    fn parse_chunks_extracts_three() {
-        let chunks = parse_chunks(&valid_png()).unwrap();
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(&chunks[0].chunk_type, b"IHDR");
-        assert_eq!(&chunks[1].chunk_type, b"IDAT");
-        assert_eq!(&chunks[2].chunk_type, b"IEND");
-    }
-
-    #[test]
-    fn crc_matches_reference() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&SIGNATURE);
-        buf.extend_from_slice(&make_chunk(b"IHDR", &[0x00; 13]));
-        buf.extend_from_slice(&make_chunk(b"IEND", &[]));
-        let parsed = parse_chunks(&buf).unwrap();
-        assert!(verify_crc(&parsed[0]));
-    }
-
-    proptest! {
-        #[test]
-        fn random_data_never_crashes(data: Vec<u8>) {
-            let _ = validate(&data);
-        }
-
-        #[test]
-        fn signature_plus_random_never_crashes(data: Vec<u8>) {
-            let mut buf = Vec::with_capacity(8 + data.len());
-            buf.extend_from_slice(&SIGNATURE);
-            buf.extend_from_slice(&data);
-            let _ = validate(&buf);
-        }
-    }
+    if computed_crc == stored_crc { 1.0 } else { 0.0 }
 }

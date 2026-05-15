@@ -1,5 +1,5 @@
 use argos::carve::ssd::Scanner;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_ssd_scan_1mb(c: &mut Criterion) {
     let data = vec![0u8; 1024 * 1024];

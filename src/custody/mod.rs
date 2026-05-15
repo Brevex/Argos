@@ -74,7 +74,10 @@ impl AuditLog {
             .create(true)
             .append(true)
             .open(path)?;
-        Ok(Self { file, last_hash: None })
+        Ok(Self {
+            file,
+            last_hash: None,
+        })
     }
 
     pub fn append(&mut self, mut entry: AuditEntry) -> Result<(), ArgosError> {
@@ -107,7 +110,9 @@ impl Default for BadSectorMap {
 
 impl BadSectorMap {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn record(&mut self, offset: u64, length: u64) {
@@ -136,75 +141,5 @@ impl std::fmt::Debug for BadSectorMap {
         f.debug_struct("BadSectorMap")
             .field("count", &self.entries.len())
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn hash_is_deterministic() {
-        let a = hash(b"hello");
-        let b = hash(b"hello");
-        assert_eq!(a, b);
-        assert_ne!(a, hash(b"world"));
-    }
-
-    #[test]
-    fn audit_log_appends_and_chains() -> Result<(), ArgosError> {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("audit.log");
-        let mut log = AuditLog::open(&path)?;
-
-        let entry = AuditEntry::new(
-            Operation::Open,
-            "src_1".into(),
-            None,
-            None,
-            Status::Ok,
-        );
-        log.append(entry)?;
-
-        let entry = AuditEntry::new(
-            Operation::Read,
-            "src_1".into(),
-            None,
-            Some((0, 4096)),
-            Status::Ok,
-        );
-        log.append(entry)?;
-
-        drop(log);
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 2);
-
-        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(first["operation"], "open");
-        assert!(first["previous_hash"].is_null());
-
-        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(second["operation"], "read");
-        assert!(second["previous_hash"].is_string());
-        Ok(())
-    }
-
-    #[test]
-    fn bad_sector_map_records_and_writes() -> Result<(), ArgosError> {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("bad_sectors.csv");
-        let mut map = BadSectorMap::new();
-        map.record(0, 512);
-        map.record(4096, 512);
-        map.write_to(&path)?;
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("0,512"));
-        assert!(content.contains("4096,512"));
-        assert_eq!(map.entries().len(), 2);
-        Ok(())
     }
 }

@@ -13,7 +13,15 @@ use crate::bridge::{
 const RECOVERED_SUBDIR: &str = "Argos_Recovered";
 
 #[cfg(target_os = "linux")]
-const SOURCE_SCOPES: &[&str] = &["/dev", "/tmp", "/var/tmp", "/home", "/media", "/mnt", "/run/media"];
+const SOURCE_SCOPES: &[&str] = &[
+    "/dev",
+    "/tmp",
+    "/var/tmp",
+    "/home",
+    "/media",
+    "/mnt",
+    "/run/media",
+];
 
 #[cfg(target_os = "linux")]
 const OUTPUT_SCOPES: &[&str] = &["/tmp", "/var/tmp", "/home", "/media", "/mnt", "/run/media"];
@@ -96,15 +104,16 @@ pub async fn start_recovery(
                 tracing::error!(error = ?e, session_id, "runner failed");
                 (SessionStatus::Failed, Some(BridgeError::from(e)))
             }
-            Ok(()) if session.cancel.load(Ordering::Relaxed) => {
-                (SessionStatus::Cancelled, None)
-            }
+            Ok(()) if session.cancel.load(Ordering::Relaxed) => (SessionStatus::Cancelled, None),
             Ok(()) => (SessionStatus::Ok, None),
         };
         crate::bridge::runner::emit_completed(app.as_ref(), session_id, status, error);
     });
 
-    Ok(StartResponse { session_id, warning })
+    Ok(StartResponse {
+        session_id,
+        warning,
+    })
 }
 
 #[tauri::command]

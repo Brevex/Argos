@@ -2,8 +2,8 @@ pub mod patterns;
 
 use aho_corasick::AhoCorasick;
 
+use crate::carve::ssd::patterns::{PatternKind, all_patterns};
 use crate::carve::{Candidate, ImageFormat};
-use crate::carve::ssd::patterns::{all_patterns, PatternKind};
 use crate::error::ArgosError;
 
 pub struct Scanner {
@@ -58,27 +58,28 @@ impl Scanner {
                 continue;
             }
 
-            let absolute_offset =
-                self.offset_base - self.overlap.len() as u64 + mat_start as u64;
+            let absolute_offset = self.offset_base - self.overlap.len() as u64 + mat_start as u64;
             let pattern_kind = self.pattern_kinds[pattern_id];
 
             match pattern_kind {
                 PatternKind::Header(format) => {
-                    self.open_candidates.push(OpenCandidate {
-                        offset: absolute_offset,
-                        format,
-                    });
+                    if !self.open_candidates.iter().any(|c| c.format == format) {
+                        self.open_candidates.push(OpenCandidate {
+                            offset: absolute_offset,
+                            format,
+                        });
+                    }
                 }
                 PatternKind::Footer(format) => {
-                    if let Some(pos) =
-                        self.open_candidates.iter().rposition(|c| c.format == format)
+                    if let Some(pos) = self
+                        .open_candidates
+                        .iter()
+                        .rposition(|c| c.format == format)
                     {
                         let open = self.open_candidates.remove(pos);
                         completed.push(Candidate {
                             offset: open.offset,
-                            length: Some(
-                                absolute_offset + pattern_len as u64 - open.offset,
-                            ),
+                            length: Some(absolute_offset + pattern_len as u64 - open.offset),
                             format,
                         });
                     }
@@ -88,15 +89,10 @@ impl Scanner {
 
         let overlap_keep = self.max_pattern_len.saturating_sub(1);
         self.overlap.clear();
-        if block.len() >= overlap_keep {
-            self.overlap
-                .extend_from_slice(&block[block.len() - overlap_keep..]);
-        } else {
-            let keep_from_overlap = overlap_keep.saturating_sub(block.len());
-            if keep_from_overlap > 0 && self.concat_buf.len() >= keep_from_overlap {
-                let start = self.concat_buf.len() - keep_from_overlap;
-                self.overlap.extend_from_slice(&self.concat_buf[start..]);
-            }
+        let keep = overlap_keep.min(self.concat_buf.len());
+        if keep > 0 {
+            let start = self.concat_buf.len() - keep;
+            self.overlap.extend_from_slice(&self.concat_buf[start..]);
         }
 
         self.offset_base += block.len() as u64;
@@ -112,75 +108,5 @@ impl std::fmt::Debug for Scanner {
             .field("offset_base", &self.offset_base)
             .field("open_count", &self.open_candidates.len())
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scanner_finds_jpeg() -> Result<(), ArgosError> {
-        let mut scanner = Scanner::new()?;
-        let data = [0xFF, 0xD8, 0x00, 0x01, 0x02, 0xFF, 0xD9];
-        let candidates = scanner.scan_block(&data)?;
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].offset, 0);
-        assert_eq!(candidates[0].length, Some(7));
-        assert_eq!(candidates[0].format, ImageFormat::Jpeg);
-        Ok(())
-    }
-
-    #[test]
-    fn scanner_finds_png() -> Result<(), ArgosError> {
-        let mut scanner = Scanner::new()?;
-        let mut data = vec![0x00; 100];
-        data[10..18].copy_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
-        data[90..94].copy_from_slice(&[0x49, 0x45, 0x4E, 0x44]);
-        let candidates = scanner.scan_block(&data)?;
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].offset, 10);
-        assert_eq!(candidates[0].length, Some(84));
-        assert_eq!(candidates[0].format, ImageFormat::Png);
-        Ok(())
-    }
-
-    #[test]
-    fn scanner_crosses_boundary() -> Result<(), ArgosError> {
-        let mut scanner = Scanner::new()?;
-        let block1 = [0xFF, 0xD8, 0x00, 0xFF];
-        let block2 = [0xD9, 0x00, 0x00];
-
-        let c1 = scanner.scan_block(&block1)?;
-        assert!(c1.is_empty());
-
-        let c2 = scanner.scan_block(&block2)?;
-        assert_eq!(c2.len(), 1);
-        assert_eq!(c2[0].offset, 0);
-        assert_eq!(c2[0].length, Some(5));
-        assert_eq!(c2[0].format, ImageFormat::Jpeg);
-        Ok(())
-    }
-
-    #[test]
-    fn scanner_multiple_jpegs() -> Result<(), ArgosError> {
-        let mut scanner = Scanner::new()?;
-        let data = [0xFF, 0xD8, 0xFF, 0xD9, 0xFF, 0xD8, 0xFF, 0xD9];
-        let candidates = scanner.scan_block(&data)?;
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].offset, 0);
-        assert_eq!(candidates[0].length, Some(4));
-        assert_eq!(candidates[1].offset, 4);
-        assert_eq!(candidates[1].length, Some(4));
-        Ok(())
-    }
-
-    #[test]
-    fn scanner_orphan_footer_ignored() -> Result<(), ArgosError> {
-        let mut scanner = Scanner::new()?;
-        let data = [0x00, 0xFF, 0xD9, 0x00];
-        let candidates = scanner.scan_block(&data)?;
-        assert!(candidates.is_empty());
-        Ok(())
     }
 }

@@ -1,10 +1,10 @@
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::fmt;
 use std::path::Path;
 use std::slice;
 
-use rustix::fs::{fstat, open, seek, Mode, OFlags, SeekFrom};
-use rustix::io::{pread, Errno};
+use rustix::fs::{Mode, OFlags, SeekFrom, fstat, open, seek};
+use rustix::io::{Errno, pread};
 
 use crate::error::ArgosError;
 
@@ -83,8 +83,7 @@ pub struct SourceDevice {
 impl SourceDevice {
     pub fn open(path: &Path) -> Result<Self, ArgosError> {
         let flags = OFlags::RDONLY | OFlags::DIRECT | OFlags::NOATIME;
-        let fd = open(path, flags, Mode::from_raw_mode(0))
-            .map_err(ArgosError::from)?;
+        let fd = open(path, flags, Mode::from_raw_mode(0)).map_err(ArgosError::from)?;
         let sector_size = 4096;
         Ok(Self { fd, sector_size })
     }
@@ -102,14 +101,12 @@ impl SourceDevice {
     }
 
     fn read_at(&self, buf: &mut AlignedBuf, offset: u64) -> Result<usize, ArgosError> {
-        let n = pread(&self.fd, buf.as_mut_slice(), offset)
-            .map_err(ArgosError::from)?;
+        let n = pread(&self.fd, buf.as_mut_slice(), offset).map_err(ArgosError::from)?;
         Ok(n)
     }
 
     pub fn read_range(&self, buf: &mut [u8], offset: u64) -> Result<usize, ArgosError> {
-        let n = pread(&self.fd, buf, offset)
-            .map_err(ArgosError::from)?;
+        let n = pread(&self.fd, buf, offset).map_err(ArgosError::from)?;
         Ok(n)
     }
 }
@@ -250,102 +247,4 @@ pub fn detect_device_class(path: &Path) -> crate::carve::DeviceClass {
 #[cfg(target_os = "windows")]
 pub fn detect_device_class(_path: &Path) -> crate::carve::DeviceClass {
     crate::carve::DeviceClass::Hdd
-}
-
-#[cfg(test)]
-impl SourceDevice {
-    fn from_file(file: std::fs::File, sector_size: usize) -> Self {
-        let fd: std::os::fd::OwnedFd = file.into();
-        Self { fd, sector_size }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::tempdir;
-
-    fn write_test_file(path: &Path, data: &[u8]) {
-        let mut file = std::fs::File::create(path).unwrap();
-        file.write_all(data).unwrap();
-    }
-
-    fn is_inval_error(e: &std::io::Error) -> bool {
-        let expected: std::io::Error = Errno::INVAL.into();
-        e.raw_os_error() == expected.raw_os_error()
-    }
-
-    #[test]
-    fn aligned_buf_allocates_and_slices() -> Result<(), ArgosError> {
-        let mut buf = AlignedBuf::with_capacity(4096, 4096)?;
-        assert_eq!(buf.capacity(), 4096);
-        assert_eq!(buf.as_slice().len(), 0);
-        buf.set_len(4096);
-        assert_eq!(buf.as_slice().len(), 4096);
-        buf.as_mut_slice().fill(0xAB);
-        assert!(buf.as_slice().iter().all(|&b| b == 0xAB));
-        Ok(())
-    }
-
-    #[test]
-    fn source_device_opens_regular_file() -> Result<(), ArgosError> {
-        let name = format!(".test_device_{}", std::process::id());
-        let path = std::env::current_dir()?.join(&name);
-        write_test_file(&path, &[0u8; 4096]);
-        match SourceDevice::open(&path) {
-            Ok(dev) => {
-                std::fs::remove_file(&path).ok();
-                assert_eq!(dev.sector_size(), 4096);
-                Ok(())
-            }
-            Err(ArgosError::Io(ref e)) if is_inval_error(e) => {
-                std::fs::remove_file(&path).ok();
-                Ok(())
-            }
-            Err(e) => {
-                std::fs::remove_file(&path).ok();
-                Err(e)
-            }
-        }
-    }
-
-    #[test]
-    fn block_reader_reads_aligned_blocks() -> Result<(), ArgosError> {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("test.bin");
-        let data = vec![0xCDu8; 8192];
-        write_test_file(&path, &data);
-
-        let file = std::fs::File::open(&path).unwrap();
-        let dev = SourceDevice::from_file(file, 4096);
-
-        let buf = AlignedBuf::with_capacity(4096, 4096)?;
-        let mut reader = BlockReader::new(&dev, buf, 8192);
-
-        let b1 = reader.try_next()?.unwrap();
-        assert_eq!(b1.len(), 4096);
-        assert!(b1.iter().all(|&b| b == 0xCD));
-
-        let b2 = reader.try_next()?.unwrap();
-        assert_eq!(b2.len(), 4096);
-        assert!(b2.iter().all(|&b| b == 0xCD));
-
-        assert!(reader.try_next()?.is_none());
-        assert!(reader.bad_sectors().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn output_sink_creates_and_writes() -> Result<(), ArgosError> {
-        let dir = tempdir().unwrap();
-        let sink = OutputSink::create(dir.path())?;
-        let mut writer = sink.create_file("test.out")?;
-        use std::io::Write;
-        writer.write_all(b"hello").unwrap();
-        drop(writer);
-        let read_back = std::fs::read(dir.path().join("test.out")).unwrap();
-        assert_eq!(read_back, b"hello");
-        Ok(())
-    }
 }

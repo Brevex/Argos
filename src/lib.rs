@@ -16,5 +16,6 @@ pub mod custody;
 pub mod elevation;
 pub mod error;
 pub mod io;
+pub mod logging;
 pub mod reassemble;
 pub mod validate;

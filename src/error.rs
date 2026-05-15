@@ -25,15 +25,10 @@ pub enum ArgosError {
 pub enum ValidationKind {
     MissingSoi,
     MissingEoi,
-    InvalidMarker,
     TruncatedSegment,
     BadHuffmanTable,
-    BadHuffmanCode,
-    BadEntropyStream,
-    BadDctCoefficient,
     MissingIhdr,
     MissingIend,
-    BadCrc32,
     TruncatedChunk,
 }
 

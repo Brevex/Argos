@@ -2,9 +2,11 @@ use std::process::ExitCode;
 
 use argos::bridge::{SessionManager, commands};
 use argos::elevation::{self, Outcome};
+use argos::logging::RedactingFields;
+use tracing_subscriber::fmt::Subscriber;
 
 fn main() -> ExitCode {
-    let _ = tracing_subscriber::fmt::try_init();
+    install_redacted_tracing();
 
     match elevation::ensure() {
         Ok(Outcome::AlreadyElevated) => run_application(),
@@ -50,4 +52,11 @@ fn run_application() -> ExitCode {
 fn exit_code_into(code: i32) -> ExitCode {
     let byte: u8 = u8::try_from(code).unwrap_or(1);
     ExitCode::from(byte)
+}
+
+fn install_redacted_tracing() {
+    let subscriber = Subscriber::builder()
+        .fmt_fields(RedactingFields::new())
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
 }

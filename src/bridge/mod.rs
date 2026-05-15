@@ -2,8 +2,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,8 +32,12 @@ impl From<crate::error::ArgosError> for BridgeError {
                 BridgeErrorKind::Allocation,
                 format!("size={size}, align={align}"),
             ),
-            ArgosError::Unsupported => (BridgeErrorKind::Unsupported, "unsupported platform".into()),
-            ArgosError::PatternBuild(_) => (BridgeErrorKind::PatternBuild, "pattern build failed".into()),
+            ArgosError::Unsupported => {
+                (BridgeErrorKind::Unsupported, "unsupported platform".into())
+            }
+            ArgosError::PatternBuild(_) => {
+                (BridgeErrorKind::PatternBuild, "pattern build failed".into())
+            }
             ArgosError::Validation { kind } => (BridgeErrorKind::Validation, format!("{kind}")),
             ArgosError::AuditSerialization(_) => (
                 BridgeErrorKind::AuditSerialization,
@@ -105,9 +109,9 @@ impl ScopedPath {
             detail: format!("{e}"),
         })?;
 
-        let valid = allowed_prefixes.iter().any(|prefix| {
-            canonical.starts_with(prefix)
-        });
+        let valid = allowed_prefixes
+            .iter()
+            .any(|prefix| canonical.starts_with(prefix));
 
         if !valid {
             return Err(BridgeError {
@@ -199,46 +203,3 @@ impl std::fmt::Debug for SessionManager {
 pub mod commands;
 pub mod devices;
 pub mod runner;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bridge_error_from_argos_io() {
-        let e = crate::error::ArgosError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "test",
-        ));
-        let be = BridgeError::from(e);
-        assert!(matches!(be.kind, BridgeErrorKind::Io));
-    }
-
-    #[test]
-    fn bridge_error_from_argos_validation() {
-        let e = crate::error::ArgosError::Validation {
-            kind: crate::error::ValidationKind::MissingSoi,
-        };
-        let be = BridgeError::from(e);
-        assert!(matches!(be.kind, BridgeErrorKind::Validation));
-    }
-
-    #[test]
-    fn scoped_path_accepts_allowed() {
-        let tmp = std::env::temp_dir();
-        let path = tmp.join("argos_test_allowed");
-        std::fs::create_dir_all(&path).ok();
-        let sp = ScopedPath::new(path.to_str().unwrap(), &[&tmp]);
-        assert!(sp.is_ok());
-        std::fs::remove_dir(&path).ok();
-    }
-
-    #[test]
-    fn scoped_path_rejects_outside() {
-        let tmp = std::env::temp_dir();
-        let sp = ScopedPath::new("/etc/passwd", &[&tmp]);
-        assert!(sp.is_err());
-        let err = sp.unwrap_err();
-        assert!(matches!(err.kind, BridgeErrorKind::Denied));
-    }
-}

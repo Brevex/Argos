@@ -17,12 +17,16 @@ use crate::io::{AlignedBuf, BlockReader, SourceDevice};
 use crate::reassemble::reassemble_ssd;
 use crate::validate;
 
+const MAX_EXTRACTION_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct RecoveryReport {
     pub bytes_scanned: u64,
     pub candidates_found: u64,
     pub artifacts_recovered: u64,
     pub recovered_files: Vec<String>,
+    pub progress_events: Vec<ProgressEvent>,
+    pub artifact_events: Vec<ArtifactEvent>,
 }
 
 pub fn run(
@@ -35,6 +39,7 @@ pub fn run(
         source_path,
         output_path,
         session,
+        None,
         |event| {
             app.emit("progress", event).ok();
         },
@@ -45,9 +50,22 @@ pub fn run(
     Ok(())
 }
 
-pub fn run_test(
+pub fn run_test(source_path: &Path, output_path: &Path) -> Result<RecoveryReport, ArgosError> {
+    run_test_with_class(source_path, output_path, None)
+}
+
+pub fn run_test_with_device_class(
     source_path: &Path,
     output_path: &Path,
+    device_class: DeviceClass,
+) -> Result<RecoveryReport, ArgosError> {
+    run_test_with_class(source_path, output_path, Some(device_class))
+}
+
+fn run_test_with_class(
+    source_path: &Path,
+    output_path: &Path,
+    forced_device_class: Option<DeviceClass>,
 ) -> Result<RecoveryReport, ArgosError> {
     let session = crate::bridge::Session {
         id: 0,
@@ -58,22 +76,27 @@ pub fn run_test(
         candidates_found: 0,
         artifacts_recovered: 0,
         recovered_files: Vec::new(),
+        progress_events: Vec::new(),
+        artifact_events: Vec::new(),
     };
 
     run_with_callbacks(
         source_path,
         output_path,
         &session,
+        forced_device_class,
         |event| {
             report.bytes_scanned = event.bytes_scanned;
             report.candidates_found = event.candidates_found;
             report.artifacts_recovered = event.artifacts_recovered;
+            report.progress_events.push(event);
         },
         |event| {
             report.recovered_files.push(format!(
                 "{}@{}:{}:{:.2}",
                 event.format, event.offset, event.length, event.score
             ));
+            report.artifact_events.push(event);
         },
     )?;
 
@@ -86,10 +109,41 @@ fn open_extraction_mmap(source_path: &Path, size: u64) -> Result<Mmap, ArgosErro
     Ok(mmap)
 }
 
+fn read_artifact_bytes(
+    file: &std::fs::File,
+    source_size: u64,
+    offset: u64,
+    length: u64,
+) -> Result<Option<Vec<u8>>, ArgosError> {
+    if offset >= source_size {
+        return Ok(None);
+    }
+    let available = source_size - offset;
+    let bounded_length = length.min(available);
+    let len = match usize::try_from(bounded_length) {
+        Ok(n) if n > 0 && n <= MAX_EXTRACTION_BYTES => n,
+        _ => return Ok(None),
+    };
+    let mut buf = vec![0u8; len];
+    match rustix::io::pread(file, &mut buf, offset) {
+        Ok(n) if n == len => Ok(Some(buf)),
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
+fn extension_for(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Png => "png",
+    }
+}
+
 fn run_with_callbacks(
     source_path: &Path,
     output_path: &Path,
     session: &Session,
+    forced_device_class: Option<DeviceClass>,
     mut on_progress: impl FnMut(ProgressEvent),
     mut on_artifact: impl FnMut(ArtifactEvent),
 ) -> Result<(), ArgosError> {
@@ -109,10 +163,11 @@ fn run_with_callbacks(
         Status::Ok,
     ))?;
 
-    let extraction = open_extraction_mmap(source_path, size)?;
+    let extraction_file = std::fs::File::open(source_path)?;
     let mut bad_map = BadSectorMap::new();
 
-    let device_class = crate::io::detect_device_class(source_path);
+    let device_class =
+        forced_device_class.unwrap_or_else(|| crate::io::detect_device_class(source_path));
 
     let (all_candidates, bytes_scanned) = match device_class {
         DeviceClass::Ssd => scan_ssd(
@@ -123,7 +178,10 @@ fn run_with_callbacks(
             &mut bad_map,
             &mut on_progress,
         )?,
-        DeviceClass::Hdd => scan_hdd(&extraction, sector_size, session, size, &mut on_progress)?,
+        DeviceClass::Hdd => {
+            let mmap = open_extraction_mmap(source_path, size)?;
+            scan_hdd(&mmap, sector_size, session, size, &mut on_progress)?
+        }
     };
 
     let bad_path = output_path.join("bad_sectors.csv");
@@ -138,15 +196,18 @@ fn run_with_callbacks(
             if session.cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            let bytes = extraction_slice(&extraction, artifact.offset, artifact.length)?;
+            let bytes =
+                read_artifact_bytes(&extraction_file, size, artifact.offset, artifact.length)
+                    .ok()
+                    .flatten()?;
 
             let score = match artifact.format {
-                ImageFormat::Jpeg => validate::jpeg::validate(bytes).ok()?,
-                ImageFormat::Png => validate::png::validate(bytes).ok()?,
+                ImageFormat::Jpeg => validate::jpeg::validate(&bytes).ok()?,
+                ImageFormat::Png => validate::png::validate(&bytes).ok()?,
             };
 
             if score > 0.0 {
-                let hash = crate::custody::hash(bytes);
+                let hash = crate::custody::hash(&bytes);
                 Some((artifact, score, bytes, hash))
             } else {
                 None
@@ -160,14 +221,15 @@ fn run_with_callbacks(
         }
 
         let name = format!(
-            "{}_{}_{}_{:.2}.bin",
+            "{}_{}_{}_{:.2}.{}",
             hex::encode(&hash[..4]),
             artifact.offset,
             artifact.length,
-            score
+            score,
+            extension_for(artifact.format),
         );
         let mut writer = sink.create_file(&name)?;
-        std::io::Write::write_all(&mut writer, bytes)?;
+        std::io::Write::write_all(&mut writer, &bytes)?;
         drop(writer);
 
         audit.append(AuditEntry::new(
@@ -202,16 +264,6 @@ fn run_with_callbacks(
     ))?;
 
     Ok(())
-}
-
-fn extraction_slice(mmap: &Mmap, offset: u64, length: u64) -> Option<&[u8]> {
-    let start = usize::try_from(offset).ok()?;
-    let len = usize::try_from(length).ok()?;
-    let end = start.checked_add(len)?;
-    if end > mmap.len() {
-        return None;
-    }
-    Some(&mmap[start..end])
 }
 
 fn scan_ssd(
@@ -259,9 +311,18 @@ fn scan_hdd(
     size: u64,
     on_progress: &mut impl FnMut(ProgressEvent),
 ) -> Result<(Vec<Candidate>, u64), ArgosError> {
-    let candidates = crate::carve::hdd::scan(data, block_size)?;
+    let session_id = session.id;
+    let candidates = crate::carve::hdd::scan(data, block_size, |bytes_scanned| {
+        on_progress(ProgressEvent {
+            session_id,
+            bytes_scanned,
+            candidates_found: 0,
+            artifacts_recovered: 0,
+        });
+        !session.cancel.load(Ordering::Relaxed)
+    })?;
     on_progress(ProgressEvent {
-        session_id: session.id,
+        session_id,
         bytes_scanned: size,
         candidates_found: candidates.len() as u64,
         artifacts_recovered: 0,

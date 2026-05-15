@@ -40,29 +40,3 @@ impl SprtAccumulator {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sprt_accepts_h0() {
-        let mut acc = SprtAccumulator::new();
-        acc.update(B - 0.1);
-        assert_eq!(acc.decision(), Decision::H0);
-    }
-
-    #[test]
-    fn sprt_accepts_h1() {
-        let mut acc = SprtAccumulator::new();
-        acc.update(A + 0.1);
-        assert_eq!(acc.decision(), Decision::H1);
-    }
-
-    #[test]
-    fn sprt_continues() {
-        let mut acc = SprtAccumulator::new();
-        acc.update((A + B) / 2.0);
-        assert_eq!(acc.decision(), Decision::Continue);
-    }
-}

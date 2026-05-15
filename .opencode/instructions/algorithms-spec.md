@@ -33,11 +33,12 @@ Device class is determined from kernel-reported rotational flag (Linux: `/sys/bl
 - Decision: `S_n ≥ A` accept H1 (fragmentation), `S_n ≤ B` accept H0 (continuation), else continue accumulating.
 - Thresholds are configuration; defaults are constants in `carve::hdd::sht`.
 
-### JPEG fragment validation (Huffman)
+### JPEG fragment validation (canonical Huffman, baseline; PUP continuation as heuristic in v0.1)
 
-- Reference: van der Meer & van den Bos, work on Huffman-based JPEG carving.
-- A candidate continuation block is valid if, when fed into a JPEG entropy decoder seeded with the prior decoder state, it yields a stream of MCUs that decode without Huffman-table violations or out-of-range DCT coefficients beyond a tolerance.
-- The validator returns a continuous score in [0, 1] used by PUP's weight function and SHT's likelihood ratio.
+- Reference: ITU-T Rec. T.81 / ISO 10918-1, Annex C.2 (canonical Huffman) and F.2.2 (decoder procedures).
+- **`validate(data)` (v0.1, see ADR 0010):** decodes the entropy stream with a canonical Huffman decoder seeded by the JPEG's own DHT segments. Component-to-table mapping is taken from SOS; per-component sampling factors from SOF0. Score `= mcus_decoded / mcus_expected`, with `mcus_expected` derived from frame dimensions and the maximum sampling factor. Non-baseline frames (SOF1/2/3) return `0.5` when structurally complete (worth recovering for visual inspection), `0.0` otherwise. JPEGs using a DRI restart interval recover up to the first restart marker; resumption past restart markers is deferred to v0.2.
+- **`continuation_score(block)` (PUP weighting) in v0.1:** a coarse byte-distribution heuristic — low for zero-dominated blocks or blocks containing `0xFF` EOI/restart markers, high otherwise. This is sufficient for SPRT to discriminate filesystem padding from entropy data. State-resumed canonical decoding inside PUP is the v0.2 target.
+- **v0.2 target:** restart-marker resumption in `validate`; PUP's `continuation_score` upgraded to a Huffman-state-seeded decoder that consumes prior-block state and scores by MCU yield in the new block. Will land behind a criterion benchmark gate.
 
 ### PNG fragment validation (CRC32)
 
@@ -64,7 +65,7 @@ TRIM and garbage collection mathematically eliminate the persistence of evicted 
 ## Validation contracts (cross-pipeline)
 
 Every recovered artifact, regardless of device class, passes through a format-specific structural validator before being emitted:
-- JPEG: SOI/EOI present, Huffman tables consistent, MCU stream decodes.
+- JPEG (v0.1): SOI/EOI present, SOF + DHT + DQT + SOS segments present, baseline entropy stream decodes via canonical Huffman. Restart-marker resumption deferred to v0.2 (ADR 0010).
 - PNG: IHDR present, CRC32s verify on all chunks, IEND present.
 - Future formats: contracts added here before code.
 
