@@ -1,0 +1,255 @@
+//! Multi-pass acquisition of a [`BlockSource`] into a raw image.
+//!
+//! The strategy follows ddrescue: a fast sequential sweep first, skipping over
+//! failing regions so a dying medium yields its healthy majority quickly, then a
+//! refinement pass that revisits every suspect region sector by sector. Sectors
+//! that stay unreadable are zero-filled in the image and — crucially — recorded in
+//! the [`Report`]; the zeros are placeholders, never presented as read data.
+
+use std::backtrace::{Backtrace, BacktraceStatus};
+use std::error::Error;
+use std::fmt;
+use std::io::{self, Seek, SeekFrom, Write};
+
+use argos_core::geometry::{Lba, SectorRange};
+use argos_core::source::BlockSource;
+
+/// Sectors per read during the sweep pass. 128 sectors is 64 KiB at 512-byte
+/// sectors: large enough to stream a healthy HDD near platter speed, small enough
+/// that one failing region costs little re-reading during refinement.
+const SWEEP_CHUNK_SECTORS: u64 = 128;
+
+/// Tuning for [`run`].
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    chunk_sectors: u64,
+}
+
+impl Options {
+    /// Default acquisition tuning.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            chunk_sectors: SWEEP_CHUNK_SECTORS,
+        }
+    }
+
+    /// Sets the sweep read size in sectors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chunk_sectors` is zero — a zero-sector read is a caller bug.
+    #[must_use]
+    pub const fn with_chunk_sectors(mut self, chunk_sectors: u64) -> Self {
+        assert!(chunk_sectors > 0, "sweep chunk must be at least 1 sector");
+        self.chunk_sectors = chunk_sectors;
+        self
+    }
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Outcome of an acquisition: how much was recovered and exactly what was not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    sector_count: u64,
+    unreadable: Vec<SectorRange>,
+}
+
+impl Report {
+    /// Total sectors of the source medium.
+    #[must_use]
+    pub fn sector_count(&self) -> u64 {
+        self.sector_count
+    }
+
+    /// Sectors recovered into the image.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the unreadable map claims more sectors than the medium has —
+    /// a broken invariant must stop the program, not misreport a recovery.
+    #[must_use]
+    pub fn recovered_sectors(&self) -> u64 {
+        let lost: u64 = self.unreadable.iter().map(|range| range.sectors).sum();
+        self.sector_count.checked_sub(lost).unwrap_or_else(|| {
+            panic!(
+                "unreadable map claims {lost} lost sectors on a medium of {} — a wrong number \
+                 must never reach a report",
+                self.sector_count
+            )
+        })
+    }
+
+    /// Runs that stayed unreadable after refinement; their image bytes are zero
+    /// placeholders. Sorted, non-adjacent, non-overlapping.
+    #[must_use]
+    pub fn unreadable(&self) -> &[SectorRange] {
+        &self.unreadable
+    }
+
+    /// Whether every sector of the medium was recovered.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unreadable.is_empty()
+    }
+}
+
+/// Acquisition could not proceed at all (the *destination* failed).
+///
+/// Source read failures are the expected condition and end up in the [`Report`],
+/// not here.
+#[derive(Debug)]
+pub struct AcquireError {
+    source: io::Error,
+    backtrace: Backtrace,
+}
+
+impl AcquireError {
+    /// Backtrace captured where the failure was detected.
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
+    }
+}
+
+impl From<io::Error> for AcquireError {
+    fn from(source: io::Error) -> Self {
+        Self {
+            source,
+            backtrace: Backtrace::capture(),
+        }
+    }
+}
+
+impl fmt::Display for AcquireError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cannot write acquired image: {}", self.source)?;
+        if self.backtrace.status() == BacktraceStatus::Captured {
+            write!(f, "\n{}", self.backtrace)?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for AcquireError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Acquires all of `src` into `dest` as a raw image.
+///
+/// Pass 1 sweeps sequentially in chunks, zero-filling any chunk that fails; pass 2
+/// revisits each failed chunk sector by sector, writing every sector it can still
+/// recover in place. The report maps whatever remains unreadable.
+///
+/// The caller must ensure `dest` does not resolve onto the medium behind `src`
+/// (A-READ-ONLY): this function writes whatever destination it is handed. The
+/// image is written from byte 0 of `dest`; `dest` is rewound before the sweep and
+/// all later seeks are absolute.
+///
+/// # Errors
+///
+/// Fails only when writing or seeking `dest` fails; source damage is reported, not
+/// raised.
+///
+/// # Panics
+///
+/// Panics if `options` sets a sweep chunk whose byte size does not fit `usize`
+/// for this medium's sector size — an absurd configuration is a caller bug.
+pub fn run<S, W>(src: &mut S, dest: &mut W, options: Options) -> Result<Report, AcquireError>
+where
+    S: BlockSource,
+    W: Write + Seek,
+{
+    let geometry = src.geometry();
+    let sector_bytes = geometry.sector_size.get() as usize;
+    let sector_count = geometry.sector_count;
+
+    let chunk_len = usize::try_from(options.chunk_sectors)
+        .ok()
+        .and_then(|sectors| sectors.checked_mul(sector_bytes))
+        .unwrap_or_else(|| {
+            panic!(
+                "sweep chunk of {} sectors x {} does not fit usize",
+                options.chunk_sectors, geometry.sector_size
+            )
+        });
+    let mut buf = vec![0_u8; chunk_len];
+    let mut suspects = Vec::new();
+
+    // Pass 1: sequential sweep.
+    dest.seek(SeekFrom::Start(0))?;
+    let mut lba = Lba::new(0);
+    while lba.get() < sector_count {
+        let sectors = options.chunk_sectors.min(sector_count - lba.get());
+        let len = usize::try_from(sectors).unwrap_or_else(|_| {
+            panic!("chunk sector count {sectors} fits usize: it is capped by the chunk size")
+        }) * sector_bytes;
+        let chunk = &mut buf[..len];
+        if src.read_at(lba, chunk).is_ok() {
+            dest.write_all(chunk)?;
+        } else {
+            chunk.fill(0);
+            dest.write_all(chunk)?;
+            suspects.push(SectorRange::new(lba, sectors));
+        }
+        lba = lba.checked_add(sectors).unwrap_or_else(|| {
+            panic!("sweep position {lba}+{sectors} overflowed past sector count {sector_count}")
+        });
+    }
+
+    // Pass 2: refine each suspect chunk sector by sector.
+    let mut unreadable = Vec::new();
+    let sector_buf = &mut buf[..sector_bytes];
+    for suspect in suspects {
+        for step in 0..suspect.sectors {
+            let sector = suspect.start.checked_add(step).unwrap_or_else(|| {
+                panic!(
+                    "suspect sector {}+{step} overflowed; range was {suspect}",
+                    suspect.start
+                )
+            });
+            match src.read_at(sector, sector_buf) {
+                Ok(()) => {
+                    let offset = sector
+                        .to_byte_offset(geometry.sector_size)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "byte offset of sector {sector} at {} overflowed u64 after the \
+                                 sweep already wrote it",
+                                geometry.sector_size
+                            )
+                        })
+                        .get();
+                    dest.seek(SeekFrom::Start(offset))?;
+                    dest.write_all(sector_buf)?;
+                }
+                Err(_) => push_merged(&mut unreadable, sector),
+            }
+        }
+    }
+    dest.seek(SeekFrom::End(0))?;
+    dest.flush()?;
+
+    Ok(Report {
+        sector_count,
+        unreadable,
+    })
+}
+
+/// Appends `sector` to `runs`, extending the last run when adjacent. Sectors
+/// arrive in ascending order, so this yields sorted, merged, disjoint runs.
+fn push_merged(runs: &mut Vec<SectorRange>, sector: Lba) {
+    if let Some(last) = runs.last_mut()
+        && last.end() == Some(sector)
+    {
+        last.sectors += 1;
+    } else {
+        runs.push(SectorRange::new(sector, 1));
+    }
+}

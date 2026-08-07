@@ -1,0 +1,23 @@
+[package]
+name = "argos_device"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Mocked device core and shared fixtures; production builds cannot reach them.
+test-util = ["argos_core/test-util"]
+
+[dependencies]
+argos_core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+argos_device = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

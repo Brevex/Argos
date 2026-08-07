@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +nightly miri test -p argos_device
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  feature-powerset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-hack --locked
+      - run: cargo hack --feature-powerset check --workspace
+
+  udeps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-udeps --locked
+      - run: cargo +nightly udeps --workspace --all-targets
+
+  guidelines-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rule ids are unique and counts match the index
+        run: |
+          test -z "$(grep -rhoE '^## .*\((M-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | grep -oE 'M-[A-Z0-9-]+' | sort | uniq -d)"
+          test "$(grep -rhoE '^## .*\((M-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l)" = 89
+          test -z "$(grep -rhoE '^## .*\((A-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | grep -oE 'A-[A-Z0-9-]+' | sort | uniq -d)"
+          test "$(grep -rhoE '^## .*\((A-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l)" = 18

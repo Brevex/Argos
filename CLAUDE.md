@@ -30,9 +30,17 @@ cite it by id (`M-UNSOUND`, `M-HOTPATH`).
 | write `///` or `//!` docs, or introduce a constant | `rust-docs` |
 | emit a log, metric or progress event | `rust-telemetry` |
 | reach for a macro | `rust-macros` |
+| open a device/image, parse bytes from a medium, record or report an artifact | `argos-evidence-handling` |
+| write a parser of on-disk structures, or its fuzz target/fixtures | `argos-ondisk-parsing` |
+| implement or change a recovery technique (carving, FS recovery, reassembly) | `argos-recovery-algorithms` |
+| touch `argos_classify`: model, thresholds, inference, dedup | `argos-ml-triage` |
+| touch `argos_ui` or the `--serve` IPC surface | `argos-tauri-shell` |
 
 Reviews are on demand, read-only, and cite rule ids: `rust-design-reviewer`, `rust-safety-reviewer`,
-`rust-perf-reviewer`, `rust-test-reviewer`.
+`rust-perf-reviewer`, `rust-test-reviewer`, `forensic-boundary-reviewer` (the `A-*` rules).
+
+The development plan — target architecture, algorithm pipeline, phases P0–P9 with per-phase skills,
+reviewers and exit criteria — is [docs/DEVELOPMENT-PLAN.md](docs/DEVELOPMENT-PLAN.md).
 
 ## Non-negotiables
 
@@ -60,19 +68,26 @@ These hold without consulting a skill:
 ## Layout
 
 ```
-crates/argos/         CLI binary — stdout is its UI; may use one app-error crate (anyhow/eyre)
-crates/argos_core/    domain newtypes (Lba, ByteOffset, SectorSize) and shared errors
-crates/argos_device/  raw device access + per-OS HAL — the only crate allowed to contain unsafe
-crates/argos_carve/   signature carving over `impl Read + Seek` (sans-IO, testable in memory)
-crates/argos_fs/      filesystem metadata parsing (NTFS/ext4/APFS)
-crates/argos_report/  findings, manifests, hashes, chain of custody
+crates/argos/          CLI binary — stdout is its UI; also the engine process (`--serve`);
+                       may use one app-error crate (anyhow/eyre)
+crates/argos_core/     domain newtypes (Lba, ByteOffset, SectorSize, DeviceClass, Confidence),
+                       port traits (BlockSource, …) and canonical errors shared across crates
+crates/argos_device/   BlockSource adapters: per-OS HAL, image files, acquisition — the only
+                       crate allowed to contain unsafe
+crates/argos_fs/       partition tables + filesystem metadata recovery (NTFS/ext4/FAT/APFS)
+                       + prior-filesystem residue scan
+crates/argos_carve/    signature carving, block classification and fragment reassembly over
+                       `impl Read + Seek` (sans-IO, testable in memory)
+crates/argos_classify/ ML triage (pure-Rust inference) + perceptual-hash dedup
+crates/argos_engine/   scan pipeline, session lifecycle, concurrency, finding merge, confidence
+crates/argos_report/   findings, manifests, hashes, chain of custody
+crates/argos_ui/       Tauri presentation shell — no recovery logic
 ```
 
 Library crates use canonical error structs (`M-ERRORS-CANONICAL-STRUCTS`); only the binary may use
-an application error crate (`M-APP-ERROR`).
-
-This layout is the target, not the current state — the workspace migration is the next task and is
-driven by `rust-workspace-setup`.
+an application error crate (`M-APP-ERROR`). The dependency DAG in
+[docs/DEVELOPMENT-PLAN.md](docs/DEVELOPMENT-PLAN.md) §2.2 is binding: `argos_fs`, `argos_carve`
+and `argos_classify` never depend on each other or on `argos_device`; they meet in `argos_engine`.
 
 ## Checks
 

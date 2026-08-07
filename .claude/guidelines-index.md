@@ -23,6 +23,9 @@ Integrity check — every id defined exactly once across all reference files:
 grep -rhoE '^## .*\((M-[A-Z0-9-]+)\)' .claude/skills/*/reference.md \
   | grep -oE 'M-[A-Z0-9-]+' | sort | uniq -d          # must print nothing
 grep -rhoE '^## .*\((M-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l   # must print 89
+grep -rhoE '^## .*\((A-[A-Z0-9-]+)\)' .claude/skills/*/reference.md \
+  | grep -oE 'A-[A-Z0-9-]+' | sort | uniq -d          # must print nothing
+grep -rhoE '^## .*\((A-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l   # must print 18
 ```
 
 ## Rules per skill
@@ -41,6 +44,41 @@ grep -rhoE '^## .*\((M-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l   # 
 | [rust-testing](skills/rust-testing/SKILL.md) | Tests and mockable I/O | 4 |
 | [rust-telemetry](skills/rust-telemetry/SKILL.md) | Logging and telemetry | 3 |
 | | **Total** | **89** |
+
+## Argos-specific rules (A-*)
+
+Project rules that exist beside the 89 `M-*` rules, same conventions: one rule → one
+`reference.md`, reviewers cite ids. The `forensic-boundary-reviewer` agent audits against these.
+
+| Skill | Scope | Rules |
+| --- | --- | ---: |
+| [argos-evidence-handling](skills/argos-evidence-handling/SKILL.md) | Read-only media, untrusted on-disk values, provenance, honest confidence, content-free logs | 5 |
+| [argos-ondisk-parsing](skills/argos-ondisk-parsing/SKILL.md) | Safe checked parsing, bounded allocation, fuzzing and corrupt fixtures | 4 |
+| [argos-ml-triage](skills/argos-ml-triage/SKILL.md) | Pinned local model, triage-not-verdict, pure-Rust inference, eval gating | 4 |
+| [argos-tauri-shell](skills/argos-tauri-shell/SKILL.md) | Shell without domain logic, CLI-first, versioned DTOs, event-driven progress | 4 |
+| [argos-recovery-algorithms](skills/argos-recovery-algorithms/SKILL.md) | Implement from written algorithm specs | 1 |
+| | **Total** | **18** |
+
+| Rule | Skill |
+| --- | --- |
+| [`A-ALGORITHM-FROM-SPEC`](skills/argos-recovery-algorithms/reference.md#A-ALGORITHM-FROM-SPEC) | argos-recovery-algorithms |
+| [`A-BOUNDED-ALLOC`](skills/argos-ondisk-parsing/reference.md#A-BOUNDED-ALLOC) | argos-ondisk-parsing |
+| [`A-CLI-FIRST`](skills/argos-tauri-shell/reference.md#A-CLI-FIRST) | argos-tauri-shell |
+| [`A-CONFIDENCE-HONEST`](skills/argos-evidence-handling/reference.md#A-CONFIDENCE-HONEST) | argos-evidence-handling |
+| [`A-DTO-VERSIONED`](skills/argos-tauri-shell/reference.md#A-DTO-VERSIONED) | argos-tauri-shell |
+| [`A-EVAL-GATED`](skills/argos-ml-triage/reference.md#A-EVAL-GATED) | argos-ml-triage |
+| [`A-EVENTS-NOT-POLLING`](skills/argos-tauri-shell/reference.md#A-EVENTS-NOT-POLLING) | argos-tauri-shell |
+| [`A-FIXTURE-BUILDER`](skills/argos-ondisk-parsing/reference.md#A-FIXTURE-BUILDER) | argos-ondisk-parsing |
+| [`A-FUZZ-EVERY-PARSER`](skills/argos-ondisk-parsing/reference.md#A-FUZZ-EVERY-PARSER) | argos-ondisk-parsing |
+| [`A-INFERENCE-PURE-RUST`](skills/argos-ml-triage/reference.md#A-INFERENCE-PURE-RUST) | argos-ml-triage |
+| [`A-MODEL-PINNED`](skills/argos-ml-triage/reference.md#A-MODEL-PINNED) | argos-ml-triage |
+| [`A-NO-CONTENT-IN-LOGS`](skills/argos-evidence-handling/reference.md#A-NO-CONTENT-IN-LOGS) | argos-evidence-handling |
+| [`A-PARSER-SAFE`](skills/argos-ondisk-parsing/reference.md#A-PARSER-SAFE) | argos-ondisk-parsing |
+| [`A-PROVENANCE`](skills/argos-evidence-handling/reference.md#A-PROVENANCE) | argos-evidence-handling |
+| [`A-READ-ONLY`](skills/argos-evidence-handling/reference.md#A-READ-ONLY) | argos-evidence-handling |
+| [`A-SHELL-NO-DOMAIN`](skills/argos-tauri-shell/reference.md#A-SHELL-NO-DOMAIN) | argos-tauri-shell |
+| [`A-TRIAGE-NOT-VERDICT`](skills/argos-ml-triage/reference.md#A-TRIAGE-NOT-VERDICT) | argos-ml-triage |
+| [`A-UNTRUSTED-ONDISK`](skills/argos-evidence-handling/reference.md#A-UNTRUSTED-ONDISK) | argos-evidence-handling |
 
 ## Rules by skill
 
