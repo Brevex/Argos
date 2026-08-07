@@ -5,7 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Synthetic filesystem-image builders shared with dependent crates' test suites.
+test-util = []
+
 [dependencies]
+argos_core.workspace = true
+crc32fast.workspace = true
+
+[dev-dependencies]
+argos_fs = { workspace = true, features = ["test-util"] }
+crc32fast.workspace = true
 
 [lints]
 workspace = true

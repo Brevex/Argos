@@ -1,0 +1,58 @@
+[package]
+name = "argos_fs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+argos_core = { path = "../../argos_core" }
+argos_fs = { path = ".." }
+
+[[bin]]
+name = "part_scan"
+path = "fuzz_targets/part_scan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs_record"
+path = "fuzz_targets/ntfs_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ext4_parse"
+path = "fuzz_targets/ext4_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat_dir"
+path = "fuzz_targets/fat_dir.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apfs_open"
+path = "fuzz_targets/apfs_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "residue_sweep"
+path = "fuzz_targets/residue_sweep.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

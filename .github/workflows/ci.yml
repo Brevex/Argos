@@ -77,10 +77,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked
-      - name: Run every fuzz target for a fixed budget
+      - name: Fuzz crates build
+        # The fuzz crates are outside the workspace, so clippy and test do
+        # not cover them; a target that stopped compiling would otherwise be
+        # silently skipped.
+        run: |
+          cargo +nightly fuzz check -Zbuild-std --manifest-path crates/argos_carve/fuzz/Cargo.toml 2>/dev/null \
+            || cargo +nightly fuzz build --fuzz-dir crates/argos_carve/fuzz
+          cargo +nightly fuzz build --fuzz-dir crates/argos_fs/fuzz
+      - name: Run every carving fuzz target for a fixed budget
         working-directory: crates/argos_carve
         run: |
           for target in jpeg_validate png_validate exif_thumbnail carver_scan; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
+          done
+      - name: Run every filesystem fuzz target for a fixed budget
+        working-directory: crates/argos_fs
+        run: |
+          for target in part_scan ntfs_record ext4_parse fat_dir apfs_open residue_sweep; do
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
 

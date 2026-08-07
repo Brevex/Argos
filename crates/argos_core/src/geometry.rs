@@ -180,6 +180,35 @@ impl fmt::Display for SectorRange {
     }
 }
 
+/// A contiguous run of bytes: `start` inclusive, `len` long.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteRange {
+    /// First byte of the run.
+    pub start: ByteOffset,
+    /// Length of the run in bytes.
+    pub len: u64,
+}
+
+impl ByteRange {
+    /// The run of `len` bytes starting at `start`.
+    #[must_use]
+    pub const fn new(start: ByteOffset, len: u64) -> Self {
+        Self { start, len }
+    }
+
+    /// First byte past the end of the run, or `None` on overflow.
+    #[must_use]
+    pub const fn end(self) -> Option<ByteOffset> {
+        self.start.checked_add(self.len)
+    }
+}
+
+impl fmt::Display for ByteRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "bytes {}..+{}", self.start, self.len)
+    }
+}
+
 /// A value could not be interpreted as valid storage geometry.
 #[derive(Debug)]
 pub struct GeometryError {

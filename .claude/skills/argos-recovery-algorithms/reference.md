@@ -43,7 +43,10 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   defines a candidate region `[start, start + size)`.
 - **Invariants**: anchors are validated by internal consistency (checksums, sanity ranges), never
   by position; overlapping candidate volumes are all kept — later stages decide by yield.
-- **Output**: candidate volumes tagged `residual`, fed to stage C parsers.
+- **Output**: candidate volumes tagged `residual`, fed to stage C parsers, plus the regions
+  holding orphaned NTFS `FILE` records (recognised by signature *and* a verifying fixup array),
+  fed to the NTFS orphan scan together with the geometry of the volume they belong to — run lists
+  are volume-relative, so the wrong volume start yields extents pointing at the wrong bytes.
 
 ## Spec: NTFS deleted-file recovery
 
@@ -80,14 +83,23 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   entries retain exact extents.
 - Assume contiguity from the start cluster for `ceil(size / cluster_size)` clusters — valid for
   most camera/SD writes. Hand the resulting byte range to the stage D validator; if it fails
-  validation, demote to stage E with the start cluster as the known first fragment.
-- **Tier**: `FsMetadata` only if validation passes end-to-end; otherwise the reassembly tier.
+  validation, demote to stage E with the start cluster as the known first fragment. Every
+  reconstructed range is capped at the volume: an on-disk size never claims bytes the volume does
+  not contain.
+- **Tier**: an exFAT `NoFatChain` stream stores its extents exactly, so it is `FsMetadata` on the
+  strength of the metadata alone. Everything else — every FAT32 entry, and exFAT streams that use
+  the chain — rests on the contiguity *assumption*, so it is the reassembly tier until a stage D
+  validator confirms the range end to end.
 
 ## Spec: APFS deleted-file recovery
 
 - Parse the checkpoint descriptor area: it retains a ring of recent container superblocks
   (`NXSB`, Fletcher-64 checksummed). For each recent checkpoint, resolve its object map (omap
   B-tree) and volume superblocks, then walk filesystem-record B-trees.
+- Implemented subset: the omap is resolved as a single leaf node, and filesystem-tree index nodes
+  are followed as physical block numbers. Multi-level omaps and oid-indirected index nodes are not
+  resolved yet; a container using them yields no records rather than wrong ones. Removing this
+  limitation updates this paragraph in the same change.
 - Diff inode sets across checkpoints: an inode present in checkpoint *n−k* but absent in *n* is
   recently deleted; its file extents are in the older tree. Enumerate local snapshots the same way.
 - All B-tree walks are bounded (checked depth, node counts) per `A-UNTRUSTED-ONDISK`.
