@@ -70,6 +70,20 @@ jobs:
       - run: cargo install cargo-udeps --locked
       - run: cargo +nightly udeps --workspace --all-targets
 
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      - name: Run every fuzz target for a fixed budget
+        working-directory: crates/argos_carve
+        run: |
+          for target in jpeg_validate png_validate exif_thumbnail carver_scan; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
+          done
+
   guidelines-index:
     runs-on: ubuntu-latest
     steps:

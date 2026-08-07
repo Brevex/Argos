@@ -5,7 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Synthetic image/disk builders shared with dependent crates' test suites.
+test-util = []
+
 [dependencies]
+argos_core.workspace = true
+crc32fast.workspace = true
+memchr.workspace = true
+miniz_oxide.workspace = true
+
+[dev-dependencies]
+argos_carve = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

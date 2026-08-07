@@ -1,0 +1,44 @@
+[package]
+name = "argos_carve-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+argos_carve = { path = ".." }
+argos_core = { path = "../../argos_core" }
+
+[[bin]]
+name = "jpeg_validate"
+path = "fuzz_targets/jpeg_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png_validate"
+path = "fuzz_targets/png_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exif_thumbnail"
+path = "fuzz_targets/exif_thumbnail.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "carver_scan"
+path = "fuzz_targets/carver_scan.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["crates/argos_carve/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,8 +19,16 @@ argos_fs = { path = "crates/argos_fs", version = "0.1.0" }
 argos_report = { path = "crates/argos_report", version = "0.1.0" }
 argos_ui = { path = "crates/argos_ui", version = "0.1.0" }
 
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
 libc = "0.2"
+memchr = "2"
 mimalloc = "0.1"
+miniz_oxide = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 
 [workspace.lints.rust]

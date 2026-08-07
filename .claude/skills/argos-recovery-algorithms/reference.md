@@ -99,9 +99,14 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   entropy-coded scan → (`RSTn` | `EOI`). Every segment length is bounds-checked against remaining
   candidate range before use.
 - In the entropy-coded scan, `0xFF` must be followed by `0x00` (stuffing), `RSTn` in cyclic order
-  when `DRI` set, or a legal marker; anything else marks a **fragmentation point** at that exact
-  offset, and the candidate is queued for stage E carrying the decoded-so-far state.
-- EXIF `APP1` thumbnails are extracted as separate artifacts, tier `PartialOrThumbnail`.
+  when `DRI` set, or a legal marker; anything else marks a **fragmentation point** at the offset
+  of the `0xFF` that introduced the violation, and the candidate is queued for stage E carrying
+  the decoded-so-far state (the decode-state summary lands with stage E itself).
+- EXIF `APP1` thumbnails are extracted as separate artifacts, tier `PartialOrThumbnail`. When the
+  same extent also validates as a standalone contiguous image (the thumbnail carved directly out
+  of a broken parent), the finding-merge rule applies: the merged finding keeps
+  `ContiguousCarve` — it genuinely validated end to end — with the parent offset retained as
+  provenance.
 - Progressive JPEG: multiple `SOS` scans are legal; track `EOI` only.
 
 ## Spec: PNG validation state machine
@@ -110,7 +115,9 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   CRC32 verified per chunk. `IHDR` first (dimensions sanity-capped), `IDAT` runs inflated
   incrementally (bounded output per step), `IEND` terminates.
 - First CRC or inflate failure marks the fragmentation point; queue for stage E with the offset
-  and inflate state summary.
+  (an inflate failure localizes it exactly; a CRC mismatch cannot localize damage within its
+  chunk, so the chunk data start is reported as the earliest offset corruption may begin) and
+  the inflate state summary (carried once stage E lands).
 
 ## Spec: block classification
 
