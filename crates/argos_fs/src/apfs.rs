@@ -308,6 +308,19 @@ struct NxSuperblock {
     desc_blocks: u32,
 }
 
+/// Whether `raw` begins with a container-superblock magic.
+///
+/// A four-byte test, so the residue sweep can skip the checksum verification
+/// and the block-sized staging read [`Apfs::open`] performs. The sweep runs at
+/// every sector boundary of the whole surface, which makes this the difference
+/// between a scan bounded by the medium and one bounded by memory bandwidth
+/// (`M-HOTPATH`). It decides nothing on its own: the magic is a hint, and
+/// [`Apfs::open`] still verifies everything before a container is reported.
+#[must_use]
+pub fn has_container_magic(raw: &[u8]) -> bool {
+    u32_le(raw, 32) == Some(NX_MAGIC)
+}
+
 impl NxSuperblock {
     fn parse(raw: &[u8]) -> Option<Self> {
         if u32_le(raw, 32)? != NX_MAGIC {

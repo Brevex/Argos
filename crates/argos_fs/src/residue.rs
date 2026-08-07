@@ -27,9 +27,24 @@ const STEP_BYTES: u64 = 512;
 /// reads while the window buffer stays small.
 const WINDOW_BYTES: usize = 1024 * 1024;
 
-/// Bytes carried between windows so an anchor straddling a window edge is
-/// still whole: the largest structure a validator inspects (an APFS block).
-const WINDOW_OVERLAP: usize = 4096;
+/// Overlap a caller must carry between consecutive [`scan_window`] buffers.
+///
+/// It is the largest structure a validator inspects (an APFS block), so an
+/// anchor straddling a buffer boundary is still whole in the next one. Feeding
+/// disjoint buffers silently loses the anchors on those boundaries.
+pub const WINDOW_OVERLAP_BYTES: usize = 4096;
+
+/// Cap on volume anchors one sweep reports.
+///
+/// A medium can hold a crafted superblock at every sector; without a ceiling
+/// the sweep's own result set would exhaust memory before anything could be
+/// reported (A-BOUNDED-ALLOC). Real media hold a handful of volumes, so a
+/// sweep that reaches this has found a pattern, not a disk.
+pub const MAX_VOLUMES: usize = 4096;
+
+/// Cap on orphaned `FILE`-record regions one sweep reports. Adjacent records
+/// coalesce into runs, so this bounds genuinely scattered residue.
+pub const MAX_RECORD_REGIONS: usize = 65_536;
 
 /// Everything one sweep located.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,6 +55,63 @@ pub struct Sweep {
     /// Hand these to [`crate::ntfs::orphan_scan`] with the geometry of the
     /// volume they belong to.
     pub ntfs_records: Vec<ByteRange>,
+}
+
+impl Sweep {
+    /// Appends everything `other` found; call [`Sweep::normalize`] afterwards.
+    ///
+    /// This is how the results of windows scanned out of order — by parallel
+    /// workers, say — become one sweep.
+    pub fn merge(&mut self, other: Self) {
+        self.volumes.extend(other.volumes);
+        self.ntfs_records.extend(other.ntfs_records);
+    }
+
+    /// Orders both result lists, drops the duplicates that window overlap
+    /// produces, and coalesces adjacent `FILE`-record regions into runs.
+    pub fn normalize(&mut self) {
+        self.volumes
+            .sort_by_key(|volume| (volume.range.start, volume.range.len));
+        self.volumes.dedup();
+
+        self.ntfs_records
+            .sort_by_key(|region| (region.start, region.len));
+        self.ntfs_records.dedup();
+        let merged = self.ntfs_records.drain(..).fold(
+            Vec::<ByteRange>::new(),
+            |mut runs: Vec<ByteRange>, region| {
+                match runs.last_mut() {
+                    // Adjacent or overlapping: extend the run to the furthest end.
+                    Some(last)
+                        if last.end().map(ByteOffset::get) >= Some(region.start.get())
+                            && last.start <= region.start =>
+                    {
+                        let end = last
+                            .end_saturating()
+                            .get()
+                            .max(region.end_saturating().get());
+                        last.len = end.saturating_sub(last.start.get());
+                    }
+                    _ => runs.push(region),
+                }
+                runs
+            },
+        );
+        self.ntfs_records = merged;
+    }
+
+    /// Re-labels as [`Origin::Current`] every volume whose start matches one
+    /// of the ranges the current partition table lists.
+    pub fn mark_current(&mut self, current: &[ByteRange]) {
+        for volume in &mut self.volumes {
+            if current
+                .iter()
+                .any(|range| range.start == volume.range.start)
+            {
+                volume.origin = Origin::Current;
+            }
+        }
+    }
 }
 
 /// Sweeps `src` (of `len` bytes) for filesystem anchors.
@@ -56,8 +128,7 @@ pub fn sweep<R: Read + Seek>(
     current: &[ByteRange],
 ) -> Result<Sweep, FsError> {
     let mut window = Vec::new();
-    let mut found = Vec::new();
-    let mut records: Vec<ByteRange> = Vec::new();
+    let mut found = Sweep::default();
     let mut pos = 0_u64;
 
     while pos < len {
@@ -68,40 +139,52 @@ pub fn sweep<R: Read + Seek>(
                 break;
             }
         }
-        let mut at = 0_usize;
-        while at + 512 <= window.len() {
-            let absolute = pos + at as u64;
-            match anchor_at(&window[at..], absolute, len) {
-                Some(Anchor::Volume(_)) => {
-                    if let Some(volume) = volume_at(&window[at..], absolute, len) {
-                        found.push(volume);
-                    }
-                }
-                Some(Anchor::NtfsRecord) => push_record_region(&mut records, absolute),
-                None => {}
-            }
-            at += usize::try_from(STEP_BYTES).unwrap_or(512);
+        if !scan_window(&window, ByteOffset::new(pos), len, &mut found) {
+            break;
         }
         if pos + want as u64 >= len {
             break;
         }
-        pos += (want - WINDOW_OVERLAP) as u64;
+        pos += (want - WINDOW_OVERLAP_BYTES) as u64;
     }
 
-    for volume in &mut found {
-        if current
-            .iter()
-            .any(|range| range.start == volume.range.start)
-        {
-            volume.origin = Origin::Current;
+    found.mark_current(current);
+    found.normalize();
+    Ok(found)
+}
+
+/// Tests every sector boundary in `window` for anchors, appending to `out`.
+///
+/// `start` is the absolute position of `window[0]` and `medium_len` bounds
+/// what an anchor may claim. Consecutive windows must overlap by
+/// [`WINDOW_OVERLAP_BYTES`]; the resulting duplicates are removed by
+/// [`Sweep::normalize`], which the caller runs once at the end.
+///
+/// Volumes are appended with [`Origin::Residual`]; [`Sweep::mark_current`]
+/// re-labels the ones the current partition table also lists.
+///
+/// Returns `false` once [`MAX_VOLUMES`] or [`MAX_RECORD_REGIONS`] is reached,
+/// meaning the sweep stopped early and its result is incomplete.
+pub fn scan_window(window: &[u8], start: ByteOffset, medium_len: u64, out: &mut Sweep) -> bool {
+    let step = usize::try_from(STEP_BYTES).unwrap_or(512);
+    let mut at = 0_usize;
+    while at + 512 <= window.len() {
+        if out.volumes.len() >= MAX_VOLUMES || out.ntfs_records.len() >= MAX_RECORD_REGIONS {
+            return false;
         }
+        let absolute = start.get().saturating_add(at as u64);
+        match anchor_at(&window[at..], absolute, medium_len) {
+            Some(Anchor::Volume(_)) => {
+                if let Some(volume) = volume_at(&window[at..], absolute, medium_len) {
+                    out.volumes.push(volume);
+                }
+            }
+            Some(Anchor::NtfsRecord) => push_record_region(&mut out.ntfs_records, absolute),
+            None => {}
+        }
+        at += step;
     }
-    found.sort_by_key(|volume| (volume.range.start, volume.range.len));
-    found.dedup();
-    Ok(Sweep {
-        volumes: found,
-        ntfs_records: records,
-    })
+    true
 }
 
 /// Extends the last record region when adjacent, so a run of orphaned
@@ -178,7 +261,10 @@ pub fn volume_at(window: &[u8], at: u64, medium_len: u64) -> Option<Volume> {
             origin: Origin::Residual,
         });
     }
+    // The magic test comes first: the full container parse stages a block and
+    // verifies a checksum, and this runs at every sector of the medium.
     if window.len() >= 4096
+        && crate::apfs::has_container_magic(window)
         && let Some(container) = apfs_container_bytes(window)
     {
         return Some(Volume {

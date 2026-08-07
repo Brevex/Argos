@@ -9,9 +9,11 @@ pub mod acquire;
 
 mod device;
 mod image;
+mod reader;
 
 #[cfg(feature = "test-util")]
 pub mod mock;
 
 pub use device::{Device, DeviceError};
 pub use image::ImageSource;
+pub use reader::BlockReader;

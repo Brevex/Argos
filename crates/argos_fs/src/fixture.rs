@@ -108,6 +108,25 @@ impl FilePlan {
         }
     }
 
+    /// Replaces the generated pattern with specific bytes — a real image, for
+    /// tests that follow the content all the way out of the pipeline.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `content` is exactly as long as the plan's parts.
+    #[must_use]
+    pub fn with_content(mut self, content: Vec<u8>) -> Self {
+        let planned: usize = self.parts.iter().map(|&(_, len)| len).sum();
+        assert_eq!(
+            content.len(),
+            planned,
+            "content of {} bytes does not fill the plan's {planned} bytes",
+            content.len()
+        );
+        self.content = content;
+        self
+    }
+
     /// Absolute offset of the file's first byte.
     #[must_use]
     pub fn offset(&self) -> usize {

@@ -5,7 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Collecting artifact sink and scan fixtures shared with dependent crates' tests.
+test-util = ["argos_carve/test-util", "argos_fs/test-util"]
+
 [dependencies]
+argos_carve.workspace = true
+argos_core.workspace = true
+argos_fs.workspace = true
+crossbeam-channel.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+argos_engine = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

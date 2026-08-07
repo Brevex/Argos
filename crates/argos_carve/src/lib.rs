@@ -33,6 +33,10 @@ mod stream;
 #[cfg(feature = "test-util")]
 pub mod fixture;
 
+/// The format vocabulary is shared workspace-wide; carving is where a format
+/// is *decided*, not where it is defined.
+pub use argos_core::Format;
+
 /// Upper bound on a single carved image, in bytes.
 ///
 /// Chosen far above any real photograph (a 200-megapixel uncompressed TIFF
@@ -59,34 +63,151 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 /// boundary is still found: longest signature length minus one.
 const WINDOW_OVERLAP: usize = PNG_SIGNATURE.len() - 1;
 
-/// Image format of a carved finding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Format {
-    /// JFIF/EXIF JPEG (ITU-T T.81).
-    Jpeg,
-    /// PNG (ISO 15948).
-    Png,
+/// Bytes a caller must carry between consecutive buffers handed to
+/// [`Detector::hits_in`], so a signature straddling the boundary is still
+/// found. Feeding disjoint buffers silently loses those candidates.
+pub const SIGNATURE_OVERLAP_BYTES: usize = WINDOW_OVERLAP;
+
+/// An unvalidated signature hit: a position that *might* start an image.
+///
+/// A candidate becomes a [`Finding`] only by passing [`validate`]; a
+/// magic-byte hit on its own is never evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Candidate {
+    /// Absolute byte position of the signature in the medium.
+    pub offset: ByteOffset,
+    /// Format whose signature matched.
+    pub format: Format,
 }
 
-impl Format {
-    /// Conventional file extension for the format.
-    #[must_use]
-    pub const fn extension(self) -> &'static str {
-        match self {
-            Self::Jpeg => "jpg",
-            Self::Png => "png",
-        }
+/// Multi-pattern signature matcher over in-memory buffers.
+///
+/// This is the surface-rate half of carving: it runs over every byte of the
+/// medium, so it does no I/O, allocates nothing per hit beyond the caller's
+/// output vector, and matches all signatures in one pass.
+#[derive(Debug)]
+pub struct Detector {
+    jpeg_finder: Finder<'static>,
+    png_finder: Finder<'static>,
+}
+
+impl Default for Detector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl fmt::Display for Format {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Jpeg => "jpeg",
-            Self::Png => "png",
+impl Detector {
+    /// A detector for every format Argos carves.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            jpeg_finder: Finder::new(&JPEG_SOI),
+            png_finder: Finder::new(&PNG_SIGNATURE),
+        }
+    }
+
+    /// Appends every signature hit in `window` to `out`, ordered by offset.
+    ///
+    /// `start` is the absolute position of `window[0]`; consecutive windows
+    /// must overlap by [`SIGNATURE_OVERLAP_BYTES`].
+    ///
+    /// The cap matters: a medium whose free space is a repeated signature —
+    /// trivial to produce deliberately — yields a hit every few bytes, and an
+    /// uncapped collector would exhaust memory before the scan could report
+    /// anything at all (A-BOUNDED-ALLOC). Returns whether every hit fit.
+    pub fn hits_in(
+        &self,
+        window: &[u8],
+        start: ByteOffset,
+        cap: usize,
+        out: &mut Vec<Candidate>,
+    ) -> bool {
+        let mark = out.len();
+        let at = |i: usize, format| Candidate {
+            offset: ByteOffset::new(start.get().saturating_add(i as u64)),
+            format,
         };
-        f.write_str(name)
+        out.extend(
+            self.jpeg_finder
+                .find_iter(window)
+                .map(|i| at(i, Format::Jpeg)),
+        );
+        out.extend(
+            self.png_finder
+                .find_iter(window)
+                .map(|i| at(i, Format::Png)),
+        );
+        out[mark..].sort_unstable();
+        if out.len() <= cap {
+            return true;
+        }
+        out.truncate(cap);
+        false
+    }
+}
+
+/// Bytes of a buffer [`identify`] needs to reach a verdict.
+pub const MAX_SIGNATURE_BYTES: usize = PNG_SIGNATURE.len();
+
+/// The format `prefix` signals, if any.
+///
+/// This is a signature test, not validation: it answers "could these bytes
+/// begin an image?" and nothing more. A caller that needs an answer it can
+/// report must run [`validate`].
+#[must_use]
+pub fn identify(prefix: &[u8]) -> Option<Format> {
+    if prefix.starts_with(&PNG_SIGNATURE) {
+        Some(Format::Png)
+    } else if prefix.starts_with(&JPEG_SOI) {
+        Some(Format::Jpeg)
+    } else {
+        None
+    }
+}
+
+/// Re-validates an embedded thumbnail as a standalone JPEG, returning its
+/// confirmed length.
+///
+/// `None` when the thumbnail does not itself validate: a corrupt thumbnail is
+/// not evidence, even when the EXIF metadata pointing at it parsed cleanly.
+/// `end` is the medium end, which caps the read.
+///
+/// # Errors
+///
+/// Fails only when reading or seeking `src` fails.
+pub fn validate_thumbnail<R: Read + Seek>(
+    src: &mut R,
+    thumbnail: Thumbnail,
+    end: u64,
+    scratch: &mut Scratch,
+) -> Result<Option<u64>, CarveError> {
+    let limit = end.min(thumbnail.offset.get().saturating_add(thumbnail.length));
+    match jpeg::validate(src, thumbnail.offset, limit, scratch)? {
+        Verdict::Complete { length, .. } => Ok(Some(length)),
+        Verdict::Corrupt { .. } => Ok(None),
+    }
+}
+
+/// Validates the candidate at `start` as `format`.
+///
+/// Consumes at most `limit - start` bytes of `src`; callers cap `limit` at the
+/// medium end and at [`MAX_IMAGE_BYTES`].
+///
+/// # Errors
+///
+/// Fails only when reading or seeking `src` fails. A structural violation is a
+/// [`Verdict::Corrupt`], not an error — corruption is the expected input.
+pub fn validate<R: Read + Seek>(
+    format: Format,
+    src: &mut R,
+    start: ByteOffset,
+    limit: u64,
+    scratch: &mut Scratch,
+) -> Result<Verdict, CarveError> {
+    match format {
+        Format::Jpeg => jpeg::validate(src, start, limit, scratch),
+        Format::Png => png::validate(src, start, limit, scratch),
     }
 }
 
@@ -220,10 +341,9 @@ impl Error for CarveError {
 /// worker thread.
 #[derive(Debug)]
 pub struct Carver {
-    jpeg_finder: Finder<'static>,
-    png_finder: Finder<'static>,
+    detector: Detector,
     window: Vec<u8>,
-    hits: Vec<(usize, Format)>,
+    hits: Vec<Candidate>,
     scratch: Scratch,
 }
 
@@ -238,8 +358,7 @@ impl Carver {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            jpeg_finder: Finder::new(&JPEG_SOI),
-            png_finder: Finder::new(&PNG_SIGNATURE),
+            detector: Detector::new(),
             window: Vec::new(),
             hits: Vec::new(),
             scratch: Scratch::new(),
@@ -275,22 +394,19 @@ impl Carver {
                 .and_then(|_| src.read_exact(&mut self.window))
                 .map_err(|source| CarveError::io(ByteOffset::new(pos), source))?;
 
-            self.collect_hits();
+            self.hits.clear();
+            // One window's worth of hits is already bounded by the window.
+            let cap = self.window.len();
+            self.detector
+                .hits_in(&self.window, ByteOffset::new(pos), cap, &mut self.hits);
             for i in 0..self.hits.len() {
-                let (rel, format) = self.hits[i];
-                let abs = pos + rel as u64;
+                let Candidate { offset, format } = self.hits[i];
+                let abs = offset.get();
                 if abs < resume {
                     continue;
                 }
                 let limit = end.min(abs.saturating_add(MAX_IMAGE_BYTES));
-                let verdict = match format {
-                    Format::Jpeg => {
-                        jpeg::validate(src, ByteOffset::new(abs), limit, &mut self.scratch)
-                    }
-                    Format::Png => {
-                        png::validate(src, ByteOffset::new(abs), limit, &mut self.scratch)
-                    }
-                }?;
+                let verdict = validate(format, src, offset, limit, &mut self.scratch)?;
                 match verdict {
                     Verdict::Complete { length, thumbnail } => {
                         findings.push(Finding {
@@ -336,9 +452,7 @@ impl Carver {
         let Some(thumb) = thumbnail else {
             return Ok(());
         };
-        let limit = end.min(thumb.offset.get().saturating_add(thumb.length));
-        let verdict = jpeg::validate(src, thumb.offset, limit, &mut self.scratch)?;
-        if let Verdict::Complete { length, .. } = verdict {
+        if let Some(length) = validate_thumbnail(src, thumb, end, &mut self.scratch)? {
             findings.push(Finding {
                 format: Format::Jpeg,
                 offset: thumb.offset,
@@ -348,20 +462,6 @@ impl Carver {
             });
         }
         Ok(())
-    }
-
-    /// Collects signature hits in the current window, ordered by offset.
-    fn collect_hits(&mut self) {
-        self.hits.clear();
-        let window = &self.window;
-        self.hits.extend(
-            self.jpeg_finder
-                .find_iter(window)
-                .map(|i| (i, Format::Jpeg)),
-        );
-        self.hits
-            .extend(self.png_finder.find_iter(window).map(|i| (i, Format::Png)));
-        self.hits.sort_unstable_by_key(|&(i, _)| i);
     }
 }
 

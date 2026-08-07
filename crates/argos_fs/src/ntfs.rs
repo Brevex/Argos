@@ -179,8 +179,7 @@ pub fn is_plausible_record(raw: &[u8]) -> bool {
     if head.get(..4) != Some(FILE_MAGIC) {
         return false;
     }
-    let mut record = head.to_vec();
-    apply_fixups(&mut record).is_some()
+    fixups_verify(head).is_some()
 }
 
 /// Scans `range` for orphaned `FILE` records.
@@ -424,22 +423,47 @@ impl FileName {
 
 /// Verifies and removes the update-sequence fixups in place.
 fn apply_fixups(record: &mut [u8]) -> Option<()> {
+    let (usa_at, usa_count, _) = fixup_header(record)?;
+    fixups_verify(record)?;
+    for index in 1..usa_count {
+        let saved = u16_le(record, usa_at.checked_add(index.checked_mul(2)?)?)?;
+        let sector_end = index.checked_mul(512)?;
+        let tail = sector_end.checked_sub(2)?;
+        record
+            .get_mut(tail..sector_end)?
+            .copy_from_slice(&saved.to_le_bytes());
+    }
+    Some(())
+}
+
+/// The update-sequence array's position, entry count and sequence number.
+fn fixup_header(record: &[u8]) -> Option<(usize, usize, u16)> {
     let usa_at = usize::from(u16_le(record, 4)?);
     let usa_count = usize::from(u16_le(record, 6)?);
     if usa_count < 2 {
         return None;
     }
-    let usn = u16_le(record, usa_at)?;
+    Some((usa_at, usa_count, u16_le(record, usa_at)?))
+}
+
+/// Checks a record's update-sequence array without writing to it.
+///
+/// The residue sweep tests this at every `FILE` signature on the medium, so it
+/// must not copy a kibibyte of record just to decide whether the record is
+/// plausible (`M-MEM-REUSE`). Applying the fixups — which does need a mutable
+/// copy — is a separate step, for records that already passed.
+fn fixups_verify(record: &[u8]) -> Option<()> {
+    let (usa_at, usa_count, usn) = fixup_header(record)?;
     for index in 1..usa_count {
-        let saved = u16_le(record, usa_at.checked_add(index.checked_mul(2)?)?)?;
+        // Bounds-check the slot the apply step will read and the one it will
+        // write, so that step cannot fail after having written part of it.
+        u16_le(record, usa_at.checked_add(index.checked_mul(2)?)?)?;
         let sector_end = index.checked_mul(512)?;
         let tail = sector_end.checked_sub(2)?;
         if u16_le(record, tail)? != usn {
             return None;
         }
-        record
-            .get_mut(tail..sector_end)?
-            .copy_from_slice(&saved.to_le_bytes());
+        record.get(tail..sector_end)?;
     }
     Some(())
 }

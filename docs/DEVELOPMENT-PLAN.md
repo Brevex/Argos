@@ -34,7 +34,9 @@ report — what is physically recoverable:
 Consequences baked into every layer:
 
 1. Devices are opened **read-only at the lowest layer**; no write path exists (CLAUDE.md
-   non-negotiable #4).
+   non-negotiable #4). The one place Argos writes — the output directory — is validated against
+   the source's *device identity*, not merely its path, so an output on a partition of the disk
+   under analysis is refused before anything is created.
 2. Every byte read from the medium is **untrusted input**: no unchecked arithmetic, allocation or
    indexing derived from an on-disk length/offset/count (non-negotiable #5).
 3. Every recovered artifact carries a **provenance and confidence** record (§3, stage F). The tool
@@ -147,7 +149,9 @@ even when the current partition table shows nothing.
 Everything found here carries the highest confidence tier: exact extents, and usually original
 filename and timestamps.
 
-**Stage D — Content carving** (full-surface sequential sweep). Not magic-bytes-only: each
+**Stage D — Content carving** (full-surface sequential sweep, sharing stage B's single pass over
+the medium — the surface is read once and every chunk is offered to both detectors). Not
+magic-bytes-only: each
 candidate is driven through a **format state machine**:
 
 - *JPEG*: SOI, then a legal marker-segment sequence (APPn/DQT/DHT/SOF/…) with length fields
@@ -180,7 +184,14 @@ the exact break offset — this decode-feedback localization is what makes reass
 4. Every reassembled artifact is flagged `reconstructed`; the report records the exact extent list
    used, so the result is reproducible and auditable.
 
-**Stage F — Validation and scoring.** Full decode with pure-Rust decoders (`zune-jpeg`, `png`) —
+**Stage F — Validation and scoring.** A finding from stage C is only accepted once the medium
+confirms it twice: an image signature at its first extent, and the *assembled* extents passing the
+same format state machine a carved candidate must pass. Metadata that survived a format can point
+anywhere, so without both checks a stale extent list would be reported at the strongest tier there
+is — and the strongest tier would be the least verified one. A recovery whose bytes are present but
+whose structure breaks (a spliced hole, a reallocated run) is still reported, because the metadata
+is real evidence a file lived there, but at the partial tier and with its expected length recorded
+beside what was actually recovered. Then full decode with pure-Rust decoders (`zune-jpeg`, `png`) —
 memory-safe against hostile input by construction. Compute: decode completeness, truncation
 percentage, structural warnings. Assign the confidence tier: `FsMetadata > JournalResidue >
 ContiguousCarve > Reassembled > PartialOrThumbnail`. Hash (SHA-256) at the moment of recovery for
@@ -210,15 +221,15 @@ Where parallelism is fundamental vs forbidden:
 
 | Stage | Model | Why |
 | --- | --- | --- |
-| Device reads (A) | **One sequential reader thread** per device; double-buffered via a buffer pool (`M-MEM-REUSE`) | HDD throughput collapses under seek storms; the medium is the bottleneck, sequential sweep maximizes it. SSD sources may raise queue depth later — measured, not assumed (`M-HOTPATH`) |
+| Device reads (A) | **One sequential reader thread** per device; chunk buffers travel to and from the workers through a pool channel, which bounds memory and applies backpressure in one mechanism (`M-MEM-REUSE`) | HDD throughput collapses under seek storms; the medium is the bottleneck, sequential sweep maximizes it. SSD sources may raise queue depth later — measured, not assumed (`M-HOTPATH`) |
 | FS metadata pass (B/C) | Sequential, targeted random reads, interleaved before the sweep | Tiny I/O volume; parallelism buys nothing and costs seeks |
-| Block classification + signature scan (D/E1) | **rayon** pool over chunks from the reader | Pure CPU on immutable buffers; embarrassingly parallel |
-| Object validation/decode (D/F) | rayon pool, work-stealing per candidate | Decode is the CPU hot path |
-| Reassembly search (E2/E3) | rayon per header; the graph search itself is parallel-friendly (PUP) | Search dominates; independent per target image |
+| Block classification + signature scan (D/E1) | **Scoped worker pool** over chunks from the reader; each worker owns its chunk end to end | Pure CPU on immutable buffers; chunks are equal-sized, so partitioning ahead beats work stealing (`M-THROUGHPUT`) |
+| Object validation/decode (D/F) | Scoped worker pool over a candidate queue, one medium view per worker | Decode is the CPU hot path, and per-candidate cost is uneven, so workers pull rather than being handed a slice |
+| Reassembly search (E2/E3) | Worker pool per header; the graph search itself is parallel-friendly (PUP) | Search dominates; independent per target image |
 | Hashing + report (F/H) | Fold into the validation task per artifact | Avoids a serialization point |
 | ML inference (G) | One dedicated batch worker thread | Batching amortizes; isolates the model runtime |
 | Stage wiring | **Bounded** `crossbeam-channel`s | Backpressure: the reader must stall rather than buffer the whole disk in RAM |
-| Cancellation | One `CancelToken` (atomic flag) checked at chunk granularity everywhere | Pause/cancel from CLI/UI must take effect in ≤ one chunk |
+| Cancellation | One control flag (atomic) checked at chunk granularity everywhere; pausing parks on a condvar rather than spinning | Pause/cancel from CLI/UI must take effect in ≤ one chunk |
 
 All pipeline types are `Send` (`M-TYPES-SEND`); no `static` mutable state (`M-AVOID-STATICS`);
 worker counts derive from `available_parallelism`, configurable, never hardcoded.
@@ -337,7 +348,7 @@ files only**.
 double-reformatted fixture (ext4 → NTFS) still yields the pre-format files via residue sweep.
 
 **P4 — Engine: pipeline, sessions, confidence.**
-`argos_engine`: staged pipeline of §4 (reader thread, bounded channels, rayon stages,
+`argos_engine`: staged pipeline of §4 (reader thread, bounded channels, worker-pool stages,
 cancellation, buffer pool), merge/dedup of stage C+D findings by extent and hash, the confidence
 model of stage F, `ScanSession` service, `ProgressSink` events. CLI gains progress UI,
 pause/cancel, full-device scans (Linux).

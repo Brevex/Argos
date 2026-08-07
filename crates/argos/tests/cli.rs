@@ -42,6 +42,79 @@ fn scan_recovers_all_images_bit_identical_end_to_end() {
             .expect("valid json");
     assert_eq!(manifest["artifacts"].as_array().map(Vec::len), Some(2));
     assert_eq!(manifest["rejected_candidates"], 0);
+    // Provenance a reader can replay against the source.
+    assert_eq!(manifest["artifacts"][0]["extents"][0]["offset"], 10_000);
+    assert_eq!(manifest["artifacts"][0]["confidence"], "contiguous-carve");
+    assert_eq!(manifest["artifacts"][0]["stage"], "carve");
+    assert!(manifest["unreadable"].as_array().is_some_and(Vec::is_empty));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn a_single_worker_scan_recovers_exactly_what_a_parallel_one_does() {
+    let jpeg_bytes = Jpeg::new().build();
+    let png_bytes = png(16, 16);
+    let disk = Disk::filled(2 * 1024 * 1024)
+        .with(70_000, &jpeg_bytes)
+        .with(1_500_000, &png_bytes)
+        .into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+
+    let manifests: Vec<serde_json::Value> = ["1", "8"]
+        .iter()
+        .map(|jobs| {
+            let out = dir.path().join(format!("recovered-{jobs}"));
+            let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+                .args(["scan"])
+                .arg(&image)
+                .arg("--out")
+                .arg(&out)
+                .args(["--jobs", jobs])
+                .output()
+                .expect("run argos scan");
+            assert!(
+                output.status.success(),
+                "scan with {jobs} jobs failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(out.join("manifest.json")).expect("manifest"),
+            )
+            .expect("valid json");
+            // The source description embeds the output-specific path.
+            manifest["source"] = serde_json::Value::Null;
+            manifest
+        })
+        .collect();
+
+    assert_eq!(
+        manifests[0], manifests[1],
+        "the manifest must not depend on how many workers ran"
+    );
+    let recovered = std::fs::read(dir.path().join("recovered-8/000000.jpg")).expect("jpeg");
+    assert_eq!(recovered, jpeg_bytes);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn a_scan_with_every_stage_disabled_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, Disk::filled(1024 * 1024).into_bytes()).expect("write fixture disk");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(dir.path().join("out"))
+        .args(["--carve-only", "--metadata-only"])
+        .output()
+        .expect("run argos scan");
+
+    assert!(!output.status.success());
 }
 
 #[test]

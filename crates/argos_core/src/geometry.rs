@@ -201,6 +201,16 @@ impl ByteRange {
     pub const fn end(self) -> Option<ByteOffset> {
         self.start.checked_add(self.len)
     }
+
+    /// First byte past the end of the run, saturating at [`u64::MAX`].
+    ///
+    /// A range whose end overflows can only come from a corrupt on-disk
+    /// length. Saturating keeps ordering and overlap tests total without
+    /// silently shrinking the range, which would understate the damage.
+    #[must_use]
+    pub const fn end_saturating(self) -> ByteOffset {
+        ByteOffset::new(self.start.get().saturating_add(self.len))
+    }
 }
 
 impl fmt::Display for ByteRange {

@@ -7,8 +7,9 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-argos_carve.workspace = true
 argos_core.workspace = true
+argos_device.workspace = true
+argos_engine.workspace = true
 argos_report.workspace = true
 clap.workspace = true
 mimalloc.workspace = true

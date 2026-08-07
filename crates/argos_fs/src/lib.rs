@@ -20,7 +20,6 @@ use std::backtrace::{Backtrace, BacktraceStatus};
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::time::SystemTime;
 
 use argos_core::Confidence;
 use argos_core::geometry::{ByteOffset, ByteRange};
@@ -31,6 +30,9 @@ pub mod fat;
 pub mod ntfs;
 pub mod part;
 pub mod residue;
+
+/// Recovered-metadata timestamps are shared domain vocabulary.
+pub use argos_core::Timestamps;
 
 mod bytes;
 
@@ -95,16 +97,6 @@ pub struct Volume {
     pub range: ByteRange,
     /// Whether the volume is current or residue of an earlier format.
     pub origin: Origin,
-}
-
-/// Timestamps recovered from filesystem metadata; absent fields were not
-/// stored or did not survive. Never fabricated.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Timestamps {
-    /// Creation time, where the filesystem records one.
-    pub created: Option<SystemTime>,
-    /// Last content modification time.
-    pub modified: Option<SystemTime>,
 }
 
 /// A deleted file recovered from filesystem metadata.
