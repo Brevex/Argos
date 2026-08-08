@@ -9,8 +9,28 @@ use std::path::{Path, PathBuf};
 use argos_core::geometry::Lba;
 use argos_core::source::{BlockSource, Geometry, ReadError};
 
+use crate::class::TrimState;
+
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(windows)]
+mod windows;
+
+/// A `len`-byte view into `bounce`, aligned to `align` bytes.
+///
+/// Both unbuffered read paths — Linux' `O_DIRECT` and Windows'
+/// `FILE_FLAG_NO_BUFFERING` — require the user buffer to be sector-aligned,
+/// and a caller's buffer promises nothing. Growing one owned buffer and
+/// taking an aligned window of it turns that requirement into a single place
+/// to audit, and reuses the allocation across every read (`M-MEM-REUSE`).
+#[cfg(any(target_os = "linux", windows))]
+fn aligned_slice(bounce: &mut Vec<u8>, len: usize, align: usize) -> &mut [u8] {
+    bounce.resize(len + align, 0);
+    let start = bounce.as_ptr().align_offset(align);
+    &mut bounce[start..start + len]
+}
 
 /// A raw block device, opened read-only at the lowest layer.
 ///
@@ -26,8 +46,16 @@ pub struct Device {
 enum Core {
     #[cfg(target_os = "linux")]
     Native(linux::Native),
+    #[cfg(target_os = "macos")]
+    Native(macos::Native),
+    #[cfg(windows)]
+    Native(windows::Native),
     #[cfg(feature = "test-util")]
     Mocked(crate::mock::Ctrl),
+    /// A target with no HAL yet. Carries nothing; it exists so the enum has a
+    /// variant on such targets and the match arms below stay exhaustive.
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    Unsupported,
 }
 
 impl Device {
@@ -45,7 +73,19 @@ impl Device {
                 core: Core::Native(linux::Native::open(path)?),
             })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Self {
+                core: Core::Native(macos::Native::open(path)?),
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                core: Core::Native(windows::Native::open(path)?),
+            })
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             Err(DeviceError::unsupported(path))
         }
@@ -71,10 +111,30 @@ impl Device {
     #[must_use]
     pub fn geometry(&self) -> Geometry {
         match &self.core {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             Core::Native(native) => native.geometry(),
             #[cfg(feature = "test-util")]
             Core::Mocked(ctrl) => ctrl.geometry(),
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+            Core::Unsupported => unreachable!("an unsupported target never opens a device"),
+        }
+    }
+
+    /// Whether the medium reports TRIM enabled.
+    ///
+    /// Finer than the device class alone: an SSD with TRIM disabled still
+    /// holds its deleted content, and telling a user otherwise would talk
+    /// them out of a recovery that was going to work
+    /// (see [`class::expects_deleted_content`](crate::class::expects_deleted_content)).
+    #[must_use]
+    pub fn trim(&self) -> TrimState {
+        match &self.core {
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+            Core::Native(native) => native.trim(),
+            #[cfg(feature = "test-util")]
+            Core::Mocked(_) => TrimState::Unknown,
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+            Core::Unsupported => TrimState::Unknown,
         }
     }
 
@@ -86,10 +146,12 @@ impl Device {
     /// Fails on out-of-range requests, unreadable sectors and I/O faults.
     pub fn read_at(&mut self, lba: Lba, buf: &mut [u8]) -> Result<(), ReadError> {
         match &mut self.core {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             Core::Native(native) => native.read_at(lba, buf),
             #[cfg(feature = "test-util")]
             Core::Mocked(ctrl) => ctrl.read_at(lba, buf),
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+            Core::Unsupported => unreachable!("an unsupported target never opens a device"),
         }
     }
 }
@@ -134,7 +196,7 @@ impl DeviceError {
     }
 
     #[cfg_attr(
-        target_os = "linux",
+        any(target_os = "linux", target_os = "macos", windows),
         expect(dead_code, reason = "constructed only on targets without a native HAL")
     )]
     pub(crate) fn unsupported(path: &Path) -> Self {

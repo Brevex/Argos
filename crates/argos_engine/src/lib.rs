@@ -27,8 +27,6 @@
 //! not validate. Unreadable regions and rejected candidates are counted in the
 //! [`ScanReport`] instead.
 
-use argos_core::source::DeviceClass;
-
 pub mod config;
 pub mod finding;
 
@@ -57,14 +55,4 @@ pub use triage::TriageOutcome;
 pub fn merge_for_test(mut findings: Vec<Finding>) -> Vec<Finding> {
     merge::consolidate(&mut findings, &[]);
     findings
-}
-
-/// Whether a medium of this class is expected to still hold deleted content.
-///
-/// After `TRIM`, a solid-state device returns zeros for deleted blocks, so a
-/// scan that recovers little there is reporting physics, not failing. Callers
-/// show this alongside the result so the two are never confused.
-#[must_use]
-pub fn expects_recoverable_content(class: DeviceClass) -> bool {
-    !matches!(class, DeviceClass::Ssd)
 }

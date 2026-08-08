@@ -324,7 +324,13 @@ impl Store {
                 continue;
             };
             record.triage_label.clone_from(&annotation.label);
-            record.triage_photograph = annotation.photograph;
+            // Rounded, because the score comes from a softmax over a
+            // transcendental and `exp` is a libm implementation detail: the
+            // last digits of a probability differ between operating systems
+            // for no substantive reason, and a manifest that differs between
+            // machines undermines the reproducibility the rest of it exists
+            // for. Four decimals is far finer than the label thresholds.
+            record.triage_photograph = annotation.photograph.map(round_score);
             record.triage_scored_by.clone_from(&annotation.scored_by);
             record
                 .perceptual_hash
@@ -445,6 +451,11 @@ fn unix_seconds(at: std::time::SystemTime) -> i64 {
             i64::try_from(before.duration().as_secs()).map_or(i64::MIN, |seconds| -seconds)
         }
     }
+}
+
+/// Rounds a classifier score to four decimals.
+fn round_score(score: f32) -> f32 {
+    (score * 10_000.0).round() / 10_000.0
 }
 
 /// Lowercase hex of a digest.

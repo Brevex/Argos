@@ -385,13 +385,22 @@ icons/sprites/UI chrome/high-res assets) with precision/recall targets met and r
 eval harness, for the shipped pipeline **and** for the model alone; classifier output provably
 never filters artifacts out of the manifest.
 
-**P7 — Windows and macOS HALs.**
+**P7 — Windows and macOS HALs.** *(code delivered; hardware verification outstanding)*
 Per-OS `BlockSource` adapters (§5 table), device enumeration, TRIM/seek-penalty detection, VSS
 enumeration (Windows), mount-state warnings. Cross-OS CI matrix runs the full non-privileged test
-suite.
+suite, plus a cross-target lane that type-checks and lints every HAL from one machine.
+
+Each platform's *decisions* — path conventions, whole-disk vs partition, class from the OS's
+answer, mount-table parsing — live in `naming.rs`, `class.rs` and `inventory/mount.rs`, which
+compile on every target and are therefore tested on every target. Only the syscalls sit behind
+`cfg` (`M-MOCKABLE-SYSCALLS`).
 *Skills*: `rust-unsafe-ffi`, `rust-testing`, `rust-workspace-setup`. *Review*:
 `rust-safety-reviewer`; Miri per platform. *Exit*: image-file scans identical across the three
-OSes; manual elevated smoke checklist on real hardware documented and executed once per OS.
+OSes — mechanised as a recorded provenance digest the whole CI matrix checks; manual elevated
+smoke checklist on real hardware ([docs/DEVICE-SMOKE-CHECKLIST.md](DEVICE-SMOKE-CHECKLIST.md))
+documented and executed once per OS. **The checklist is written and unexecuted**: the ioctl
+request codes and storage-driver descriptors cannot be verified without the hardware, and no
+value they produce should be trusted until a row appears in its results table.
 
 **P8 — Tauri shell.**
 `--serve` JSON-RPC mode in `argos` (same session API), then `argos_ui`: spawn-elevated bridge,

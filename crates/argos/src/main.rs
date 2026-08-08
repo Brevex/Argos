@@ -60,6 +60,14 @@ enum Command {
         #[arg(long)]
         no_triage: bool,
     },
+    /// List the media on this machine that a scan can be pointed at.
+    ///
+    /// Needs no privileges: it reports what the operating system will say
+    /// about a disk without opening it. Whole disks are listed before
+    /// partitions, because a recovery scan almost always wants the disk —
+    /// a partition cannot see the partition table, the space between
+    /// partitions, or the residue an earlier filesystem left behind.
+    Devices,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -85,6 +93,57 @@ fn main() -> anyhow::Result<()> {
                 triage: !no_triage,
             },
         ),
+        Command::Devices => {
+            list_devices();
+            Ok(())
+        }
+    }
+}
+
+/// Prints the media this machine exposes, and the shadow copies it holds.
+fn list_devices() {
+    let devices = argos_device::inventory::list();
+    if devices.is_empty() {
+        println!(
+            "no media found. Argos can still scan a raw image file, or a device path given \
+             directly — enumeration needs no privileges, so an empty list means this platform \
+             does not publish one rather than that access was refused"
+        );
+    }
+    for device in &devices {
+        let kind = match device.kind {
+            argos_device::naming::NodeKind::WholeDisk => "disk",
+            argos_device::naming::NodeKind::Partition => "partition",
+        };
+        print!("{:<24} {kind:<9}", device.path.display());
+        match device.capacity_bytes {
+            Some(bytes) => print!(" {bytes:>16} bytes"),
+            None => print!(" {:>16}      ", "size unknown"),
+        }
+        print!("  {}", device.class);
+        if device.trim != argos_device::TrimState::Unknown {
+            print!(", trim {}", device.trim);
+        }
+        if let Some(model) = &device.model {
+            print!("  {model}");
+        }
+        println!();
+        for mount in &device.mounts {
+            println!("    mounted  {mount}");
+        }
+    }
+
+    let shadows = argos_device::shadow::list();
+    if !shadows.is_empty() {
+        println!();
+        println!(
+            "{} shadow copies. A file deleted before one of these was taken is present in it \
+             whole, which is stronger evidence than anything carving can reconstruct:",
+            shadows.len()
+        );
+        for shadow in &shadows {
+            println!("  {}", shadow.path.display());
+        }
     }
 }
 
@@ -117,9 +176,12 @@ fn scan(source: &Path, out: &Path, options: Options) -> anyhow::Result<()> {
     println!("workers   {}", config.workers());
     if !opened.expects_content {
         println!(
-            "note      this device may have been TRIMmed; deleted content is often \
-             already gone from the host-visible surface"
+            "note      this medium reports solid-state storage with TRIM; deleted content is \
+             often already gone from the host-visible surface before a scan begins"
         );
+    }
+    for warning in &opened.warnings {
+        println!("warning   {warning}");
     }
 
     // A model that fails verification disables triage; it never fails the

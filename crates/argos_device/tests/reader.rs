@@ -85,6 +85,7 @@ fn a_bad_sector_surfaces_as_an_error_never_as_zeros() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "creates a real file on disk")]
 fn a_trailing_partial_sector_of_a_truncated_image_is_not_addressable() {
     // A `dd` cut short mid-sector: the geometry addresses 3 sectors, and the
     // reader must not hand out the half sector the medium cannot address.

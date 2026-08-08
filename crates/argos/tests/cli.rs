@@ -244,3 +244,138 @@ fn disabling_triage_removes_the_labels_and_nothing_else() {
     assert_eq!(without["triage"]["status"], "disabled");
     assert_eq!(without["triage"]["disabled_reason"], "not requested");
 }
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn listing_devices_needs_no_privileges_and_never_fails() {
+    // Enumeration is what a user runs before deciding what to scan, so it has
+    // to work unprivileged on every platform. A machine that publishes no
+    // device list says so and still exits successfully — the user can always
+    // name a path.
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("devices")
+        .output()
+        .expect("run argos devices");
+    assert!(
+        output.status.success(),
+        "listing devices failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn scanning_an_image_file_warns_about_nothing() {
+    // The mount and partition warnings exist for real media. An image file is
+    // a snapshot nothing else is writing to, so a scan of one must stay
+    // silent — a warning that fires on everything trains users to ignore it.
+    let jpeg = Jpeg::new().build();
+    let disk = Disk::filled(256 * 1024).with(4096, &jpeg).into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(dir.path().join("recovered"))
+        .output()
+        .expect("run argos scan");
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("warning"),
+        "an image-file scan warned about something: {stdout}"
+    );
+}
+
+/// Fields of the manifest that describe *what was recovered from where*.
+///
+/// Deliberately not the whole manifest. The classifier score is a softmax over
+/// a transcendental, and `exp` is a libm implementation detail — its last
+/// digits differ between operating systems for no substantive reason. What
+/// must not differ is the recovery: the same bytes, at the same offsets, at
+/// the same confidence tier, in the same order.
+fn provenance_digest(manifest: &serde_json::Value) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    let artifacts = manifest["artifacts"]
+        .as_array()
+        .expect("the manifest lists artifacts");
+    for artifact in artifacts {
+        for field in ["name", "stage", "format", "confidence", "sha256", "length"] {
+            hasher.update(artifact[field].to_string().as_bytes());
+        }
+        for extent in artifact["extents"]
+            .as_array()
+            .expect("every artifact records its extents")
+        {
+            hasher.update(extent["offset"].to_string().as_bytes());
+            hasher.update(extent["length"].to_string().as_bytes());
+        }
+    }
+    hasher.update(manifest["rejected_candidates"].to_string().as_bytes());
+    hasher.update(manifest["scan_state"].to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn the_recovery_is_identical_on_every_platform() {
+    // The exit criterion of the multi-OS phase, mechanised. This same constant
+    // is checked by the Linux, Windows and macOS legs of the CI matrix, so a
+    // HAL or path-handling difference that changed what a scan recovers fails
+    // on the platform that changed it — rather than being noticed months later
+    // by an examiner comparing two reports.
+    const RECORDED: &str = "5adacb28911f9ceddbd717439fad208cd1e4f4e9c398ddb01562b53e034e55b4";
+
+    let mut disk = argos_carve::fixture::Disk::noisy(512 * 1024, 0x9E7A_0001);
+    disk = disk.with(4096, &Jpeg::new().build());
+    disk = disk.with(120_000, &png(24, 18));
+    disk = disk.with(
+        300_000,
+        &argos_carve::fixture::photo_jpeg(96, 72, 0x9E7A_0002),
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, disk.into_bytes()).expect("write fixture disk");
+    let out = dir.path().join("recovered");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(&out)
+        .args(["--jobs", "2"])
+        .output()
+        .expect("run argos scan");
+    assert!(
+        output.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
+            .expect("valid json");
+    assert!(
+        !manifest["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .is_empty(),
+        "the fixture must recover something for this to mean anything"
+    );
+
+    let digest = provenance_digest(&manifest);
+    assert_eq!(
+        digest, RECORDED,
+        "this platform recovered something different from the recorded result. The fixture is \
+         deterministic and the recovery must be too: a difference here is a real difference in \
+         what an examiner would be shown on one operating system versus another"
+    );
+}

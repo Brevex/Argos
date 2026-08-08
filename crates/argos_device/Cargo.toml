@@ -12,8 +12,20 @@ test-util = ["argos_core/test-util"]
 [dependencies]
 argos_core.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# The platform HALs. Each OS pulls in only what its own syscalls need; nothing
+# platform-specific reaches the rest of the workspace (`M-OOBE`).
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_SystemServices",
+] }
 
 [dev-dependencies]
 argos_device = { workspace = true, features = ["test-util"] }

@@ -72,8 +72,11 @@ crates/argos/          CLI binary — stdout is its UI; also the engine process 
                        may use one app-error crate (anyhow/eyre)
 crates/argos_core/     domain newtypes (Lba, ByteOffset, SectorSize, DeviceClass, Confidence),
                        port traits (BlockSource, …) and canonical errors shared across crates
-crates/argos_device/   BlockSource adapters: per-OS HAL, image files, acquisition — the only
-                       crate allowed to contain unsafe
+crates/argos_device/   BlockSource adapters: per-OS HAL (Linux/Windows/macOS), device
+                       enumeration and mount state, image files, acquisition — the only
+                       crate allowed to contain unsafe. Path conventions and device-class
+                       decisions live in modules compiled on every target, so they are
+                       tested everywhere; only syscalls sit behind cfg
 crates/argos_fs/       partition tables + filesystem metadata recovery (NTFS/ext4/FAT/APFS)
                        + prior-filesystem residue scan
 crates/argos_carve/    signature carving, block classification and fragment reassembly over

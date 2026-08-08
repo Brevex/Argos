@@ -93,6 +93,7 @@ dependencies = [
  "clap",
  "mimalloc",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -138,6 +139,7 @@ dependencies = [
  "argos_device",
  "libc",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

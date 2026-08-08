@@ -31,6 +31,7 @@ const BLKSSZGET: libc::c_ulong = 0x1268;
 pub(crate) struct Native {
     file: File,
     geometry: Geometry,
+    trim: crate::class::TrimState,
     /// Whether reads bypass the page cache and therefore need aligned buffers.
     direct: bool,
     /// Reused bounce buffer providing the alignment `O_DIRECT` requires.
@@ -44,6 +45,7 @@ impl std::fmt::Debug for Native {
         f.debug_struct("Native")
             .field("file", &self.file)
             .field("geometry", &self.geometry)
+            .field("trim", &self.trim)
             .field("direct", &self.direct)
             .field("bounce_len", &self.bounce.len())
             .finish()
@@ -84,6 +86,7 @@ impl Native {
         Ok(Self {
             file,
             geometry,
+            trim: trim_state(path),
             direct,
             bounce: Vec::new(),
         })
@@ -91,6 +94,10 @@ impl Native {
 
     pub(crate) fn geometry(&self) -> Geometry {
         self.geometry
+    }
+
+    pub(crate) fn trim(&self) -> crate::class::TrimState {
+        self.trim
     }
 
     pub(crate) fn read_at(&mut self, lba: Lba, buf: &mut [u8]) -> Result<(), ReadError> {
@@ -125,7 +132,7 @@ impl Native {
             // O_DIRECT requires the user buffer to be aligned to the logical
             // sector size; the caller's buffer makes no such promise, so read
             // into an internally aligned bounce buffer and copy out.
-            let aligned = aligned_slice(&mut self.bounce, buf.len(), sector_bytes);
+            let aligned = super::aligned_slice(&mut self.bounce, buf.len(), sector_bytes);
             self.file
                 .read_exact_at(aligned, offset)
                 .map(|()| buf.copy_from_slice(aligned))
@@ -163,22 +170,29 @@ fn open_read_only(path: &Path) -> Result<(File, bool), DeviceError> {
 
 /// Device class from the sysfs rotational flag; `Unknown` when sysfs is silent.
 fn device_class(path: &Path) -> DeviceClass {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return DeviceClass::Unknown;
-    };
-    let rotational = std::fs::read_to_string(format!("/sys/class/block/{name}/queue/rotational"));
-    match rotational.as_deref().map(str::trim) {
-        Ok("1") => DeviceClass::Hdd,
-        Ok("0") => DeviceClass::Ssd,
-        _ => DeviceClass::Unknown,
-    }
+    crate::class::from_rotational(sysfs_queue_attribute(path, "rotational").as_deref())
 }
 
-/// A `len`-byte view into `bounce`, aligned to `align` bytes.
-fn aligned_slice(bounce: &mut Vec<u8>, len: usize, align: usize) -> &mut [u8] {
-    bounce.resize(len + align, 0);
-    let start = bounce.as_ptr().align_offset(align);
-    &mut bounce[start..start + len]
+/// Reads one `queue/` attribute of the block device named by `path`.
+///
+/// `None` when the path has no sysfs name, or sysfs does not carry the
+/// attribute — which is the normal answer for a device-mapper node and for a
+/// partition of a disk whose attributes live one level up.
+fn sysfs_queue_attribute(path: &Path, attribute: &str) -> Option<String> {
+    let name = path.file_name().and_then(|name| name.to_str())?;
+    std::fs::read_to_string(format!("/sys/class/block/{name}/queue/{attribute}")).ok()
+}
+
+/// Whether the kernel reports the device supporting discard (TRIM/UNMAP).
+///
+/// sysfs states this as the maximum discard length in bytes: zero means the
+/// queue does not support it. A device whose attribute is missing says
+/// nothing, which is not the same as saying no.
+fn trim_state(path: &Path) -> crate::class::TrimState {
+    let granted = sysfs_queue_attribute(path, "discard_max_bytes")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|bytes| bytes > 0);
+    crate::class::TrimState::from_flag(granted)
 }
 
 /// Total size of the block device behind `file`, in bytes.
@@ -232,6 +246,7 @@ mod tests {
         let native = Native {
             file: std::fs::File::open("/dev/null").expect("open /dev/null read-only"),
             geometry: Geometry::new(SectorSize::new(512), 8, DeviceClass::Unknown),
+            trim: crate::class::TrimState::Unknown,
             direct: true,
             bounce: vec![0xAB; 64],
         };

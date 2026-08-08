@@ -35,7 +35,15 @@ jobs:
       - run: cargo test --workspace
 
   miri:
-    runs-on: ubuntu-latest
+    # `argos_device` is the only crate with `unsafe`, and each OS has its own
+    # HAL — so each OS gets its own Miri run. The syscalls themselves are
+    # unsupported under Miri and the platform tests that touch one are
+    # `#[ignore]`d there; what this checks is the logic around them.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -43,6 +51,24 @@ jobs:
           components: miri
       - uses: Swatinem/rust-cache@v2
       - run: cargo +nightly miri test -p argos_device
+
+  cross-targets:
+    # The three-OS matrix above is the real check, but it needs three runners
+    # and the slowest of them gates the result. This lane type-checks every
+    # HAL from one machine in seconds, so a change that breaks the Windows or
+    # macOS build is reported before the matrix has finished booting.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Windows HAL
+        run: cargo clippy -p argos_device --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+      - name: macOS HAL
+        run: cargo clippy -p argos_device --all-targets --target aarch64-apple-darwin -- -D warnings
 
   audit:
     runs-on: ubuntu-latest
