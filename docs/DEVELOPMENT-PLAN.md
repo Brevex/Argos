@@ -372,15 +372,17 @@ hot path (`M-HOTPATH` — measure before optimizing).
 synthetically fragmented images (2-fragment and n-fragment, known ground truth) with measured
 recovery rates reported per pattern; all reassembled artifacts flagged `reconstructed`.
 
-**P6 — ML triage.**
+**P6 — ML triage.** *(delivered)*
 `argos_classify`: rule-based pre-filter; CNN (MobileNet-class) exported to a pinned local model
-file; inference via `tract`/`candle` (decide by benchmark; both pure Rust); batch worker;
-perceptual-hash dedup. Training pipeline lives outside the workspace (`tools/`), only the eval
-harness and the pinned model artifact enter the repo. Threshold defaults are named constants with
-documented derivation (`M-DOCUMENTED-MAGIC`).
+file; inference via `candle` (pure Rust, chosen so training and inference share one graph
+definition); batch worker; perceptual-hash dedup. Training pipeline lives outside the workspace
+(`tools/train_triage`), only the eval harness and the pinned model artifact enter the repo.
+Threshold defaults are named constants derived on the trainer's validation range, never on the
+eval corpus (`M-DOCUMENTED-MAGIC`).
 *Skills*: `argos-ml-triage`, `rust-performance`, `rust-testing`. *Review*: `rust-test-reviewer`,
-`forensic-boundary-reviewer`. *Exit*: eval set (photos vs icons/assets incl. high-res assets)
-with precision/recall targets met and recorded in the eval harness; classifier output provably
+`forensic-boundary-reviewer`. *Exit*: eval set (photos incl. greyscale and thumbnails vs
+icons/sprites/UI chrome/high-res assets) with precision/recall targets met and recorded in the
+eval harness, for the shipped pipeline **and** for the model alone; classifier output provably
 never filters artifacts out of the manifest.
 
 **P7 — Windows and macOS HALs.**

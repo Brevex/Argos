@@ -48,6 +48,9 @@ pub enum Stage {
     Validation,
     /// Writing artifacts and the manifest.
     Report,
+    /// ML triage: labeling artifacts photograph vs synthetic asset, after
+    /// they are persisted.
+    Triage,
 }
 
 impl fmt::Display for Stage {
@@ -59,6 +62,7 @@ impl fmt::Display for Stage {
             Self::Reassembly => "reassembly",
             Self::Validation => "validation",
             Self::Report => "report",
+            Self::Triage => "triage",
         };
         f.write_str(name)
     }

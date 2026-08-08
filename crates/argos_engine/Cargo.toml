@@ -11,6 +11,7 @@ test-util = ["argos_carve/test-util", "argos_fs/test-util"]
 
 [dependencies]
 argos_carve.workspace = true
+argos_classify.workspace = true
 argos_core.workspace = true
 argos_fs.workspace = true
 crossbeam-channel.workspace = true
@@ -18,6 +19,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 argos_engine = { workspace = true, features = ["test-util"] }
+argos_carve = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

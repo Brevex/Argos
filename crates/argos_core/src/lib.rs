@@ -7,6 +7,7 @@
 //! | --- | --- | --- |
 //! | [`source::BlockSource`] | read the medium | device HAL, image file, [`fixture`] |
 //! | [`artifact::ArtifactSink`] | deliver results | output directory, test collector |
+//! | [`classify::Classifier`] | score recovered images | ML triage, [`classify::AcceptAll`] |
 //! | [`progress::ProgressSink`] | report progress | CLI renderer, UI bridge, [`progress::Discard`] |
 //!
 //! Where `std` already provides the abstraction, the `std` trait *is* the port:
@@ -14,6 +15,7 @@
 //! for what that cannot express — sector addressing, bad sectors and geometry.
 
 pub mod artifact;
+pub mod classify;
 pub mod geometry;
 pub mod progress;
 pub mod source;

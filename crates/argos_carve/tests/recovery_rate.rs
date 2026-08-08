@@ -61,6 +61,7 @@ impl Case {
                 &mut src,
                 &[broken],
                 &blocks,
+                &[],
                 medium_len,
                 Limits::default(),
                 &mut scratch,

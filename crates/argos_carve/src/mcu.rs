@@ -101,9 +101,13 @@ pub struct ScanOutcome {
     pub mcus_across: u32,
     /// Pixel rows one MCU spans.
     pub mcu_rows: u32,
-    /// MCU being decoded when the stream crossed the watched offset — the
-    /// splice, when a caller is checking one. Zero when nothing was watched.
-    pub seam_mcu: u32,
+    /// MCU the decoder had reached as the stream crossed each watched
+    /// offset, in the order the offsets were given — one per splice a
+    /// reassembly is asking about. A zero means that offset was never
+    /// crossed, so there is no seam to look at.
+    pub seam_mcus: [u32; MAX_SEAMS],
+    /// How many entries of [`ScanOutcome::seam_mcus`] are meaningful.
+    pub seams: usize,
     /// First byte past the last one the decoder consumed.
     pub end: ByteOffset,
     /// Why it stopped.
@@ -139,12 +143,20 @@ impl ScanOutcome {
             mcus_required: 0,
             mcus_across: 0,
             mcu_rows: 0,
-            seam_mcu: 0,
+            seam_mcus: [0; MAX_SEAMS],
+            seams: 0,
             end: ByteOffset::new(end),
             stop,
         }
     }
 }
+
+/// Fragment boundaries one scan may be asked to watch.
+///
+/// An assembly of `n` fragments has `n - 1` splices, and the reassembly search
+/// caps a path at [`MAX_FRAGMENTS`](crate::reassemble::MAX_FRAGMENTS)
+/// fragments, so this is that cap less one.
+pub const MAX_SEAMS: usize = crate::reassemble::MAX_FRAGMENTS - 1;
 
 /// Decodes the entropy-coded scan of the JPEG candidate at `start`.
 ///
@@ -160,16 +172,20 @@ pub fn scan<R: Read + Seek>(
     limit: u64,
     scratch: &mut Scratch,
 ) -> Result<ScanOutcome, CarveError> {
-    scan_watching(src, start, limit, None, scratch)
+    scan_watching(src, start, limit, &[], scratch)
 }
 
-/// Decodes as [`scan`] does, additionally reporting which MCU was being
-/// decoded when the stream crossed `watch`.
+/// Decodes as [`scan`] does, additionally reporting which MCU the decoder had
+/// reached as the stream crossed each offset in `watch`.
 ///
-/// `watch` is an offset relative to `start`, and it is how a caller finds the
-/// **stitch row**: a reassembly's fragment boundary is a byte offset, and what
-/// tells you whether the splice is real is the picture at the pixel row that
-/// byte produced.
+/// The offsets are relative to `start` and must be ascending. They are how a
+/// caller finds the **stitch rows**: a reassembly's fragment boundaries are
+/// byte offsets, and what tells you whether a splice is real is the picture at
+/// the pixel row that byte produced. Every boundary is reported, not just the
+/// first — an assembly of four fragments has three splices, and one bad splice
+/// anywhere makes the whole thing a fabrication.
+///
+/// At most [`MAX_SEAMS`] offsets are tracked; further ones are ignored.
 ///
 /// # Errors
 ///
@@ -178,7 +194,7 @@ pub fn scan_watching<R: Read + Seek>(
     src: &mut R,
     start: ByteOffset,
     limit: u64,
-    watch: Option<u64>,
+    watch: &[u64],
     scratch: &mut Scratch,
 ) -> Result<ScanOutcome, CarveError> {
     let Scratch { stream, seg, .. } = scratch;
@@ -244,7 +260,8 @@ pub fn scan_watching<R: Read + Seek>(
                     &scan,
                     &tables,
                     restart_interval,
-                    watch.map(|at| start.get().saturating_add(at)),
+                    watch,
+                    start.get(),
                 );
             }
             MARKER_EOI => return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke)),
@@ -644,7 +661,8 @@ fn decode_scan<R: Read + Seek>(
     scan: &ScanHeader,
     tables: &Tables,
     restart_interval: u16,
-    watch: Option<u64>,
+    watch: &[u64],
+    origin: u64,
 ) -> Result<ScanOutcome, CarveError> {
     let Some(geometry) = McuGeometry::of(frame, scan) else {
         return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
@@ -654,16 +672,25 @@ fn decode_scan<R: Read + Seek>(
     let mut predictors = [0_i32; MAX_COMPONENTS];
     let mut decoded = 0_u32;
     let mut expected_restart = 0_u8;
-    // The MCU the decoder was on when it first read past the watched offset.
-    let mut seam_mcu = 0_u32;
-    let mut seam_found = watch.is_none();
+    // Absolute positions of the boundaries to watch, and the MCU the decoder
+    // had reached as it crossed each. Watching every boundary is what makes a
+    // multi-fragment assembly checkable: the caller judges each splice, and
+    // one bad splice condemns the assembly however clean the others are.
+    let mut watched = [0_u64; MAX_SEAMS];
+    let seams = watch.len().min(MAX_SEAMS);
+    for (slot, at) in watched[..seams].iter_mut().zip(watch) {
+        *slot = origin.saturating_add(*at);
+    }
+    let mut seam_mcus = [0_u32; MAX_SEAMS];
+    let mut crossed = 0_usize;
 
-    let outcome = |reader: &BitReader<'_, '_, R>, decoded, seam_mcu, stop| ScanOutcome {
+    let outcome = |reader: &BitReader<'_, '_, R>, decoded, seam_mcus, stop| ScanOutcome {
         mcus_decoded: decoded,
         mcus_required: geometry.total,
         mcus_across: geometry.across,
         mcu_rows: geometry.rows,
-        seam_mcu,
+        seam_mcus,
+        seams,
         end: ByteOffset::new(reader.bytes.pos()),
         stop,
     };
@@ -675,14 +702,14 @@ fn decode_scan<R: Read + Seek>(
         {
             reader.align();
             let Some(code) = reader.marker()? else {
-                return Ok(outcome(&reader, decoded, seam_mcu, ScanStop::Broke));
+                return Ok(outcome(&reader, decoded, seam_mcus, ScanStop::Broke));
             };
             // Restart markers run RST0..RST7 in order. A stream that skips one
             // is not this scan.
             if !(MARKER_RST0..=MARKER_RST7).contains(&code)
                 || code - MARKER_RST0 != expected_restart
             {
-                return Ok(outcome(&reader, decoded, seam_mcu, ScanStop::Broke));
+                return Ok(outcome(&reader, decoded, seam_mcus, ScanStop::Broke));
             }
             expected_restart = (expected_restart + 1) % 8;
             predictors = [0_i32; MAX_COMPONENTS];
@@ -690,12 +717,13 @@ fn decode_scan<R: Read + Seek>(
         }
 
         if !decode_mcu(&mut reader, scan, tables, &mut predictors)? {
-            return Ok(outcome(&reader, decoded, seam_mcu, ScanStop::Broke));
+            return Ok(outcome(&reader, decoded, seam_mcus, ScanStop::Broke));
         }
         decoded += 1;
-        if !seam_found && watch.is_some_and(|at| reader.bytes.pos() >= at) {
-            seam_mcu = decoded;
-            seam_found = true;
+        // The boundaries ascend, so each is crossed in turn.
+        while crossed < seams && reader.bytes.pos() >= watched[crossed] {
+            seam_mcus[crossed] = decoded;
+            crossed += 1;
         }
     }
 
@@ -707,7 +735,7 @@ fn decode_scan<R: Read + Seek>(
         // that needs one has already told us its height.
         _ => ScanStop::Broke,
     };
-    Ok(outcome(&reader, decoded, seam_mcu, stop))
+    Ok(outcome(&reader, decoded, seam_mcus, stop))
 }
 
 /// Decodes one minimum coded unit; `false` when the data is not one.

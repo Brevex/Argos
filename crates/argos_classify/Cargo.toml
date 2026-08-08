@@ -5,7 +5,26 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Synthetic labeled corpus generator shared with the eval harness, the
+# benchmarks and the training tool, plus the pre-filter-bypassing scorer the
+# harness needs to measure the model on its own. Generated images only —
+# never real photographs.
+test-util = []
+
 [dependencies]
+argos_core.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+argos_carve = { workspace = true, features = ["test-util"] }
+argos_classify = { workspace = true, features = ["test-util"] }
+criterion.workspace = true
+
+[[bench]]
+name = "classify"
+harness = false
 
 [lints]
 workspace = true

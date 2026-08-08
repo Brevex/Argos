@@ -17,6 +17,8 @@
 //! here: its per-chunk CRC32 already makes a chance assembly impossible, and
 //! the structural validator verifies every one.
 
+use argos_core::Format;
+use argos_core::classify::PixelImage;
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
@@ -146,6 +148,151 @@ impl Decoded {
         let mean = total as f32 / counted as f32;
         (mean / 255.0).clamp(0.0, 1.0)
     }
+}
+
+/// Largest pixel count [`decode_rgba`] will materialize.
+///
+/// RGBA is four bytes per pixel, so this bounds the plane at 256 MiB — one
+/// image at a time, transient, and above every consumer camera sensor shipped
+/// (the largest are ~61 megapixels). A frame claiming more is not scored
+/// rather than allowed to size an allocation (A-BOUNDED-ALLOC).
+pub const MAX_RGBA_PIXELS: u64 = 64 * 1024 * 1024;
+
+/// Longest edge either decoder is allowed to report.
+///
+/// A second, per-axis bound below the area bound, because a decoder applies
+/// its own limits while parsing the header and this is the one it understands.
+/// 32768 is twice the widest consumer sensor; a frame past it on either axis
+/// is not a photograph anyone took.
+const MAX_FRAME_EDGE: usize = 32768;
+
+/// Decodes a validated artifact's bytes to RGBA pixels for triage.
+///
+/// `None` when the bytes do not decode, when a dimension is zero, or when the
+/// frame exceeds [`MAX_RGBA_PIXELS`] or `bytes` exceeds [`MAX_DECODE_BYTES`] —
+/// an artifact that cannot be decoded within bounds is left unscored, never
+/// dropped.
+///
+/// The pixel ceiling is enforced against the frame header **before** the
+/// decoder is allowed to run, because a decoder sizes its output buffer from
+/// that header the moment it has parsed it. Checking the returned buffer
+/// instead would check a number that only exists once the allocation it was
+/// meant to prevent has already been made: a one-kilobyte PNG declaring
+/// 65535x65535 RGBA-16 asks for about 34 GB, and a refused allocation aborts
+/// the process rather than failing the artifact (A-BOUNDED-ALLOC,
+/// A-UNTRUSTED-ONDISK).
+#[must_use]
+pub fn decode_rgba(format: Format, bytes: &[u8]) -> Option<PixelImage> {
+    if bytes.len() > MAX_DECODE_BYTES {
+        return None;
+    }
+    let (width, height, rgba) = match format {
+        Format::Jpeg => jpeg_rgba(bytes)?,
+        Format::Png => png_rgba(bytes)?,
+    };
+    let pixels = affordable(width, height)?;
+    let expected = usize::try_from(pixels.checked_mul(PixelImage::BYTES_PER_PIXEL as u64)?).ok()?;
+    // An output that does not match its own header is a decoder disagreement
+    // over hostile input; refuse it rather than construct a lying image.
+    if rgba.len() != expected {
+        return None;
+    }
+    Some(PixelImage::new(width, height, rgba))
+}
+
+/// The pixel count of a `width` by `height` frame, when it is one this module
+/// will materialize.
+///
+/// `None` for an empty frame, one whose dimensions overflow, or one past
+/// [`MAX_RGBA_PIXELS`].
+fn affordable(width: u32, height: u32) -> Option<u64> {
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    (pixels > 0 && pixels <= MAX_RGBA_PIXELS).then_some(pixels)
+}
+
+/// Decodes a JPEG to interleaved RGBA.
+fn jpeg_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    // Not strict: triage scores images that already passed structural
+    // validation, so a tolerant decode that yields pixels is the useful one —
+    // this is scoring, not the reassembly oracle above.
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGBA)
+        .set_max_width(MAX_FRAME_EDGE)
+        .set_max_height(MAX_FRAME_EDGE);
+    let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(bytes), options);
+    // Headers first: this parses the frame header without sizing anything
+    // from it, so the area check below happens before the decoder allocates.
+    decoder.decode_headers().ok()?;
+    let (width, height) = decoder.dimensions()?;
+    let width = u32::try_from(width).ok()?;
+    let height = u32::try_from(height).ok()?;
+    affordable(width, height)?;
+
+    let rgba = decoder.decode().ok()?;
+    Some((width, height, rgba))
+}
+
+/// Decodes a PNG and expands whatever colorspace it stored to RGBA.
+fn png_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    use zune_png::zune_core::bit_depth::BitDepth;
+    use zune_png::zune_core::colorspace::ColorSpace as PngColor;
+    use zune_png::zune_core::options::DecoderOptions as PngOptions;
+
+    let options = PngOptions::default()
+        .set_max_width(MAX_FRAME_EDGE)
+        .set_max_height(MAX_FRAME_EDGE);
+    let mut decoder = zune_png::PngDecoder::new_with_options(std::io::Cursor::new(bytes), options);
+    // Same reasoning as the JPEG path: `IHDR` is parsed here, and the area it
+    // declares is checked before `decode_raw` sizes a buffer from it.
+    decoder.decode_headers().ok()?;
+    let (width, height) = decoder.dimensions()?;
+    let frame_width = u32::try_from(width).ok()?;
+    let frame_height = u32::try_from(height).ok()?;
+    affordable(frame_width, frame_height)?;
+
+    let samples = decoder.decode_raw().ok()?;
+    let depth = decoder.depth()?;
+    let color = decoder.colorspace()?;
+
+    // 16-bit samples arrive as big-endian byte pairs; keep the high byte.
+    // Triage needs tone, not tonal depth.
+    let samples: Vec<u8> = match depth {
+        BitDepth::Sixteen => samples.chunks_exact(2).map(|pair| pair[0]).collect(),
+        _ => samples,
+    };
+
+    let pixels = width.checked_mul(height)?;
+    let channels = match color {
+        PngColor::Luma => 1,
+        PngColor::LumaA => 2,
+        PngColor::RGB => 3,
+        PngColor::RGBA => 4,
+        _ => return None,
+    };
+    if samples.len() != pixels.checked_mul(channels)? {
+        return None;
+    }
+
+    let mut rgba = Vec::with_capacity(pixels.checked_mul(PixelImage::BYTES_PER_PIXEL)?);
+    match channels {
+        1 => {
+            for luma in &samples {
+                rgba.extend_from_slice(&[*luma, *luma, *luma, u8::MAX]);
+            }
+        }
+        2 => {
+            for pair in samples.chunks_exact(2) {
+                rgba.extend_from_slice(&[pair[0], pair[0], pair[0], pair[1]]);
+            }
+        }
+        3 => {
+            for rgb in samples.chunks_exact(3) {
+                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], u8::MAX]);
+            }
+        }
+        _ => rgba.extend_from_slice(&samples),
+    }
+    Some((frame_width, frame_height, rgba))
 }
 
 /// Decodes `bytes` as a JPEG, to its luma plane.

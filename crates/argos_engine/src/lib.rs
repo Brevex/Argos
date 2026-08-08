@@ -36,6 +36,7 @@ mod error;
 mod merge;
 mod pipeline;
 mod session;
+mod triage;
 
 #[cfg(feature = "test-util")]
 pub mod fixture;
@@ -47,6 +48,7 @@ pub use config::{ScanConfig, ScanConfigBuilder, Stages};
 pub use error::ScanError;
 pub use finding::{Finding, ScanReport};
 pub use session::{Medium, ScanSession};
+pub use triage::TriageOutcome;
 
 /// Merges findings the way a scan does, for tests that need to drive the
 /// merge rules directly rather than through a whole medium.

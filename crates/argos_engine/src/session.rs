@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use argos_core::artifact::ArtifactSink;
+use argos_core::classify::{AcceptAll, Classifier};
 use argos_core::progress::{ProgressSink, RunState, ScanEvent};
 
 use crate::config::{ConfigError, ScanConfig};
@@ -133,7 +134,9 @@ impl ScanSession {
         self.inner.control.cancel();
     }
 
-    /// Runs the scan to completion, to cancellation, or to a sink failure.
+    /// Runs the scan to completion, to cancellation, or to a sink failure,
+    /// without triage: every artifact is reported unscored, exactly as the
+    /// null classifier would leave it.
     ///
     /// Blocks the calling thread. Corruption never stops the scan: unreadable
     /// regions, invalid candidates and unparseable filesystems are recorded in
@@ -153,6 +156,49 @@ impl ScanSession {
         S: ArtifactSink,
         P: ProgressSink + ?Sized,
     {
+        self.run(medium, sink, progress, None::<&mut AcceptAll>)
+    }
+
+    /// Runs the scan with a classifier annotating the persisted artifacts.
+    ///
+    /// The classifier is consulted strictly after every artifact is stored,
+    /// hashed and recorded; its output is carried in
+    /// [`ScanReport::triage`](crate::finding::ScanReport) and cannot change
+    /// what was recovered (A-TRIAGE-NOT-VERDICT).
+    ///
+    /// # Errors
+    ///
+    /// Fails only when `sink` refuses an artifact — never because of the
+    /// classifier, whose failures leave artifacts unscored.
+    pub fn start_with_classifier<V, S, P, C>(
+        &self,
+        medium: Medium<V>,
+        sink: &mut S,
+        progress: &P,
+        classifier: &mut C,
+    ) -> Result<ScanReport, ScanError>
+    where
+        V: Read + Seek + Send,
+        S: ArtifactSink,
+        P: ProgressSink + ?Sized,
+        C: Classifier + Send,
+    {
+        self.run(medium, sink, progress, Some(classifier))
+    }
+
+    fn run<V, S, P, C>(
+        &self,
+        medium: Medium<V>,
+        sink: &mut S,
+        progress: &P,
+        classifier: Option<&mut C>,
+    ) -> Result<ScanReport, ScanError>
+    where
+        V: Read + Seek + Send,
+        S: ArtifactSink,
+        P: ProgressSink + ?Sized,
+        C: Classifier + Send,
+    {
         self.inner.control.begin();
         progress.emit(ScanEvent::StateChanged {
             state: RunState::Running,
@@ -163,6 +209,7 @@ impl ScanSession {
             medium,
             sink,
             progress,
+            classifier,
         );
         let state = if self.inner.control.is_cancelled() {
             RunState::Cancelled

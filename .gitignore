@@ -1,1 +1,10 @@
-/target
+# Cargo build output, wherever it appears. Not root-anchored: the training
+# tool under tools/ is its own cargo project and its target directory is
+# nearly a gigabyte of compiled inference runtime — none of which belongs in
+# the repository of a forensic tool (A-EVAL-GATED: only the pinned model and
+# the eval harness enter the repo).
+target/
+
+# The trainer writes its artifact beside itself; the copy that ships is the
+# one committed under crates/argos_classify/model/.
+/tools/train_triage/*.safetensors

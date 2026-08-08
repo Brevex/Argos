@@ -89,7 +89,8 @@ jobs:
         working-directory: crates/argos_carve
         run: |
           for target in jpeg_validate png_validate exif_thumbnail carver_scan \
-                        block_classify reassemble_bifragment jpeg_entropy_scan; do
+                        block_classify reassemble_bifragment jpeg_entropy_scan \
+                        decode_rgba; do
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
       - name: Run every filesystem fuzz target for a fixed budget
@@ -98,6 +99,22 @@ jobs:
           for target in part_scan ntfs_record ext4_parse fat_dir apfs_open residue_sweep; do
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
+
+  triage-model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `argos_classify` writes the network's forward pass out by hand so the
+      # evidence path carries no inference runtime; `tools/train_triage`
+      # describes the same network in `candle` for training. Two descriptions
+      # can drift, and `tools/` is excluded from the workspace, so nothing
+      # else here would notice. This is the check that makes the split safe
+      # (A-INFERENCE-PURE-RUST).
+      - name: The two descriptions of the triage network agree
+        working-directory: tools/train_triage
+        run: cargo run --release --bin crosscheck
 
   bench:
     runs-on: ubuntu-latest

@@ -54,6 +54,11 @@ enum Command {
         /// candidate that did not carve whole.
         #[arg(long)]
         no_reassemble: bool,
+        /// Skip ML triage. Triage labels recovered images photograph vs
+        /// synthetic asset after they are written; it never changes what is
+        /// recovered, so disabling it only removes the labels.
+        #[arg(long)]
+        no_triage: bool,
     },
 }
 
@@ -66,6 +71,7 @@ fn main() -> anyhow::Result<()> {
             carve_only,
             metadata_only,
             no_reassemble,
+            no_triage,
         } => scan(
             &source,
             &out,
@@ -76,6 +82,7 @@ fn main() -> anyhow::Result<()> {
                     carving: !metadata_only,
                     reassembly: !metadata_only && !no_reassemble,
                 },
+                triage: !no_triage,
             },
         ),
     }
@@ -86,6 +93,7 @@ fn main() -> anyhow::Result<()> {
 struct Options {
     jobs: Option<std::num::NonZeroUsize>,
     stages: Stages,
+    triage: bool,
 }
 
 fn scan(source: &Path, out: &Path, options: Options) -> anyhow::Result<()> {
@@ -114,10 +122,29 @@ fn scan(source: &Path, out: &Path, options: Options) -> anyhow::Result<()> {
         );
     }
 
+    // A model that fails verification disables triage; it never fails the
+    // scan, and the reason reaches both stdout and the manifest.
+    let mut triage = None;
+    let mut triage_disabled = (!options.triage).then(|| "not requested".to_owned());
+    if options.triage {
+        match argos_classify::Triage::new() {
+            Ok(classifier) => triage = Some(classifier),
+            Err(err) => {
+                println!("triage    disabled: {err}");
+                triage_disabled = Some(err.to_string());
+            }
+        }
+    }
+
     let session = ScanSession::new(config);
     let renderer = Renderer::new();
     let controls = progress::spawn_console_controls(session.clone());
-    let outcome = session.start(medium, &mut store, &renderer);
+    let outcome = match triage.as_mut() {
+        Some(classifier) => {
+            session.start_with_classifier(medium, &mut store, &renderer, classifier)
+        }
+        None => session.start(medium, &mut store, &renderer),
+    };
     controls.stop();
     renderer.finish();
 
@@ -137,6 +164,13 @@ fn scan(source: &Path, out: &Path, options: Options) -> anyhow::Result<()> {
                 .collect()
         })
         .unwrap_or_default();
+    // Triage annotations join the records by content hash. They add labels to
+    // artifacts already written; nothing here can remove one
+    // (A-TRIAGE-NOT-VERDICT).
+    if let Some(report) = report {
+        store.annotate_triage(&annotations(report));
+    }
+    let triage_record = report.map(|report| triage_record(report, triage_disabled.as_deref()));
     let manifest = store
         .finish(argos_report::Summary {
             tool_version: env!("CARGO_PKG_VERSION"),
@@ -144,6 +178,7 @@ fn scan(source: &Path, out: &Path, options: Options) -> anyhow::Result<()> {
             state: &report.map_or_else(|| "failed".to_owned(), |report| report.state.to_string()),
             rejected_candidates: report.map_or(0, |report| report.rejected_candidates),
             unreadable: &unreadable,
+            triage: triage_record.as_ref(),
         })
         .context("cannot write manifest")?;
 
@@ -151,6 +186,39 @@ fn scan(source: &Path, out: &Path, options: Options) -> anyhow::Result<()> {
     summarize(&report);
     println!("manifest  {}", manifest.display());
     Ok(())
+}
+
+/// Turns the engine's triage outcomes into manifest annotations.
+fn annotations(report: &ScanReport) -> Vec<argos_report::TriageAnnotation> {
+    report
+        .triage
+        .iter()
+        .map(|outcome| argos_report::TriageAnnotation {
+            sha256: outcome.sha256.to_string(),
+            perceptual_hash: outcome.perceptual_hash.map(|hash| format!("{hash:016x}")),
+            near_duplicate_of: outcome.near_duplicate_of.map(|of| of.to_string()),
+            label: outcome.score.map(|score| score.label.to_string()),
+            photograph: outcome.score.map(|score| score.photograph),
+            scored_by: outcome.score.map(|score| score.scored_by.to_string()),
+        })
+        .collect()
+}
+
+/// States how triage ran, including when it did not.
+fn triage_record(report: &ScanReport, disabled: Option<&str>) -> argos_report::TriageRecord {
+    argos_report::TriageRecord {
+        status: if report.triage_model.is_some() {
+            "scored".to_owned()
+        } else {
+            "disabled".to_owned()
+        },
+        disabled_reason: disabled.map(str::to_owned),
+        model_version: report.triage_model.map(|model| model.version.to_owned()),
+        model_sha256: report.triage_model.map(|model| model.sha256.to_string()),
+        scored: report.triage_scored,
+        unscored: report.triage_unscored,
+        degraded: report.triage_degraded,
+    }
 }
 
 fn summarize(report: &ScanReport) {
@@ -178,6 +246,34 @@ fn summarize(report: &ScanReport) {
             "duplicate {} artifacts collapsed by content hash",
             report.duplicates
         );
+    }
+    if let Some(model) = report.triage_model {
+        let photographs = report
+            .triage
+            .iter()
+            .filter_map(|outcome| outcome.score)
+            .filter(|score| score.label == argos_core::classify::TriageLabel::Photograph)
+            .count();
+        let near_duplicates = report
+            .triage
+            .iter()
+            .filter(|outcome| outcome.near_duplicate_of.is_some())
+            .count();
+        println!(
+            "triage    {photographs} of {} scored artifacts look like photographs \
+             ({near_duplicates} near-duplicates), model {}",
+            report.triage_scored, model.version
+        );
+        println!("          labels order the results; every artifact above is in the manifest");
+        if report.triage_unscored > 0 {
+            println!(
+                "          {} artifacts could not be scored and are reported unlabelled",
+                report.triage_unscored
+            );
+        }
+        if report.triage_degraded {
+            println!("          the classifier failed partway; artifacts after it are unlabelled");
+        }
     }
     if !report.volumes.is_empty() {
         let residual = report

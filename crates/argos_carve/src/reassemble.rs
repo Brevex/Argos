@@ -24,7 +24,6 @@
 //!
 //! [`Confidence::Reassembled`]: argos_core::Confidence
 
-use std::collections::BTreeSet;
 use std::io::{Read, Seek};
 
 use argos_core::geometry::{ByteOffset, ByteRange};
@@ -312,6 +311,12 @@ fn prefix_candidates(header: u64, break_at: u64, limits: Limits) -> Vec<u64> {
 /// come from block classification — only blocks that could hold image data are
 /// considered, which is what makes the search finite.
 ///
+/// `spoken_for` are extents another technique has already recovered — the gap
+/// search runs first, and its answers must not be offered here as free space.
+/// Two artifacts claiming the same bytes would be two reports of one file that
+/// the merge step cannot collapse, because their content hashes differ
+/// (A-PROVENANCE).
+///
 /// Returns one [`Reassembly`] per header that completed; headers that did not
 /// complete yield nothing, because a partial path is not a recoverable image.
 ///
@@ -322,11 +327,15 @@ pub fn parallel_unique_path<R: Read + Seek>(
     src: &mut R,
     broken: &[Broken],
     candidates: &[Candidate],
+    spoken_for: &[ByteRange],
     medium_len: u64,
     limits: Limits,
     scratch: &mut Scratch,
 ) -> Result<Vec<(Broken, Reassembly)>, CarveError> {
-    let mut shared = Shared::default();
+    let mut shared = Shared {
+        claimed: spoken_for.to_vec(),
+        attempts: 0,
+    };
     let mut assembled = Vec::new();
 
     for &header in broken {
@@ -342,9 +351,7 @@ pub fn parallel_unique_path<R: Read + Seek>(
             limits,
             scratch,
         )? {
-            for extent in &reassembly.extents {
-                shared.claimed.insert(extent.start.get());
-            }
+            shared.claimed.extend_from_slice(&reassembly.extents);
             assembled.push((header, reassembly));
         }
     }
@@ -357,9 +364,12 @@ pub fn parallel_unique_path<R: Read + Seek>(
 /// The budget is shared on purpose. Given per header it would multiply by the
 /// number of broken candidates, and the whole point of bounding it is that a
 /// medium full of false signature hits cannot make the stage run long.
-#[derive(Default)]
 struct Shared {
-    claimed: BTreeSet<u64>,
+    /// Byte ranges already spoken for, by an earlier technique or by a path
+    /// that completed. Whole ranges rather than start offsets: an extent
+    /// covers many blocks, and withholding only its first one would let a
+    /// later path read the same bytes again.
+    claimed: Vec<ByteRange>,
     attempts: u32,
 }
 
@@ -409,7 +419,7 @@ fn grow_path<R: Read + Seek>(
     // headers if the path completes: a greedy step that led nowhere must not
     // deny its blocks to the next header (each extent is assignable to one
     // path, but only a path that turned out to be a file).
-    let mut taken: Vec<u64> = Vec::new();
+    let mut taken: Vec<ByteRange> = Vec::new();
     // The smoothest complete assembly seen so far, and its score.
     let mut best: Option<(f32, Reassembly)> = None;
 
@@ -422,7 +432,12 @@ fn grow_path<R: Read + Seek>(
                 continue;
             }
             let start = candidate.start.get();
-            if claimed.contains(&start) || path.iter().any(|extent| extent.start.get() == start) {
+            // A block inside an extent this path already holds, or one another
+            // recovery already claimed, is not free space. Testing the whole
+            // range rather than the start offset is what stops a path from
+            // reading the same bytes twice and reporting a layout no allocator
+            // could have produced.
+            if covers(claimed, start) || covers(&path, start) {
                 continue;
             }
             let tail = tail_len(start, medium_len);
@@ -442,7 +457,7 @@ fn grow_path<R: Read + Seek>(
                     broken.format,
                     &trim_to(&path, length),
                     length,
-                    probed.seam_row(),
+                    &probed.seam_rows(),
                 )?,
                 None => None,
             };
@@ -499,8 +514,9 @@ fn grow_path<R: Read + Seek>(
             .floor(consumed.saturating_sub(before))
             .max(limits.block_bytes.max(1))
             .min(tail_len(start, medium_len));
-        path.push(ByteRange::new(ByteOffset::new(start), take));
-        taken.push(start);
+        let committed = ByteRange::new(ByteOffset::new(start), take);
+        path.push(committed);
+        taken.push(committed);
     }
 
     Ok(finish(best, &mut path, claimed, &taken))
@@ -513,15 +529,20 @@ fn grow_path<R: Read + Seek>(
 fn finish(
     best: Option<(f32, Reassembly)>,
     path: &mut Vec<ByteRange>,
-    claimed: &mut BTreeSet<u64>,
-    taken: &[u64],
+    claimed: &mut Vec<ByteRange>,
+    taken: &[ByteRange],
 ) -> Option<Reassembly> {
     path.clear();
     let (_, reassembly) = best?;
-    for start in taken {
-        claimed.insert(*start);
-    }
+    claimed.extend_from_slice(taken);
     Some(reassembly)
+}
+
+/// Whether `at` falls inside any of `extents`.
+fn covers(extents: &[ByteRange], at: u64) -> bool {
+    extents
+        .iter()
+        .any(|extent| extent.start.get() <= at && at < extent.end_saturating().get())
 }
 
 /// What one trial extent list told the decoder.
@@ -539,7 +560,9 @@ struct Probed {
     /// The image's length when the decoder accounted for all of it.
     complete: Option<u64>,
     /// MCU the decoder was on when it crossed the first fragment boundary.
-    seam_mcu: u32,
+    /// MCU reached at each fragment boundary, and how many are meaningful.
+    seam_mcus: [u32; crate::mcu::MAX_SEAMS],
+    seams: usize,
     /// MCUs per row and rows per MCU, for turning that into a pixel row.
     mcus_across: u32,
     mcu_rows: u32,
@@ -550,11 +573,19 @@ struct Probed {
 
 impl Probed {
     /// Pixel row the first fragment boundary produced.
-    fn seam_row(&self) -> Option<u32> {
-        if self.mcus_across == 0 || self.seam_mcu == 0 {
-            return None;
+    /// Pixel row of every splice the decoder crossed.
+    ///
+    /// A boundary the decoder never reached contributes nothing: there is no
+    /// row to look at, and inventing one would be worse than checking fewer.
+    fn seam_rows(&self) -> Vec<u32> {
+        if self.mcus_across == 0 {
+            return Vec::new();
         }
-        Some((self.seam_mcu / self.mcus_across).saturating_mul(self.mcu_rows))
+        self.seam_mcus[..self.seams]
+            .iter()
+            .filter(|mcu| **mcu > 0)
+            .map(|mcu| (mcu / self.mcus_across).saturating_mul(self.mcu_rows))
+            .collect()
     }
 }
 
@@ -570,7 +601,8 @@ fn probe<R: Read + Seek>(
         progress: 0,
         consumed: 0,
         complete: None,
-        seam_mcu: 0,
+        seam_mcus: [0; crate::mcu::MAX_SEAMS],
+        seams: 0,
         mcus_across: 0,
         mcu_rows: 0,
         unsupported: false,
@@ -582,14 +614,32 @@ fn probe<R: Read + Seek>(
 
     match format {
         Format::Jpeg => {
-            // Watch the first fragment boundary: that is the splice, and its
-            // pixel row is what says whether the two pieces belong together.
-            let seam = extents.first().map(|first| first.len);
-            let outcome =
-                crate::mcu::scan_watching(&mut stream, ByteOffset::new(0), length, seam, scratch)?;
+            // Watch every fragment boundary. Each is a splice, and each has a
+            // pixel row that says whether the pieces either side belong
+            // together; checking only the first would let an assembly whose
+            // later joins are wrong pass on the strength of its first one.
+            let mut seams = [0_u64; crate::mcu::MAX_SEAMS];
+            let mut at = 0_u64;
+            let mut count = 0_usize;
+            for extent in extents.iter().take(extents.len().saturating_sub(1)) {
+                if count == seams.len() {
+                    break;
+                }
+                at = at.saturating_add(extent.len);
+                seams[count] = at;
+                count += 1;
+            }
+            let outcome = crate::mcu::scan_watching(
+                &mut stream,
+                ByteOffset::new(0),
+                length,
+                &seams[..count],
+                scratch,
+            )?;
             probed.progress = u64::from(outcome.mcus_decoded);
             probed.consumed = outcome.end.get();
-            probed.seam_mcu = outcome.seam_mcu;
+            probed.seam_mcus = outcome.seam_mcus;
+            probed.seams = outcome.seams;
             probed.mcus_across = outcome.mcus_across;
             probed.mcu_rows = outcome.mcu_rows;
             probed.unsupported = outcome.stop == crate::mcu::ScanStop::Unsupported;
@@ -617,42 +667,60 @@ fn probe<R: Read + Seek>(
     Ok(probed)
 }
 
-/// Judges a complete assembly by the picture at its splice.
+/// Judges a complete assembly by the picture at each of its splices.
 ///
 /// `None` rejects it. The entropy decoder has already settled that the bytes
 /// decode; this settles whether they are one file, which decoding alone cannot
 /// (see [`MAX_SEAM_RATIO`]).
+///
+/// Every splice has to pass. An assembly of four fragments joins three times,
+/// and a single wrong join makes the result a file that never existed — so the
+/// worst seam is the one that decides, and it is also the score the assembly
+/// is ranked by.
 fn score<R: Read + Seek>(
     src: &mut R,
     format: Format,
     extents: &[ByteRange],
     length: u64,
-    seam_row: Option<u32>,
+    seam_rows: &[u32],
 ) -> Result<Option<Accepted>, CarveError> {
     match format {
         // A PNG's per-chunk CRC32 already proves the pieces belong together.
         Format::Png => Ok(Some(Accepted { length, seam: 0.0 })),
         Format::Jpeg => {
             // A single-fragment assembly has no splice to judge.
-            let Some(row) = seam_row.filter(|_| extents.len() > 1) else {
+            if extents.len() < 2 {
                 return Ok(Some(Accepted { length, seam: 0.0 }));
-            };
+            }
+            // Every join must have produced a row to look at. A boundary the
+            // decoder never crossed leaves a splice unjudged, and an unjudged
+            // splice is exactly what a fabrication hides behind.
+            if seam_rows.len() != extents.len() - 1 {
+                return Ok(None);
+            }
             let Some(bytes) = read_all(src, extents)? else {
-                // Too large to render, so the seam cannot be checked and the
+                // Too large to render, so the seams cannot be checked and the
                 // assembly cannot be claimed.
                 return Ok(None);
             };
             let Some(decoded) = decode::decode_jpeg_luma(&bytes) else {
                 return Ok(None);
             };
-            let Some(seam) = decoded.seam_ratio(row) else {
-                // Too small to judge; refuse rather than guess.
-                return Ok(None);
-            };
-            if seam > MAX_SEAM_RATIO {
-                return Ok(None);
+            let mut worst = 0.0_f32;
+            for row in seam_rows {
+                let Some(seam) = decoded.seam_ratio(*row) else {
+                    // Too small to judge; refuse rather than guess.
+                    return Ok(None);
+                };
+                if seam > MAX_SEAM_RATIO {
+                    return Ok(None);
+                }
+                worst = worst.max(seam);
             }
-            Ok(Some(Accepted { length, seam }))
+            Ok(Some(Accepted {
+                length,
+                seam: worst,
+            }))
         }
     }
 }
@@ -677,7 +745,7 @@ fn decodes<R: Read + Seek>(
         format,
         &trim_to(extents, length),
         length,
-        probed.seam_row(),
+        &probed.seam_rows(),
     )
 }
 

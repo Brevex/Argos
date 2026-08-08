@@ -2,10 +2,13 @@
 
 use std::fmt;
 
+use argos_core::classify::ModelIdentity;
 use argos_core::geometry::{ByteOffset, ByteRange};
 use argos_core::progress::RunState;
 use argos_core::{Confidence, Format, Stage, Timestamps};
 use argos_fs::Volume;
+
+use crate::triage::TriageOutcome;
 
 /// One recoverable image located by some stage.
 ///
@@ -128,7 +131,7 @@ impl fmt::Debug for Finding {
 ///
 /// Everything here is countable evidence about the run itself; recovered
 /// content leaves through the [`ArtifactSink`](argos_core::artifact::ArtifactSink).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScanReport {
     /// How the run ended.
     pub state: RunState,
@@ -164,6 +167,21 @@ pub struct ScanReport {
     /// volume, so their extents could not be resolved. They are counted, not
     /// guessed at.
     pub unattributed_residue: u64,
+    /// One triage annotation per persisted artifact, in emit order. Empty when
+    /// triage did not run. Annotations only: nothing here can remove an
+    /// artifact (A-TRIAGE-NOT-VERDICT).
+    pub triage: Vec<TriageOutcome>,
+    /// Identity of the model that scored this scan, when one did
+    /// (A-MODEL-PINNED).
+    pub triage_model: Option<ModelIdentity>,
+    /// Artifacts that received a score.
+    pub triage_scored: u64,
+    /// Artifacts triage saw but could not score — too large to decode within
+    /// bounds, undecodable, or left over after a classifier failure.
+    pub triage_unscored: u64,
+    /// Whether the classifier failed mid-run, leaving artifacts unscored that
+    /// a healthy one would have scored.
+    pub triage_degraded: bool,
 }
 
 impl ScanReport {

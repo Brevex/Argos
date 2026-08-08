@@ -44,8 +44,55 @@ pub struct Manifest {
     /// Byte ranges the medium could not read; their contents are unknown and
     /// were never fabricated.
     pub unreadable: Vec<ExtentRecord>,
+    /// How triage ran over this scan, when the caller reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage: Option<TriageRecord>,
     /// One record per recovered artifact.
     pub artifacts: Vec<ArtifactRecord>,
+}
+
+/// How ML triage ran over a scan.
+///
+/// Recorded whatever happened: a disabled triage is stated with its reason,
+/// never silently absent, so the absence of scores is attributable
+/// (A-MODEL-PINNED).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TriageRecord {
+    /// `scored` when a model ran, `disabled` when it did not.
+    pub status: String,
+    /// Why triage did not run, when it did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+    /// Version of the model that scored the scan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
+    /// SHA-256 of the model file, for reproduction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_sha256: Option<String>,
+    /// Artifacts that received a score.
+    pub scored: u64,
+    /// Artifacts triage saw but could not score.
+    pub unscored: u64,
+    /// Whether the classifier failed mid-run, leaving artifacts unscored that
+    /// a healthy one would have scored.
+    pub degraded: bool,
+}
+
+/// Triage annotation for one stored artifact, matched by content hash.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriageAnnotation {
+    /// SHA-256 (lowercase hex) of the artifact the annotation belongs to.
+    pub sha256: String,
+    /// Perceptual hash of the decoded image, as 16 hex digits.
+    pub perceptual_hash: Option<String>,
+    /// SHA-256 of the artifact this one is a near-duplicate of.
+    pub near_duplicate_of: Option<String>,
+    /// Triage label.
+    pub label: Option<String>,
+    /// Probability the image is a photograph.
+    pub photograph: Option<f32>,
+    /// What produced the score: `rules` or `model`.
+    pub scored_by: Option<String>,
 }
 
 /// One contiguous source range, as recorded in the manifest.
@@ -58,7 +105,7 @@ pub struct ExtentRecord {
 }
 
 /// Provenance record of one recovered artifact.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ArtifactRecord {
     /// File name of the artifact inside the output directory.
     pub name: String,
@@ -102,6 +149,23 @@ pub struct ArtifactRecord {
     pub parent_offset: Option<u64>,
     /// SHA-256 of the artifact bytes, computed while writing them.
     pub sha256: String,
+    /// Triage label, when the artifact was scored. A label orders and groups;
+    /// every artifact stays in this manifest whatever it says
+    /// (A-TRIAGE-NOT-VERDICT).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage_label: Option<String>,
+    /// Probability the image is a photograph, when scored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage_photograph: Option<f32>,
+    /// What produced the score: `rules` or `model`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage_scored_by: Option<String>,
+    /// Perceptual hash of the decoded image, 16 hex digits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub perceptual_hash: Option<String>,
+    /// SHA-256 of the artifact this one is a near-duplicate of; both stay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_duplicate_of: Option<String>,
 }
 
 /// Writes artifacts and the manifest into one output directory.
@@ -229,11 +293,46 @@ impl Store {
             source_object: artifact.source_object,
             parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
             sha256,
+            triage_label: None,
+            triage_photograph: None,
+            triage_scored_by: None,
+            perceptual_hash: None,
+            near_duplicate_of: None,
         });
         Ok(self
             .records
             .last()
             .unwrap_or_else(|| unreachable!("a record was just pushed")))
+    }
+
+    /// Joins triage annotations onto the records already saved, by content
+    /// hash.
+    ///
+    /// Strictly an annotation: a record without an annotation stays as it is,
+    /// an annotation without a record is dropped, and nothing here can remove
+    /// or reorder a record. Triage output has no other way into the manifest
+    /// (A-TRIAGE-NOT-VERDICT).
+    pub fn annotate_triage(&mut self, annotations: &[TriageAnnotation]) {
+        for annotation in annotations {
+            // Linear match: artifact counts are the size of a photo library,
+            // and this runs once per scan.
+            let Some(record) = self
+                .records
+                .iter_mut()
+                .find(|record| record.sha256 == annotation.sha256)
+            else {
+                continue;
+            };
+            record.triage_label.clone_from(&annotation.label);
+            record.triage_photograph = annotation.photograph;
+            record.triage_scored_by.clone_from(&annotation.scored_by);
+            record
+                .perceptual_hash
+                .clone_from(&annotation.perceptual_hash);
+            record
+                .near_duplicate_of
+                .clone_from(&annotation.near_duplicate_of);
+        }
     }
 
     /// Writes `manifest.json` and returns its path.
@@ -248,6 +347,7 @@ impl Store {
             scan_state: summary.state.to_owned(),
             rejected_candidates: summary.rejected_candidates,
             unreadable: summary.unreadable.to_vec(),
+            triage: summary.triage.cloned(),
             artifacts: self.records,
         };
         let path = self.dir.join(MANIFEST_FILE);
@@ -283,6 +383,8 @@ pub struct Summary<'a> {
     pub rejected_candidates: u64,
     /// Byte ranges the medium could not read.
     pub unreadable: &'a [ExtentRecord],
+    /// How triage ran, when the caller has anything to say about it.
+    pub triage: Option<&'a TriageRecord>,
 }
 
 /// Writing recovery output failed.

@@ -18,6 +18,7 @@ jpeg-encoder = { workspace = true, optional = true }
 memchr.workspace = true
 miniz_oxide.workspace = true
 zune-jpeg.workspace = true
+zune-png.workspace = true
 
 [dev-dependencies]
 argos_carve = { workspace = true, features = ["test-util"] }

@@ -91,6 +91,7 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
             state: "finished",
             rejected_candidates: 7,
             unreadable: &unreadable,
+            triage: None,
         })
         .expect("manifest");
     let json: serde_json::Value =

@@ -136,3 +136,111 @@ fn scan_refuses_an_output_directory_containing_the_source() {
         "an output directory containing the source must be refused"
     );
 }
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn the_manifest_carries_triage_labels_and_the_model_that_produced_them() {
+    let photo = argos_carve::fixture::photo_jpeg(320, 240, 0xC0FF_EE01);
+    let disk = Disk::noisy(1024 * 1024, 0x5EED_0001)
+        .with(10_000, &photo)
+        .into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+    let out = dir.path().join("recovered");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .expect("run argos scan");
+    assert!(
+        output.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
+            .expect("valid json");
+
+    // The model that scored the scan is named, so a result can be reproduced
+    // with that model and no other (A-MODEL-PINNED).
+    assert_eq!(manifest["triage"]["status"], "scored");
+    assert_eq!(manifest["triage"]["model_version"], "triage-cnn-v1");
+    assert_eq!(
+        manifest["triage"]["model_sha256"],
+        argos_classify::MODEL_SHA256_HEX
+    );
+    assert_eq!(manifest["triage"]["degraded"], false);
+
+    let artifact = &manifest["artifacts"][0];
+    assert_eq!(artifact["triage_label"], "photograph");
+    assert_eq!(artifact["triage_scored_by"], "model");
+    assert!(
+        artifact["perceptual_hash"].as_str().is_some_and(|hash| {
+            hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit())
+        }),
+        "the perceptual hash must be recorded as 16 hex digits"
+    );
+    // The recovered bytes are untouched by any of it.
+    assert_eq!(
+        std::fs::read(out.join("000000.jpg")).expect("artifact"),
+        photo
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn disabling_triage_removes_the_labels_and_nothing_else() {
+    let photo = argos_carve::fixture::photo_jpeg(320, 240, 0xC0FF_EE02);
+    let disk = Disk::noisy(1024 * 1024, 0x5EED_0002)
+        .with(10_000, &photo)
+        .into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+
+    let manifests: Vec<serde_json::Value> = [true, false]
+        .into_iter()
+        .map(|triage| {
+            let out = dir.path().join(if triage { "with" } else { "without" });
+            let mut command = Command::new(env!("CARGO_BIN_EXE_argos"));
+            command.arg("scan").arg(&image).arg("--out").arg(&out);
+            if !triage {
+                command.arg("--no-triage");
+            }
+            let output = command.output().expect("run argos scan");
+            assert!(output.status.success());
+            assert_eq!(
+                std::fs::read(out.join("000000.jpg")).expect("artifact"),
+                photo,
+                "the recovered bytes must not depend on whether triage ran"
+            );
+            serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
+                .expect("valid json")
+        })
+        .collect();
+
+    let (with, without) = (&manifests[0], &manifests[1]);
+    assert_eq!(
+        with["artifacts"].as_array().map(Vec::len),
+        without["artifacts"].as_array().map(Vec::len),
+        "triage must not change how many artifacts are reported"
+    );
+    assert_eq!(
+        with["artifacts"][0]["sha256"], without["artifacts"][0]["sha256"],
+        "triage must not change what was recovered"
+    );
+    assert!(with["artifacts"][0]["triage_label"].is_string());
+    assert!(
+        without["artifacts"][0]["triage_label"].is_null(),
+        "a scan without triage carries no label"
+    );
+    assert_eq!(without["triage"]["status"], "disabled");
+    assert_eq!(without["triage"]["disabled_reason"], "not requested");
+}

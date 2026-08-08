@@ -63,3 +63,9 @@ path = "fuzz_targets/jpeg_entropy_scan.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_rgba"
+path = "fuzz_targets/decode_rgba.rs"
+test = false
+doc = false

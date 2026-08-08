@@ -27,6 +27,7 @@ use std::thread;
 use argos_carve::reassemble::{self, Broken};
 use argos_carve::{Candidate, Detector, Scratch, Verdict};
 use argos_core::artifact::{Artifact, ArtifactSink, Digest};
+use argos_core::classify::Classifier;
 use argos_core::geometry::{ByteOffset, ByteRange};
 use argos_core::progress::{ProgressSink, ScanEvent};
 use argos_core::{Confidence, Format, Stage};
@@ -56,17 +57,19 @@ const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_CANDIDATES_PER_WORKER: usize = 2_000_000;
 
 /// Runs every configured stage over `medium`.
-pub(crate) fn run<V, S, P>(
+pub(crate) fn run<V, S, P, C>(
     config: &ScanConfig,
     control: &Control,
     medium: Medium<V>,
     sink: &mut S,
     progress: &P,
+    classifier: Option<&mut C>,
 ) -> Result<ScanReport, ScanError>
 where
     V: Read + Seek + Send,
     S: ArtifactSink,
     P: ProgressSink + ?Sized,
+    C: Classifier + Send,
 {
     let (mut views, medium_len) = medium.into_parts();
     let range = config.range_within(medium_len);
@@ -137,7 +140,24 @@ where
     }
 
     merge::consolidate(&mut findings, &report.unreadable);
-    emit(&mut views, &findings, sink, progress, &mut report)?;
+    let emitted = emit(&mut views, &findings, sink, progress, &mut report)?;
+
+    // Triage runs last, over artifacts already persisted and recorded: its
+    // output annotates them and can no longer change what was recovered
+    // (A-TRIAGE-NOT-VERDICT).
+    if let Some(classifier) = classifier
+        && let Some(view) = views.first_mut()
+    {
+        crate::triage::run(
+            control,
+            view,
+            &findings,
+            &emitted,
+            classifier,
+            progress,
+            &mut report,
+        );
+    }
     Ok(report)
 }
 
@@ -772,6 +792,11 @@ fn reassemble_broken<V: Read + Seek>(
     let mut found = Vec::new();
     let mut spent = 0_u32;
     let mut unresolved = Vec::new();
+    // Extents the gap search already recovered. The graph walk must not offer
+    // them again: two artifacts over the same bytes are two reports of one
+    // file, and the merge step cannot collapse them because their content
+    // hashes differ (A-PROVENANCE).
+    let mut spoken_for: Vec<ByteRange> = Vec::new();
 
     for &candidate in broken {
         if control.is_cancelled() {
@@ -791,6 +816,7 @@ fn reassemble_broken<V: Read + Seek>(
             Ok(Some(reassembly)) => {
                 spent = spent.saturating_add(reassembly.hypotheses);
                 report.reassembled = report.reassembled.saturating_add(1);
+                spoken_for.extend_from_slice(&reassembly.extents);
                 found.push(finding_from_reassembly(candidate, &reassembly));
             }
             Ok(None) => {
@@ -816,6 +842,7 @@ fn reassemble_broken<V: Read + Seek>(
         view,
         &unresolved,
         &blocks,
+        &spoken_for,
         medium_len,
         limits,
         &mut scratch,
@@ -920,21 +947,23 @@ fn finding_from_reassembly(broken: Broken, reassembly: &reassemble::Reassembly) 
 ///
 /// Sequential on purpose: the order artifacts reach the sink is the order they
 /// appear in the manifest, and that order must not depend on how many workers
-/// the machine had.
+/// the machine had. Returns what was actually persisted, which is what the
+/// triage stage is allowed to see.
 fn emit<V, S, P>(
     views: &mut [V],
     findings: &[Finding],
     sink: &mut S,
     progress: &P,
     report: &mut ScanReport,
-) -> Result<(), ScanError>
+) -> Result<Vec<crate::triage::Emitted>, ScanError>
 where
     V: Read + Seek,
     S: ArtifactSink,
     P: ProgressSink + ?Sized,
 {
+    let mut emitted = Vec::new();
     let Some(view) = views.first_mut() else {
-        return Ok(());
+        return Ok(emitted);
     };
     progress.emit(ScanEvent::StageStarted {
         stage: Stage::Report,
@@ -943,7 +972,7 @@ where
 
     let mut seen: HashSet<Digest> = HashSet::with_capacity(findings.len());
     let mut buf = vec![0_u8; STREAM_CHUNK_BYTES];
-    for finding in findings {
+    for (index, finding) in findings.iter().enumerate() {
         let expected = finding.length();
         let Some((sha256, read)) = hash_extents(view, &finding.extents, &mut buf) else {
             // The bytes this finding claims cannot be read back. It is not
@@ -986,13 +1015,17 @@ where
             return Err(ScanError::unstable_medium(finding.start()));
         }
         report.artifacts = report.artifacts.saturating_add(1);
+        emitted.push(crate::triage::Emitted {
+            finding: index,
+            sha256,
+        });
     }
 
     progress.emit(ScanEvent::StageFinished {
         stage: Stage::Report,
         findings: report.artifacts,
     });
-    Ok(())
+    Ok(emitted)
 }
 
 /// Wraps a reader and digests everything that passes through it.
@@ -1045,7 +1078,7 @@ fn hash_extents<V: Read + Seek>(
 }
 
 /// Reads a finding's extents back to back as one byte stream.
-struct ExtentReader<'a, V> {
+pub(crate) struct ExtentReader<'a, V> {
     view: &'a mut V,
     extents: &'a [ByteRange],
     /// Extent currently being read.
@@ -1057,7 +1090,7 @@ struct ExtentReader<'a, V> {
 }
 
 impl<'a, V: Read + Seek> ExtentReader<'a, V> {
-    fn new(view: &'a mut V, extents: &'a [ByteRange]) -> Self {
+    pub(crate) fn new(view: &'a mut V, extents: &'a [ByteRange]) -> Self {
         Self {
             view,
             extents,

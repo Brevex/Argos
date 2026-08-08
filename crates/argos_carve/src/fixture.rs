@@ -548,6 +548,24 @@ pub fn fragmented(len: usize, image: &[u8], starts: &[usize], block: usize) -> F
 /// fixture bug rather than a medium condition.
 #[must_use]
 pub fn photo_jpeg(width: u16, height: u16, seed: u64) -> Vec<u8> {
+    photo_jpeg_quality(width, height, seed, DEFAULT_PHOTO_QUALITY)
+}
+
+/// Quality [`photo_jpeg`] encodes at: high enough that the grain survives
+/// quantization, which is what makes the fixture behave like a photograph.
+const DEFAULT_PHOTO_QUALITY: u8 = 85;
+
+/// [`photo_jpeg`] at a chosen encoder quality.
+///
+/// Two qualities of one seed are the same picture in different bytes — a
+/// re-encoded copy, which is exactly what perceptual-hash dedup exists to
+/// recognize and content-hash dedup cannot.
+///
+/// # Panics
+///
+/// Panics if either dimension is zero, or if encoding fails.
+#[must_use]
+pub fn photo_jpeg_quality(width: u16, height: u16, seed: u64, quality: u8) -> Vec<u8> {
     assert!(width > 0 && height > 0, "a photo needs both dimensions");
     let mut pixels = Vec::with_capacity(usize::from(width) * usize::from(height));
     let mut noise = Noise::new(seed);
@@ -576,7 +594,7 @@ pub fn photo_jpeg(width: u16, height: u16, seed: u64) -> Vec<u8> {
     }
 
     let mut out = Vec::new();
-    let encoder = jpeg_encoder::Encoder::new(&mut out, 85);
+    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
     encoder
         .encode(&pixels, width, height, jpeg_encoder::ColorType::Luma)
         .expect("encoding a fixture photo must succeed");

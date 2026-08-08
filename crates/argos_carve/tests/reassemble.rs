@@ -5,10 +5,10 @@
 //! planted — not merely that something decoded.
 
 use argos_carve::classify::{BlockClass, classify};
-use argos_carve::fixture::{Disk, Fragmented, Jpeg, fragmented};
+use argos_carve::fixture::{Disk, Fragmented, Jpeg, fragmented, photo_jpeg};
 use argos_carve::reassemble::{self, Broken, Candidate, Limits};
 use argos_carve::{Format, Scratch};
-use argos_core::geometry::ByteOffset;
+use argos_core::geometry::{ByteOffset, ByteRange};
 
 /// Block size the fixtures fragment on: the reassembly search grid.
 const BLOCK: usize = argos_carve::classify::BLOCK_BYTES;
@@ -108,6 +108,7 @@ fn a_fragment_stored_before_its_predecessor_is_still_reassembled_in_file_order()
         &mut src,
         &[broken],
         &candidates,
+        &[],
         layout.disk.len() as u64,
         Limits::default(),
         &mut scratch,
@@ -138,6 +139,7 @@ fn an_n_fragment_image_is_reassembled_by_the_graph_walk() {
         &mut src,
         &[broken],
         &candidates,
+        &[],
         layout.disk.len() as u64,
         Limits::default(),
         &mut scratch,
@@ -275,4 +277,87 @@ fn a_block_too_short_to_measure_is_not_claimed_as_image_data() {
     let profile = classify(&[0xFF, 0x00, 0xFF, 0x00]);
     assert!(!profile.class.can_hold_image_data());
     assert!(profile.score.abs() < f32::EPSILON);
+}
+
+#[test]
+fn the_walk_never_reads_the_same_bytes_twice() {
+    // A fragment is offered to the walk as one extent, but classification
+    // offers *every* block inside it as a candidate. Excluding candidates by
+    // start offset alone would leave every block after an extent's first one
+    // available, letting a path splice a region onto itself and report a
+    // layout no allocator could have produced.
+    let image = photo_jpeg(640, 480, 0x0432_1001);
+    let layout = fragmented(160 * BLOCK, &image, &[4 * BLOCK, 60 * BLOCK], BLOCK);
+    let broken = broken_at(
+        &layout,
+        ByteOffset::new(layout.extents[0].start.get()),
+        Format::Jpeg,
+    );
+
+    let candidates = candidate_blocks(&layout);
+    let mut src = layout.source();
+    let assembled = reassemble::parallel_unique_path(
+        &mut src,
+        &[broken],
+        &candidates,
+        &[],
+        layout.disk.len() as u64,
+        Limits::default(),
+        &mut Scratch::new(),
+    )
+    .expect("in-memory read");
+
+    for (_, reassembly) in &assembled {
+        for (index, extent) in reassembly.extents.iter().enumerate() {
+            for other in &reassembly.extents[index + 1..] {
+                let (a_start, a_end) = (extent.start.get(), extent.end_saturating().get());
+                let (b_start, b_end) = (other.start.get(), other.end_saturating().get());
+                assert!(
+                    a_end <= b_start || b_end <= a_start,
+                    "extents {a_start}..{a_end} and {b_start}..{b_end} overlap: the same \
+                     bytes were reported twice in one recovered file"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn bytes_another_recovery_already_claimed_are_not_offered_to_the_walk() {
+    // The engine runs the gap search first and hands its answers here. Left
+    // out, the walk would be free to build a second artifact over the same
+    // bytes, and the merge step cannot collapse the pair — their content
+    // hashes differ, so both would reach the manifest as separate files.
+    let image = photo_jpeg(640, 480, 0x0432_1002);
+    let layout = fragmented(160 * BLOCK, &image, &[4 * BLOCK, 60 * BLOCK], BLOCK);
+    let header = ByteOffset::new(layout.extents[0].start.get());
+    let broken = broken_at(&layout, header, Format::Jpeg);
+
+    // Claim the whole region the true remainder lives in.
+    let claimed = [ByteRange::new(
+        ByteOffset::new(60 * BLOCK as u64),
+        40 * BLOCK as u64,
+    )];
+    let candidates = candidate_blocks(&layout);
+    let mut src = layout.source();
+    let assembled = reassemble::parallel_unique_path(
+        &mut src,
+        &[broken],
+        &candidates,
+        &claimed,
+        layout.disk.len() as u64,
+        Limits::default(),
+        &mut Scratch::new(),
+    )
+    .expect("in-memory read");
+
+    for (_, reassembly) in &assembled {
+        for extent in &reassembly.extents {
+            let start = extent.start.get();
+            assert!(
+                !(claimed[0].start.get() <= start && start < claimed[0].end_saturating().get()),
+                "the walk claimed bytes at {start}, which another recovery already holds"
+            );
+        }
+    }
 }

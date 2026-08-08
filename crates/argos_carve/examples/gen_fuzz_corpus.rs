@@ -104,6 +104,43 @@ fn main() -> std::io::Result<()> {
         .into_bytes();
     fs::write(scan_dir.join("disk"), &disk)?;
 
+    decode_rgba_seeds(base, &plain, &picture)?;
+
     println!("seed corpus written under {}", base.display());
+    Ok(())
+}
+
+/// Seeds for the pixel-decoding target.
+///
+/// `decode_rgba` takes a format selector byte in front of the image, so a
+/// seed has to carry one. Both formats and both failure shapes the decoder
+/// has to survive — a truncated stream and a header claiming more pixels than
+/// any machine has — are represented.
+fn decode_rgba_seeds(base: &Path, jpeg: &[u8], png_image: &[u8]) -> std::io::Result<()> {
+    let rgba_dir = base.join("decode_rgba");
+    fs::create_dir_all(&rgba_dir)?;
+    let prefixed = |selector: u8, image: &[u8]| {
+        let mut out = Vec::with_capacity(image.len() + 1);
+        out.push(selector);
+        out.extend_from_slice(image);
+        out
+    };
+    fs::write(rgba_dir.join("jpeg"), prefixed(0, jpeg))?;
+    fs::write(rgba_dir.join("png"), prefixed(1, png_image))?;
+    fs::write(
+        rgba_dir.join("jpeg_truncated"),
+        prefixed(0, &truncated(jpeg, jpeg.len() / 3)),
+    )?;
+    fs::write(
+        rgba_dir.join("png_flipped"),
+        prefixed(1, &with_flipped_byte(png_image, 20)),
+    )?;
+    // A PNG header declaring an impossible frame: the shape that would size a
+    // multi-gigabyte allocation if the pixel ceiling were checked after the
+    // decode rather than before it.
+    let mut huge = png_image.to_vec();
+    huge[16..20].copy_from_slice(&0xFFFF_u32.to_be_bytes());
+    huge[20..24].copy_from_slice(&0xFFFF_u32.to_be_bytes());
+    fs::write(rgba_dir.join("png_impossible_frame"), prefixed(1, &huge))?;
     Ok(())
 }
