@@ -42,6 +42,8 @@ pub enum Stage {
     Filesystem,
     /// Full-surface signature carving.
     Carve,
+    /// Reassembly of images the medium stored in pieces.
+    Reassembly,
     /// Structural validation, hashing and scoring of candidates.
     Validation,
     /// Writing artifacts and the manifest.
@@ -54,6 +56,7 @@ impl fmt::Display for Stage {
             Self::Volumes => "volumes",
             Self::Filesystem => "filesystem",
             Self::Carve => "carve",
+            Self::Reassembly => "reassembly",
             Self::Validation => "validation",
             Self::Report => "report",
         };

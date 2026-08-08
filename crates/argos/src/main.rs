@@ -49,6 +49,11 @@ enum Command {
         /// Skip carving and recover from filesystem metadata only.
         #[arg(long, conflicts_with = "carve_only")]
         metadata_only: bool,
+        /// Skip fragment reassembly. Reassembly runs by default and recovers
+        /// images the medium stored in pieces, at the cost of decoding every
+        /// candidate that did not carve whole.
+        #[arg(long)]
+        no_reassemble: bool,
     },
 }
 
@@ -60,6 +65,7 @@ fn main() -> anyhow::Result<()> {
             jobs,
             carve_only,
             metadata_only,
+            no_reassemble,
         } => scan(
             &source,
             &out,
@@ -68,6 +74,7 @@ fn main() -> anyhow::Result<()> {
                 stages: Stages {
                     filesystem: !carve_only,
                     carving: !metadata_only,
+                    reassembly: !metadata_only && !no_reassemble,
                 },
             },
         ),
@@ -154,6 +161,18 @@ fn summarize(report: &ScanReport) {
         "rejected  {} candidates that failed validation",
         report.rejected_candidates
     );
+    if report.reassembly_attempted > 0 {
+        println!(
+            "reassembled {} images from {} fragmented candidates",
+            report.reassembled, report.reassembly_attempted
+        );
+    }
+    if report.reassembly_budget_exhausted {
+        println!(
+            "budget    reassembly ran out of its decode budget; candidates were left \
+             untried and the medium may hold more"
+        );
+    }
     if report.duplicates > 0 {
         println!(
             "duplicate {} artifacts collapsed by content hash",

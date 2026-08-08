@@ -24,9 +24,14 @@ use argos_core::Confidence;
 use argos_core::geometry::ByteOffset;
 use memchr::memmem::Finder;
 
+pub mod assemble;
+pub mod classify;
+pub mod decode;
 pub mod exif;
 pub mod jpeg;
+pub mod mcu;
 pub mod png;
+pub mod reassemble;
 
 mod stream;
 
@@ -87,8 +92,8 @@ pub struct Candidate {
 /// output vector, and matches all signatures in one pass.
 #[derive(Debug)]
 pub struct Detector {
-    jpeg_finder: Finder<'static>,
-    png_finder: Finder<'static>,
+    jpeg_header: Finder<'static>,
+    png_header: Finder<'static>,
 }
 
 impl Default for Detector {
@@ -102,8 +107,8 @@ impl Detector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            jpeg_finder: Finder::new(&JPEG_SOI),
-            png_finder: Finder::new(&PNG_SIGNATURE),
+            jpeg_header: Finder::new(&JPEG_SOI),
+            png_header: Finder::new(&PNG_SIGNATURE),
         }
     }
 
@@ -129,12 +134,12 @@ impl Detector {
             format,
         };
         out.extend(
-            self.jpeg_finder
+            self.jpeg_header
                 .find_iter(window)
                 .map(|i| at(i, Format::Jpeg)),
         );
         out.extend(
-            self.png_finder
+            self.png_header
                 .find_iter(window)
                 .map(|i| at(i, Format::Png)),
         );

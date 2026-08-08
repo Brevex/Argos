@@ -7,16 +7,25 @@ publish.workspace = true
 
 [features]
 # Synthetic image/disk builders shared with dependent crates' test suites.
-test-util = []
+# Fixtures build genuinely decodable images, so a reassembly test measures the
+# real decoder rather than a structurally valid stand-in.
+test-util = ["dep:jpeg-encoder"]
 
 [dependencies]
 argos_core.workspace = true
 crc32fast.workspace = true
+jpeg-encoder = { workspace = true, optional = true }
 memchr.workspace = true
 miniz_oxide.workspace = true
+zune-jpeg.workspace = true
 
 [dev-dependencies]
 argos_carve = { workspace = true, features = ["test-util"] }
+criterion.workspace = true
+
+[[bench]]
+name = "carve"
+harness = false
 
 [lints]
 workspace = true

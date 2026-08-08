@@ -477,6 +477,7 @@ fn restricting_the_range_restricts_what_is_found() {
         .stages(Stages {
             filesystem: false,
             carving: true,
+            reassembly: false,
         })
         .build()
         .expect("valid configuration");
@@ -521,6 +522,7 @@ fn a_scan_that_covers_nothing_is_a_configuration_error() {
         .stages(Stages {
             filesystem: false,
             carving: false,
+            reassembly: false,
         })
         .build()
         .expect_err("a scan with no stages finds nothing and must be refused");
@@ -603,4 +605,46 @@ fn a_name_is_never_reported_against_a_different_filesystem_object() {
          name on object {:?}",
         only.source_object
     );
+}
+
+#[test]
+fn a_fragmented_image_comes_back_through_the_pipeline_as_a_reassembly() {
+    // The medium stored this image in two pieces with unrelated data between
+    // them, which is what stage E exists for. It must come out of the scan as
+    // an artifact — at the reassembled tier, with both extents recorded so the
+    // claim can be replayed against the medium.
+    let block = argos_carve::classify::BLOCK_BYTES;
+    let image = argos_carve::fixture::photo_jpeg(320, 240, 0x51ED_2A11_0000_0001);
+    let layout =
+        argos_carve::fixture::fragmented(96 * block, &image, &[4 * block, 20 * block], block);
+
+    let (artifacts, report) = scan_with(&layout.disk, config(2));
+
+    let reassembled = artifacts
+        .iter()
+        .find(|artifact| artifact.confidence == Confidence::Reassembled)
+        .unwrap_or_else(|| panic!("the fragmented image must be reassembled, got {artifacts:?}"));
+    assert_eq!(reassembled.stage, Stage::Reassembly);
+    assert_eq!(reassembled.extents.len(), 2, "both fragments are recorded");
+    assert_eq!(
+        reassembled.bytes, image,
+        "the extents must hold the planted image, byte for byte"
+    );
+    assert_eq!(report.reassembled, 1);
+    assert!(report.reassembly_attempted >= 1);
+}
+
+#[test]
+fn a_medium_of_noise_costs_reassembly_nothing() {
+    // False signature hits are the common case on a used disk. None of them
+    // decodes a single MCU, so none becomes a fragmentation point and the
+    // stage does no searching at all — which is what keeps it affordable
+    // enough to run by default.
+    let disk = argos_carve::fixture::Disk::noisy(CHUNK * 4, 0x2468_ACE0_1357_9BDF).into_bytes();
+
+    let (artifacts, report) = scan_with(&disk, config(2));
+
+    assert!(artifacts.is_empty());
+    assert_eq!(report.reassembly_attempted, 0);
+    assert!(!report.reassembly_budget_exhausted);
 }

@@ -88,7 +88,8 @@ jobs:
       - name: Run every carving fuzz target for a fixed budget
         working-directory: crates/argos_carve
         run: |
-          for target in jpeg_validate png_validate exif_thumbnail carver_scan; do
+          for target in jpeg_validate png_validate exif_thumbnail carver_scan \
+                        block_classify reassemble_bifragment jpeg_entropy_scan; do
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
       - name: Run every filesystem fuzz target for a fixed budget
@@ -97,6 +98,17 @@ jobs:
           for target in part_scan ntfs_record ext4_parse fat_dir apfs_open residue_sweep; do
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Benchmarks are not timed in CI — a shared runner's numbers mean
+      # nothing — but they must keep compiling, or they rot until the next
+      # time someone needs to measure something.
+      - run: cargo bench --workspace --no-run
 
   guidelines-index:
     runs-on: ubuntu-latest

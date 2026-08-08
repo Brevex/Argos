@@ -133,7 +133,10 @@ Recovers the geometry of filesystems destroyed by re-formatting.
 
 ## Spec: block classification
 
-Cheap per-block features to shrink the reassembly search space:
+Cheap per-block features to shrink the reassembly search space. Classification is a *hint* that
+gates which blocks enter a graph; it never decides a recovery, and it is deliberately permissive,
+because excluding a block wrongly loses a recovery while including one wrongly only costs search
+time:
 
 - Shannon entropy over the block; byte-histogram chi-square distance to reference profiles.
 - JPEG-stream detector: frequency of `0xFF 0x00` stuffing, absence of forbidden marker bytes,
@@ -143,15 +146,45 @@ Cheap per-block features to shrink the reassembly search space:
   a score. Classes gate which blocks enter reassembly graphs.
 - Reference: Garfinkel (DFRWS 2007); Fitzgerald et al. on fragment classification.
 
+## Spec: object validation as the reassembly oracle
+
+Reassembly is a search, and every hypothesis is judged by a decoder. The strength of that decoder
+decides whether the results are evidence:
+
+- **Structural validation alone is not sufficient for JPEG.** Roughly a quarter of the byte values
+  following an `0xFF` make the marker parser read a segment length *out of the unknown bytes*, skip
+  up to 65533 bytes and carry on. Random data therefore produces "valid structure" routinely, and
+  the position the parser reaches measures where the candidate sat on the disk rather than whether
+  it is a file. For contiguous carving this is harmless — one hypothesis per header — but a search
+  that tests thousands is wrong on every scan.
+- A reassembled JPEG is accepted only when its **entropy-coded scan decodes**: every MCU the frame
+  header requires, then `EOI`. This is exact, not a threshold. Extents are trimmed to the byte the
+  decoder confirms.
+- **Progress is MCUs decoded**, never a stream position. Garbage fails on the first Huffman code
+  outside the table, so progress cannot be inflated.
+- A reassembled PNG needs no equivalent: the per-chunk CRC32 the structural validator already
+  verifies makes a chance assembly impossible, and its break point is exact for the same reason.
+- Among competing complete assemblies — which the exact gate makes rare — the smoothest wins,
+  scored by the mean absolute luminance difference between vertically adjacent pixels.
+- Scope is baseline and extended sequential Huffman (`SOF0`, `SOF1`). Progressive and
+  arithmetic-coded frames are reported as unsupported and are **not reassembled**: claiming a
+  recovery from a coding the oracle cannot check would be a guess.
+
 ## Spec: bifragment gap carving
 
-For a candidate with header at `h`, fragmentation point at `h + k`, and a matching footer found at
-`f > h + k`:
+For a candidate with header at `h` and fragmentation point at `h + k`:
 
-- Hypothesize gap `[g_start, g_end)` with `h + k ≤ g_start < g_end ≤ f`; test gaps in increasing
-  size, bounded by a documented maximum (`MAX_BIFRAGMENT_GAP`), validating each hypothesis by
-  resuming the real decoder across the splice.
-- Accept the first hypothesis that decodes to the footer cleanly; tier `Reassembled`.
+- The first fragment ends at a block boundary **at or below** `h + k`. The break point is an upper
+  bound on the splice, not the splice itself: a wrong continuation frequently parses on for a
+  while past the real boundary, so the nearest few block boundaries below it are all candidates
+  (`MAX_PREFIX_CANDIDATES`).
+- The second fragment starts at a later block boundary; hypotheses are tried in increasing gap
+  size, bounded by `MAX_GAP_BYTES`, and the total attempt count by `MAX_HYPOTHESES`.
+- The second fragment is offered as running to the end of the searchable region, **not** to a
+  located footer, and the accepted extents are trimmed to the decoder's reported length. Footer
+  enumeration would make the outcome depend on which of a medium's many false `FF D9` hits was
+  tried first.
+- Accept the first hypothesis the oracle above confirms; tier `Reassembled`.
 - Reference: Garfinkel, "Carving contiguous and fragmented files with fast object validation",
   DFRWS 2007.
 
@@ -164,11 +197,51 @@ For candidates with > 2 fragments:
   across the stitch row; lower is better).
 - Parallel Unique Path: grow the best path per header greedily, all headers in parallel, each
   extent assignable to one path (matching Pal/Sencar/Memon's SmartCarver reassembly).
-- JPEG restart markers are independent entry points: an orphaned fragment starting at an `RSTn`
-  boundary is decodable standalone (Uzun & Sencar) and joins the graph as a first-class node.
-- All outputs tier `Reassembled`, with every extent recorded per `A-PROVENANCE`.
-- References: Pal & Memon, "The evolution of file carving", IEEE SPM 2009; Pal, Sencar, Memon,
-  DFRWS 2008; Uzun & Sencar 2015.
+- A fragment committed to a path is trimmed to the bytes the decoder actually consumed from it.
+  Left at the full length it was offered, it would swallow the rest of the medium and no further
+  fragment could be reached, so every file would appear to have two pieces.
+- The walk does **not** stop at the first assembly that decodes: a shorter, wrong path often
+  decodes, so every completion is scored and the smoothest is kept.
+- Progress and offsets inside a path are measured in the **assembled** stream, which is a
+  different coordinate system from the medium once a path has more than one fragment.
+
+### The seam check
+
+Deciding that bytes *decode* is not deciding that they *belong together*. Two photographs from
+one camera share Huffman tables, so a splice from one scan into the other decodes cleanly to the
+required MCU count — the entropy decoder cannot separate them, and a photo library is the modal
+medium for this tool. What separates them is the picture at the splice:
+
+- The entropy decoder reports which MCU it was on when it crossed the fragment boundary, which
+  fixes the **stitch row** exactly.
+- That row's mean luminance difference is compared against the frame's **median** row difference,
+  so the measure is scale-free — a busy photograph and a smooth one both score near `1.0` with no
+  seam.
+- Above `MAX_SEAM_RATIO` the assembly is refused. So is one whose frame is too small to have a
+  meaningful median: refusing beats guessing.
+- Outputs tier `Reassembled`, with every extent recorded per `A-PROVENANCE`.
+- References: Pal & Memon, IEEE SPM 2009; Pal, Sencar & Memon, DFRWS 2008; Uzun & Sencar 2015.
+
+### Measured recovery, and the greedy walk's limit
+
+Recovery rates are measured per fragmentation pattern against planted ground truth, and the suite
+holds two different things:
+
+- **Zero fabrication is absolute.** Every reported reassembly must be byte-identical to what was
+  planted. A tool that recovers more by occasionally assembling bytes that were never a file is
+  worse than one that recovers less, because an examiner cannot tell the two apart.
+- **The rate is measured, not assumed**, and held to a recorded floor so a regression fails.
+
+The suite includes a **competing photograph from the same encoder** between the fragments, which
+is the condition that defeats an entropy-only oracle; a suite that plants one image in noise does
+not test the guarantee it asserts.
+
+Two fragments — the dominant real pattern — is recovered in most cases, forwards or backwards, and
+the seam check refuses rather than guesses when it cannot judge, which costs some recall. Deeper
+fragmentation is where PUP's greediness shows: it commits one fragment per step and never
+reconsiders, so a step whose best candidate is not the true continuation loses the path. It gives
+up rather than guess, which is why nothing is fabricated, but it gives up often. Backtracking over
+committed steps is what would raise the deeper rates and is not implemented.
 
 ## Spec: confidence tiers and finding merge
 

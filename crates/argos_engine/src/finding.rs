@@ -149,6 +149,13 @@ pub struct ScanReport {
     pub unreadable: Vec<ByteRange>,
     /// Volumes located, current and residual.
     pub volumes: Vec<Volume>,
+    /// Images recovered by reassembling fragments.
+    pub reassembled: u64,
+    /// Broken candidates reassembly was offered.
+    pub reassembly_attempted: u64,
+    /// Whether the stage ran out of its decode budget, so candidates were left
+    /// untried. The medium may hold more than was reported.
+    pub reassembly_budget_exhausted: bool,
     /// Whether a detector hit its cap and stopped collecting, so the scan
     /// covered the surface but did not report everything it saw. A medium that
     /// does this is patterned, deliberately or otherwise.
@@ -163,6 +170,9 @@ impl ScanReport {
     /// Whether the run covered everything it was asked to cover.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.state == RunState::Finished && self.unreadable.is_empty() && !self.detection_truncated
+        self.state == RunState::Finished
+            && self.unreadable.is_empty()
+            && !self.detection_truncated
+            && !self.reassembly_budget_exhausted
     }
 }

@@ -24,6 +24,7 @@ use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::thread;
 
+use argos_carve::reassemble::{self, Broken};
 use argos_carve::{Candidate, Detector, Scratch, Verdict};
 use argos_core::artifact::{Artifact, ArtifactSink, Digest};
 use argos_core::geometry::{ByteOffset, ByteRange};
@@ -107,7 +108,7 @@ where
             stage: Stage::Validation,
             bytes_total: 0,
         });
-        let carved = validate_candidates(
+        let (carved, broken) = validate_candidates(
             control,
             &mut views,
             swept.candidates,
@@ -119,6 +120,20 @@ where
             findings: carved.len() as u64,
         });
         findings.extend(carved);
+
+        if config.stages().reassembly && !broken.is_empty() {
+            progress.emit(ScanEvent::StageStarted {
+                stage: Stage::Reassembly,
+                bytes_total: 0,
+            });
+            let reassembled =
+                reassemble_broken(control, &mut views, &broken, range_end, &mut report);
+            progress.emit(ScanEvent::StageFinished {
+                stage: Stage::Reassembly,
+                findings: reassembled.len() as u64,
+            });
+            findings.extend(reassembled);
+        }
     }
 
     merge::consolidate(&mut findings, &report.unreadable);
@@ -557,12 +572,12 @@ fn validate_candidates<V>(
     candidates: Vec<Candidate>,
     medium_end: u64,
     report: &mut ScanReport,
-) -> Vec<Finding>
+) -> (Vec<Finding>, Vec<Broken>)
 where
     V: Read + Seek + Send,
 {
     if candidates.is_empty() || views.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let (queue_tx, queue_rx) = crossbeam_channel::unbounded::<Candidate>();
     for candidate in candidates {
@@ -579,17 +594,20 @@ where
             workers.push(scope.spawn(move || {
                 let mut scratch = Scratch::new();
                 let mut found = Vec::new();
+                let mut broken = Vec::new();
                 let mut rejected = 0_u64;
                 while let Ok(candidate) = queue.recv() {
                     if control.is_cancelled() {
                         break;
                     }
-                    match validate_one(view, candidate, medium_end, &mut scratch) {
-                        Some(results) => found.extend(results),
-                        None => rejected += 1,
+                    let validated = validate_one(view, candidate, medium_end, &mut scratch);
+                    if validated.rejected {
+                        rejected += 1;
                     }
+                    found.extend(validated.findings);
+                    broken.extend(validated.broken);
                 }
-                (found, rejected)
+                (found, broken, rejected)
             }));
         }
         drop(queue_rx);
@@ -604,37 +622,76 @@ where
     });
 
     let mut found = Vec::new();
-    for (results, rejected) in outputs {
+    let mut broken = Vec::new();
+    for (results, breaks, rejected) in outputs {
         found.extend(results);
+        broken.extend(breaks);
         report.rejected_candidates = report.rejected_candidates.saturating_add(rejected);
     }
-    found
+    // Deterministic order, so the stage that follows does not depend on which
+    // worker finished first.
+    broken.sort_unstable_by_key(|entry: &Broken| (entry.header, entry.break_at));
+    (found, broken)
 }
 
-/// Validates one candidate, returning every finding it yields: the image
-/// itself when it validates, plus its embedded thumbnail when that does.
+/// What validating one candidate established.
+#[derive(Default)]
+struct Validated {
+    /// The image itself when it validated, plus its thumbnail when that did.
+    findings: Vec<Finding>,
+    /// Where the stream stopped being this file, when it broke. This is what
+    /// reassembly starts from, so it comes from the entropy decoder rather
+    /// than the marker grammar (see `argos_carve::reassemble::locate_break`).
+    broken: Option<Broken>,
+    /// Whether the candidate produced no finding at all.
+    rejected: bool,
+}
+
+/// Validates one candidate.
 ///
-/// `None` means the candidate failed validation and produced nothing — the
-/// caller counts it as rejected. An I/O failure is treated the same way: a
-/// candidate we cannot read is a candidate we cannot report.
+/// A candidate that breaks is not simply discarded: it may still carry an
+/// embedded thumbnail, and it always carries a fragmentation point, which is
+/// the only thing that makes reassembly tractable.
 fn validate_one<V: Read + Seek>(
     view: &mut V,
     candidate: Candidate,
     medium_end: u64,
     scratch: &mut Scratch,
-) -> Option<Vec<Finding>> {
+) -> Validated {
     let limit = medium_end.min(
         candidate
             .offset
             .get()
             .saturating_add(argos_carve::MAX_IMAGE_BYTES),
     );
-    let verdict =
-        argos_carve::validate(candidate.format, view, candidate.offset, limit, scratch).ok()?;
+    let Ok(verdict) =
+        argos_carve::validate(candidate.format, view, candidate.offset, limit, scratch)
+    else {
+        // A candidate we cannot read is a candidate we cannot report.
+        return Validated {
+            rejected: true,
+            ..Validated::default()
+        };
+    };
 
     let (complete, thumbnail) = match verdict {
         Verdict::Complete { length, thumbnail } => (Some(length), thumbnail),
         Verdict::Corrupt { thumbnail, .. } => (None, thumbnail),
+    };
+
+    // A candidate that did not carve whole is where reassembly begins.
+    let broken = if complete.is_none() {
+        argos_carve::reassemble::locate_break(
+            view,
+            candidate.offset,
+            candidate.format,
+            medium_end,
+            scratch,
+        )
+        .ok()
+        .flatten()
+    } else {
+        None
     };
 
     let mut found = Vec::new();
@@ -667,7 +724,196 @@ fn validate_one<V: Read + Seek>(
         });
     }
 
-    if found.is_empty() { None } else { Some(found) }
+    Validated {
+        rejected: found.is_empty(),
+        findings: found,
+        broken,
+    }
+}
+
+/// Bytes either side of a fragmentation point whose blocks are offered to the
+/// graph walk.
+///
+/// An allocator splits a file because it could not find one run long enough,
+/// so the remainder lands in the same region — searching the whole medium for
+/// every broken candidate would cost far more and find little. Classifying
+/// only this window also keeps the block set small enough to hold
+/// (A-BOUNDED-ALLOC).
+const REASSEMBLY_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Blocks the graph walk may consider at once.
+const MAX_REASSEMBLY_BLOCKS: usize = 1 << 16;
+
+/// Bytes read per request while classifying a window.
+const CLASSIFY_READ_BYTES: usize = 1024 * 1024;
+
+/// Recovers images the medium stored in pieces.
+///
+/// Two techniques in order of cost: the gap search first, because two
+/// fragments with a gap is the dominant real pattern and it needs no block
+/// classification; then the graph walk over classified blocks for whatever the
+/// gap search could not complete.
+///
+/// The whole stage shares one decode budget. Reassembly runs by default, so a
+/// medium carrying thousands of false signature hits must not be able to turn
+/// a scan into an overnight job; when the budget runs out the report says so
+/// rather than implying the medium held nothing more.
+fn reassemble_broken<V: Read + Seek>(
+    control: &Control,
+    views: &mut [V],
+    broken: &[Broken],
+    medium_len: u64,
+    report: &mut ScanReport,
+) -> Vec<Finding> {
+    let Some(view) = views.first_mut() else {
+        return Vec::new();
+    };
+    let mut scratch = Scratch::new();
+    let mut found = Vec::new();
+    let mut spent = 0_u32;
+    let mut unresolved = Vec::new();
+
+    for &candidate in broken {
+        if control.is_cancelled() {
+            return found;
+        }
+        report.reassembly_attempted = report.reassembly_attempted.saturating_add(1);
+        if spent >= crate::config::REASSEMBLY_BUDGET {
+            report.reassembly_budget_exhausted = true;
+            return found;
+        }
+        let limits = reassemble::Limits {
+            max_hypotheses: reassemble::MAX_HYPOTHESES
+                .min(crate::config::REASSEMBLY_BUDGET - spent),
+            ..reassemble::Limits::default()
+        };
+        match reassemble::bifragment(view, candidate, medium_len, limits, &mut scratch) {
+            Ok(Some(reassembly)) => {
+                spent = spent.saturating_add(reassembly.hypotheses);
+                report.reassembled = report.reassembled.saturating_add(1);
+                found.push(finding_from_reassembly(candidate, &reassembly));
+            }
+            Ok(None) => {
+                spent = spent.saturating_add(limits.max_hypotheses);
+                unresolved.push(candidate);
+            }
+            // A candidate we cannot read is one we cannot reassemble.
+            Err(_) => {}
+        }
+    }
+
+    if unresolved.is_empty() || spent >= crate::config::REASSEMBLY_BUDGET {
+        report.reassembly_budget_exhausted |= spent >= crate::config::REASSEMBLY_BUDGET;
+        return found;
+    }
+
+    let blocks = classify_windows(view, &unresolved, medium_len);
+    let limits = reassemble::Limits {
+        max_hypotheses: reassemble::MAX_HYPOTHESES.min(crate::config::REASSEMBLY_BUDGET - spent),
+        ..reassemble::Limits::default()
+    };
+    if let Ok(assembled) = reassemble::parallel_unique_path(
+        view,
+        &unresolved,
+        &blocks,
+        medium_len,
+        limits,
+        &mut scratch,
+    ) {
+        for (candidate, reassembly) in assembled {
+            report.reassembled = report.reassembled.saturating_add(1);
+            found.push(finding_from_reassembly(candidate, &reassembly));
+        }
+    }
+    // The walk shares one budget across every header it was given, so the
+    // whole of it is charged here. Saying the run covered everything while a
+    // search was cut short would overstate what was looked at.
+    report.reassembly_budget_exhausted |=
+        spent.saturating_add(limits.max_hypotheses) >= crate::config::REASSEMBLY_BUDGET;
+    found
+}
+
+/// Classifies the blocks around each fragmentation point.
+///
+/// The window is read in large sequential pieces and sliced per block, the way
+/// the rest of the pipeline reads: a block-at-a-time seek and read would issue
+/// thousands of syscalls per candidate, which is the one thing that outweighs
+/// every other cost in a scan (`M-THROUGHPUT`).
+fn classify_windows<V: Read + Seek>(
+    view: &mut V,
+    broken: &[Broken],
+    medium_len: u64,
+) -> Vec<reassemble::Candidate> {
+    let block = argos_carve::classify::BLOCK_BYTES;
+    let mut blocks: Vec<reassemble::Candidate> = Vec::new();
+    let mut window = vec![0_u8; CLASSIFY_READ_BYTES];
+    let mut seen: HashSet<u64> = HashSet::new();
+
+    for candidate in broken {
+        let centre = candidate.header.get();
+        let from = centre.saturating_sub(REASSEMBLY_WINDOW_BYTES);
+        let from = from - (from % block as u64);
+        let to = centre
+            .saturating_add(REASSEMBLY_WINDOW_BYTES)
+            .min(medium_len);
+
+        let mut at = from;
+        while at + block as u64 <= to {
+            if blocks.len() >= MAX_REASSEMBLY_BLOCKS {
+                return blocks;
+            }
+            let want = usize::try_from((to - at).min(CLASSIFY_READ_BYTES as u64))
+                .unwrap_or(CLASSIFY_READ_BYTES);
+            let whole = want - (want % block);
+            if whole == 0 {
+                break;
+            }
+            if read_exact_at(view, at, &mut window[..whole]).is_err() {
+                // Unreadable here; skip the piece rather than the window.
+                at = at.saturating_add(whole as u64);
+                continue;
+            }
+            for (index, chunk) in window[..whole].chunks_exact(block).enumerate() {
+                let start = at.saturating_add((index * block) as u64);
+                if !seen.insert(start) {
+                    continue;
+                }
+                let profile = argos_carve::classify::classify(chunk);
+                if profile.class.can_hold_image_data() {
+                    if blocks.len() >= MAX_REASSEMBLY_BLOCKS {
+                        return blocks;
+                    }
+                    blocks.push(reassemble::Candidate {
+                        start: ByteOffset::new(start),
+                        profile,
+                    });
+                }
+            }
+            at = at.saturating_add(whole as u64);
+        }
+    }
+    blocks.sort_unstable_by_key(|entry| entry.start);
+    blocks
+}
+
+/// Turns a confirmed reassembly into a finding.
+///
+/// The tier is [`Confidence::Reassembled`], below a contiguous carve: the
+/// bytes are the image — the entropy decoder settled that — but which bytes
+/// belong together is a reconstruction, and the extent list is what makes it
+/// reproducible (A-PROVENANCE).
+fn finding_from_reassembly(broken: Broken, reassembly: &reassemble::Reassembly) -> Finding {
+    Finding {
+        format: broken.format,
+        stage: Stage::Reassembly,
+        confidence: Confidence::Reassembled,
+        extents: reassembly.extents.clone().into_boxed_slice(),
+        declared_size: None,
+        timestamps: argos_core::Timestamps::default(),
+        name: None,
+        source_object: None,
+        parent: None,
+    }
 }
 
 /// Hashes every finding in medium order and hands the survivors to the sink.

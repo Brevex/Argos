@@ -47,6 +47,55 @@ fn main() -> std::io::Result<()> {
     let cyclic = argos_carve::fixture::exif_payload(&thumb, true);
     fs::write(exif_dir.join("cyclic"), &cyclic[6..])?;
 
+    // The reassembly oracle. Seeding it with real encoded images matters more
+    // than anywhere else here: starting from noise, a fuzzer would spend its
+    // budget failing at the frame header and never reach the entropy decoder
+    // at all.
+    let entropy_dir = base.join("jpeg_entropy_scan");
+    fs::create_dir_all(&entropy_dir)?;
+    let photo = argos_carve::fixture::photo_jpeg(64, 48, 0x51ED_2A11_0000_0001);
+    let colour = argos_carve::fixture::photo_jpeg_rgb(48, 32, 0x0F1E_2D3C_4B5A_6978);
+    fs::write(entropy_dir.join("photo"), &photo)?;
+    fs::write(entropy_dir.join("colour"), &colour)?;
+    fs::write(
+        entropy_dir.join("truncated"),
+        truncated(&photo, photo.len() / 2),
+    )?;
+    fs::write(
+        entropy_dir.join("flipped-scan"),
+        with_flipped_byte(&photo, photo.len() * 3 / 4),
+    )?;
+    fs::write(entropy_dir.join("restarts"), &plain)?;
+
+    let classify_dir = base.join("block_classify");
+    fs::create_dir_all(&classify_dir)?;
+    fs::write(classify_dir.join("entropy"), &photo)?;
+    fs::write(
+        classify_dir.join("deflate"),
+        argos_carve::fixture::noisy_png(32, 32, 0xF00D_BEEF),
+    )?;
+    fs::write(classify_dir.join("zeros"), vec![0_u8; 4096])?;
+    fs::write(
+        classify_dir.join("noise"),
+        argos_carve::fixture::Disk::noisy(4096, 0x2468_ACE0_1357_9BDF).into_bytes(),
+    )?;
+
+    // This target reads its header and break offsets from the first five
+    // bytes, so a seed is a small control prefix followed by a medium.
+    let bifragment_dir = base.join("reassemble_bifragment");
+    fs::create_dir_all(&bifragment_dir)?;
+    let mut seed = vec![0_u8, 0, 0x40, 0, 0];
+    seed.extend_from_slice(&photo);
+    fs::write(bifragment_dir.join("photo"), &seed)?;
+    // Large enough that both fragments get a whole block.
+    let block = argos_carve::classify::BLOCK_BYTES;
+    let splittable = argos_carve::fixture::photo_jpeg(320, 240, 0x2468_ACE0_1357_9BDF);
+    let mut split = vec![0_u8, 0, 0x40, 0, 0];
+    split.extend_from_slice(
+        &argos_carve::fixture::fragmented(32 * block, &splittable, &[block, 8 * block], block).disk,
+    );
+    fs::write(bifragment_dir.join("fragmented"), &split)?;
+
     let scan_dir = base.join("carver_scan");
     fs::create_dir_all(&scan_dir)?;
     let disk = argos_carve::fixture::Disk::filled(64 * 1024)

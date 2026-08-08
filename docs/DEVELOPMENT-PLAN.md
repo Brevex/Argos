@@ -183,6 +183,11 @@ the exact break offset — this decode-feedback localization is what makes reass
    (Uzun & Sencar's orphaned-fragment technique).
 4. Every reassembled artifact is flagged `reconstructed`; the report records the exact extent list
    used, so the result is reproducible and auditable.
+5. Because the search tests thousands of hypotheses, its oracle is an **entropy decode** — every
+   MCU the frame declares, then `EOI` — not structural validation: the JPEG marker grammar is
+   loose enough that spliced random bytes regularly produce a structurally complete, fabricated
+   image, and the position such a parse reaches measures disk position rather than evidence. PNG
+   is exempt; its per-chunk CRC32 already rules that out.
 
 **Stage F — Validation and scoring.** A finding from stage C is only accepted once the medium
 confirms it twice: an image signature at its first extent, and the *assembled* extents passing the

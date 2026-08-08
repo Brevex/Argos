@@ -55,6 +55,21 @@ const MAX_INFLIGHT_BYTES: usize = 16 * 1024 * 1024;
 /// a worker can always run at the same time.
 const MIN_QUEUE_DEPTH: usize = 2;
 
+/// Decode attempts reassembly may spend across a whole scan.
+///
+/// The per-candidate budget bounds one search; this bounds the stage, which
+/// runs by default. A medium carrying thousands of false signature hits would
+/// otherwise turn a scan that reads at gigabytes a second into one that
+/// decodes for hours.
+///
+/// Measured: a hypothesis the entropy decoder rejects costs about 5 us, since
+/// unrelated bytes fail on the first Huffman code outside the table, so this
+/// budget caps the stage at roughly a second and a half of decoding whatever
+/// the medium holds. When it runs out the report says so, so a user knows
+/// there was more to try rather than being told the medium held nothing else
+/// (`M-DOCUMENTED-MAGIC`).
+pub const REASSEMBLY_BUDGET: u32 = 250_000;
+
 /// Which recovery stages a scan runs.
 ///
 /// Both are on by default: filesystem metadata is the strongest evidence and
@@ -66,6 +81,10 @@ pub struct Stages {
     pub filesystem: bool,
     /// Full-surface signature carving with structural validation.
     pub carving: bool,
+    /// Reassembly of images the medium stored in pieces, from the candidates
+    /// carving could not complete. Needs `carving`, which is where the
+    /// fragmentation points come from.
+    pub reassembly: bool,
 }
 
 impl Default for Stages {
@@ -73,6 +92,7 @@ impl Default for Stages {
         Self {
             filesystem: true,
             carving: true,
+            reassembly: true,
         }
     }
 }
@@ -226,6 +246,9 @@ impl ScanConfigBuilder {
         if !self.stages.filesystem && !self.stages.carving {
             return Err(ConfigError::new(ConfigProblem::NoStages));
         }
+        if self.stages.reassembly && !self.stages.carving {
+            return Err(ConfigError::new(ConfigProblem::ReassemblyNeedsCarving));
+        }
         Ok(ScanConfig {
             workers: self
                 .workers
@@ -251,6 +274,7 @@ enum ConfigProblem {
     EmptyRange { start: u64, end: u64 },
     NoStages,
     NoViews,
+    ReassemblyNeedsCarving,
 }
 
 impl ConfigError {
@@ -287,6 +311,10 @@ impl fmt::Display for ConfigError {
             ConfigProblem::NoViews => {
                 f.write_str("a scan needs at least one read-only view of the medium")
             }
+            ConfigProblem::ReassemblyNeedsCarving => f.write_str(
+                "reassembly works on the candidates carving could not complete, so it cannot \
+                 run with carving disabled",
+            ),
         }?;
         if self.backtrace.status() == BacktraceStatus::Captured {
             write!(f, "\n{}", self.backtrace)?;

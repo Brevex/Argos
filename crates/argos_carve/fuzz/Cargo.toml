@@ -42,3 +42,24 @@ bench = false
 
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "block_classify"
+path = "fuzz_targets/block_classify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reassemble_bifragment"
+path = "fuzz_targets/reassemble_bifragment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpeg_entropy_scan"
+path = "fuzz_targets/jpeg_entropy_scan.rs"
+test = false
+doc = false
+bench = false
