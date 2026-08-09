@@ -126,21 +126,76 @@ jobs:
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
 
-  triage-model:
+  triage-thresholds:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # `argos_classify` writes the network's forward pass out by hand so the
-      # evidence path carries no inference runtime; `tools/train_triage`
-      # describes the same network in `candle` for training. Two descriptions
-      # can drift, and `tools/` is excluded from the workspace, so nothing
-      # else here would notice. This is the check that makes the split safe
-      # (A-INFERENCE-PURE-RUST).
-      - name: The two descriptions of the triage network agree
-        working-directory: tools/train_triage
-        run: cargo run --release --bin crosscheck
+      # Triage is deterministic statistics, and every threshold in it is a
+      # number on a scale. This runs the harness that derives them, over a
+      # range of the corpus generator disjoint from the one that grades them,
+      # so a change to a rule shows its distributions in the log rather than
+      # being taken on trust (A-EVAL-GATED).
+      - name: The thresholds' distributions are recorded
+        run: >
+          cargo test -p argos_classify --features test-util --test thresholds
+          -- --ignored --nocapture
+
+  shell:
+    # `argos_ui` is excluded from the engine's workspace, so nothing above
+    # builds it. This lane is the only thing that does: the Rust side of the
+    # shell, the frontend's type check, and the production bundle.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/argos_ui
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/argos_ui/ui/package-lock.json
+      - name: Web view toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+                                  libappindicator3-dev librsvg2-dev patchelf \
+                                  libsoup-3.0-dev
+      - name: Frontend types
+        working-directory: crates/argos_ui/ui
+        run: |
+          npm ci
+          npm run check
+      - name: Frontend bundle
+        working-directory: crates/argos_ui/ui
+        run: npm run build
+      - name: Shell
+        working-directory: crates/argos_ui
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+  ipc-bindings:
+    # The wire format has one definition, in `argos_ipc`, and the frontend's
+    # `dto.ts` is generated from it. A checkout where the two disagree is one
+    # where a field was renamed in Rust and the shell still reads the old name
+    # — which fails at runtime, in the web view, with no type error anywhere
+    # (`A-DTO-VERSIONED`).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate the TypeScript definitions
+        run: cargo test -p argos_ipc --features bindings
+      - name: They match what is checked in
+        run: git diff --exit-code crates/argos_ui/ui/src/lib/dto.ts
 
   bench:
     runs-on: ubuntu-latest

@@ -2,17 +2,18 @@
 //!
 //! Triage runs once per recovered artifact, not once per block, so it is not
 //! on the scan's hot path — the signature sweep is. What these measure is
-//! whether the stage is proportionate: a scan that reads a medium at
-//! gigabytes a second must not then spend minutes labeling what it found
-//! (`M-HOTPATH`).
+//! whether the stage is proportionate: a scan that reads a medium at gigabytes
+//! a second must not then spend minutes labeling what it found (`M-HOTPATH`).
 //!
-//! The four steps of one artifact are measured separately, because they have
-//! very different costs and only one of them is the model.
+//! That proportion is the reason there is no model here any more. A recovery
+//! from a system disk produced twenty-three thousand artifacts, and inference
+//! at 2.6 ms each spent a minute on them; the statistics below decide the same
+//! question from the same decoded pixels.
 
 use argos_classify::fixture::{Slice, sample};
-use argos_classify::{Triage, net, phash, prefilter};
-use argos_core::classify::{Classifier, PixelImage};
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use argos_classify::{Triage, phash, rules};
+use argos_core::classify::PixelImage;
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 /// A representative artifact: a camera-resolution photograph.
@@ -20,70 +21,35 @@ fn photograph() -> PixelImage {
     sample(Slice::Photograph, 12_345).image
 }
 
-/// The cheap statistics pass that settles most synthetic assets.
-fn prefilter_pass(c: &mut Criterion) {
+/// The statistics pass, which is where the whole decision's time goes.
+fn statistics(c: &mut Criterion) {
     let image = photograph();
-    let mut group = c.benchmark_group("prefilter");
+    let mut group = c.benchmark_group("rules");
     group.throughput(criterion::Throughput::Elements(image.pixel_count()));
     group.bench_function("features", |b| {
-        b.iter(|| black_box(prefilter::features(black_box(&image))));
+        b.iter(|| black_box(rules::features(black_box(&image))));
     });
     group.finish();
 }
 
-/// Perceptual hashing, which every artifact pays before inference.
+/// The whole label, end to end, as the engine asks for it.
+fn decision(c: &mut Criterion) {
+    let image = photograph();
+    c.bench_function("decide", |b| {
+        b.iter(|| black_box(Triage::decide(black_box(&image))));
+    });
+}
+
+/// Perceptual hashing, which every artifact pays for near-duplicate grouping.
 fn perceptual_hash(c: &mut Criterion) {
     let image = photograph();
     let mut group = c.benchmark_group("phash");
     group.throughput(criterion::Throughput::Elements(image.pixel_count()));
-    group.bench_function("blockhash", |b| {
+    group.bench_function("perceptual_hash", |b| {
         b.iter(|| black_box(phash::perceptual_hash(black_box(&image))));
     });
     group.finish();
 }
 
-/// Reducing a full-size image to the model's 64x64 input.
-fn preprocessing(c: &mut Criterion) {
-    let image = photograph();
-    c.bench_function("model_input", |b| {
-        b.iter(|| black_box(net::model_input(black_box(&image))));
-    });
-}
-
-/// Inference itself, at the batch sizes the engine's worker forms.
-///
-/// The per-image cost is what decides whether the engine's batch worker is
-/// worth its complexity: if a batch of eight costs eight times a batch of
-/// one, batching is buying nothing and the worker should hand images over one
-/// at a time.
-fn inference(c: &mut Criterion) {
-    let Ok(mut triage) = Triage::new() else {
-        // A benchmark cannot gate on the pinned model; the eval harness does
-        // that. Nothing to measure if it did not load.
-        return;
-    };
-    let mut group = c.benchmark_group("inference");
-    for size in [1_usize, 4, 8] {
-        let images: Vec<PixelImage> = (0..size)
-            .map(|index| sample(Slice::Photograph, 900 + index as u64).image)
-            .collect();
-        group.throughput(criterion::Throughput::Elements(size as u64));
-        group.bench_function(format!("batch_{size}"), |b| {
-            b.iter_batched(
-                || images.clone(),
-                |images| black_box(triage.score_batch(black_box(&images)).ok()),
-                BatchSize::SmallInput,
-            );
-        });
-    }
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    prefilter_pass,
-    perceptual_hash,
-    preprocessing,
-    inference
-);
+criterion_group!(benches, statistics, decision, perceptual_hash);
 criterion_main!(benches);

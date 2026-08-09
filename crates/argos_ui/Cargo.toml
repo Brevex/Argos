@@ -1,11 +1,50 @@
 [package]
 name = "argos_ui"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-publish.workspace = true
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+description = "Argos presentation shell"
 
+# Its own workspace: excluded from the engine's, so the Tauri dependency tree
+# never decides the outcome of a lint or an audit that exists for the code that
+# reads evidence.
+[workspace]
+
+[lib]
+name = "argos_ui"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The whole dependency list. `argos_ipc` is the only thing from this project,
+# and it is the wire format alone: no engine, no carver, no filesystem parser,
+# no device HAL. The shell cannot contain recovery logic because it cannot
+# reach any (`A-SHELL-NO-DOMAIN`).
 [dependencies]
+argos_ipc = { path = "../argos_ipc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+# A folder picker and nothing else. It grants the web view no filesystem
+# access: the user chooses a directory, and the path travels as a string that
+# the *engine* then validates and refuses if it would contain the source.
+tauri-plugin-dialog = "2"
 
-[lints]
-workspace = true
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+allow_attributes_without_reason = "warn"
+
+# The `cargo` group is deliberately absent. Its `multiple_crate_versions` lint
+# is a statement about a dependency tree one owns; this crate's tree is Tauri's
+# and is not ours to deduplicate.

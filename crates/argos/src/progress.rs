@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use argos_core::progress::{ProgressSink, RunState, ScanEvent};
+use argos_core::progress::{ProgressSink, RunState, ScanEvent, Unit};
 use argos_engine::ScanSession;
 
 /// Shortest interval between status-line redraws. Ten a second reads as live
@@ -32,6 +32,8 @@ struct Line {
     last_drawn: Option<Instant>,
     /// Whether an unterminated status line is on screen.
     pending: bool,
+    /// Artifacts stored so far, as the report stage last said.
+    stored: u64,
 }
 
 impl Renderer {
@@ -43,6 +45,7 @@ impl Renderer {
                 started: Instant::now(),
                 last_drawn: None,
                 pending: false,
+                stored: 0,
             }),
             interactive: std::io::stderr().is_terminal(),
         }
@@ -84,8 +87,9 @@ impl ProgressSink for Renderer {
         match event {
             ScanEvent::StageProgress {
                 stage,
-                bytes_done,
-                bytes_total,
+                unit,
+                done,
+                total,
             } => {
                 if !self.interactive {
                     return;
@@ -102,18 +106,34 @@ impl ProgressSink for Renderer {
                     .duration_since(line.started)
                     .as_secs_f64()
                     .max(f64::MIN_POSITIVE);
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "a rate display does not need more than f64 precision"
-                )]
-                let rate = bytes_done as f64 / MIB / elapsed;
-                let percent = bytes_done.saturating_mul(100).checked_div(bytes_total);
-                match percent {
-                    Some(percent) => {
-                        eprint!("\r  {stage:<10} {percent:>3}%   {rate:>7.1} MiB/s");
+                let percent = done.saturating_mul(100).checked_div(total);
+                let measure = match unit {
+                    // A read rate belongs to a stage that reads; a stage
+                    // counting candidates reports the count itself.
+                    Unit::Bytes => {
+                        #[expect(
+                            clippy::cast_precision_loss,
+                            reason = "a rate display does not need more than f64 precision"
+                        )]
+                        let rate = done as f64 / MIB / elapsed;
+                        format!("{rate:>7.1} MiB/s")
                     }
-                    None => eprint!("\r  {stage:<10}         {rate:>7.1} MiB/s"),
+                    Unit::Items => format!("{done} of {total}"),
+                };
+                match percent {
+                    Some(percent) => eprint!("\r  {stage:<10} {percent:>3}%   {measure}"),
+                    None => eprint!("\r  {stage:<10}         {measure}"),
                 }
+                let _ = std::io::stderr().flush();
+                line.pending = true;
+            }
+            ScanEvent::ArtifactStored { artifacts, bytes } => {
+                line.stored = artifacts;
+                if !self.interactive {
+                    return;
+                }
+                Renderer::break_line(&mut line);
+                eprint!("\r  recovered  {artifacts} artifacts, {bytes} bytes");
                 let _ = std::io::stderr().flush();
                 line.pending = true;
             }
@@ -131,10 +151,13 @@ impl ProgressSink for Renderer {
                 Renderer::break_line(&mut line);
                 eprintln!("  unreadable {range}");
             }
-            // A stage announcing itself needs no line of its own; its progress
-            // and its result already say so.
+            // Named as it starts, so a stage that turns out to have nothing to
+            // report is still visibly the one running.
             ScanEvent::StageStarted { stage, .. } => {
-                let _ = stage;
+                Renderer::break_line(&mut line);
+                eprint!("\r  {stage:<10} started");
+                let _ = std::io::stderr().flush();
+                line.pending = true;
             }
             _ => {}
         }

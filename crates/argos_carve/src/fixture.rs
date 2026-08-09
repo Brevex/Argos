@@ -656,6 +656,41 @@ pub fn noisy_png(width: u32, height: u32, seed: u64) -> Vec<u8> {
     png_from_raw(width, height, &raw)
 }
 
+/// A PNG of flat colour blocks with hard edges: the shape of an icon.
+///
+/// Not [`png`], which draws a dithered gradient and is genuinely unclear to
+/// the triage rules. This is the shape those rules were measured against — a
+/// handful of exact colours, long runs of identical pixels, no high-frequency
+/// content anywhere — so a test that needs an artifact every asset rule agrees
+/// on can plant one. `seed` varies the palette, so a disk full of these does
+/// not deduplicate to a single artifact.
+///
+/// # Panics
+///
+/// Panics if `size` is zero.
+#[must_use]
+pub fn icon_png(size: u32, seed: u32) -> Vec<u8> {
+    assert!(size > 0, "an icon needs a non-zero size");
+    let palette: [[u8; 3]; 4] = [[44, 62, 80], [52, 152, 219], [231, 76, 60], [236, 240, 241]];
+    let block = (size / 4).max(1);
+    let mut raw = Vec::with_capacity((size as usize * 3 + 1) * size as usize);
+    for y in 0..size {
+        raw.push(0); // PNG per-row filter: none.
+        for x in 0..size {
+            let cell = (x / block) + (y / block) * 4 + seed;
+            let colour = palette[(cell % 4) as usize];
+            // One channel carries the seed so different seeds are different
+            // images rather than the same four colours in a different order.
+            raw.extend_from_slice(&[
+                colour[0],
+                colour[1],
+                colour[2].wrapping_add((seed % 23) as u8),
+            ]);
+        }
+    }
+    png_from_raw(size, size, &raw)
+}
+
 /// Absolute offset of the first `IDAT` chunk's payload in a PNG.
 ///
 /// # Panics

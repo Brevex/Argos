@@ -22,14 +22,15 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use argos_carve::reassemble::{self, Broken};
 use argos_carve::{Candidate, Detector, Scratch, Verdict};
 use argos_core::artifact::{Artifact, ArtifactSink, Digest};
-use argos_core::classify::Classifier;
+use argos_core::classify::{Classifier, TriageLabel};
 use argos_core::geometry::{ByteOffset, ByteRange};
-use argos_core::progress::{ProgressSink, ScanEvent};
+use argos_core::progress::{ProgressSink, ScanEvent, Unit};
 use argos_core::{Confidence, Format, Stage};
 use argos_fs::{DeletedFile, FsKind, Volume, residue};
 use sha2::{Digest as _, Sha256};
@@ -55,6 +56,57 @@ const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 /// holds under two million files, so a worker reaching this has found a
 /// pattern, not a library; the overflow is reported, never silently dropped.
 const MAX_CANDIDATES_PER_WORKER: usize = 2_000_000;
+
+/// Most progress events a stage counted in items will emit.
+///
+/// A stage handling a million candidates must not emit a million events
+/// (`M-LOG-OVERHEAD`); at this cap a progress bar still moves in steps too
+/// small for an eye to catch.
+const PROGRESS_STEPS: u64 = 200;
+
+/// Reports how far a stage that counts items has got.
+///
+/// Shared by the workers of a parallel stage, so the count is one number for
+/// the stage rather than one per thread.
+pub(crate) struct Counter<'a, P: ?Sized> {
+    progress: &'a P,
+    stage: Stage,
+    total: u64,
+    /// Items between two events, never zero.
+    stride: u64,
+    done: AtomicU64,
+}
+
+impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
+    /// Announces the stage and prepares to count `total` items.
+    pub(crate) fn start(progress: &'a P, stage: Stage, total: u64) -> Self {
+        progress.emit(ScanEvent::StageStarted {
+            stage,
+            unit: Unit::Items,
+            total,
+        });
+        Self {
+            progress,
+            stage,
+            total,
+            stride: total.div_ceil(PROGRESS_STEPS).max(1),
+            done: AtomicU64::new(0),
+        }
+    }
+
+    /// Records one item handled, reporting on stride boundaries and at the end.
+    pub(crate) fn step(&self) {
+        let done = self.done.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        if done.is_multiple_of(self.stride) || done == self.total {
+            self.progress.emit(ScanEvent::StageProgress {
+                stage: self.stage,
+                unit: Unit::Items,
+                done,
+                total: self.total,
+            });
+        }
+    }
+}
 
 /// Runs every configured stage over `medium`.
 pub(crate) fn run<V, S, P, C>(
@@ -91,13 +143,15 @@ where
     );
 
     if config.stages().filesystem {
-        progress.emit(ScanEvent::StageStarted {
-            stage: Stage::Filesystem,
-            bytes_total: 0,
-        });
         let mut residue = swept.residue;
-        let recovered =
-            recover_filesystems(control, &mut views, medium_len, &mut residue, &mut report);
+        let recovered = recover_filesystems(
+            control,
+            &mut views,
+            medium_len,
+            &mut residue,
+            progress,
+            &mut report,
+        );
         report.volumes = residue.volumes;
         progress.emit(ScanEvent::StageFinished {
             stage: Stage::Filesystem,
@@ -107,15 +161,12 @@ where
     }
 
     if config.stages().carving {
-        progress.emit(ScanEvent::StageStarted {
-            stage: Stage::Validation,
-            bytes_total: 0,
-        });
         let (carved, broken) = validate_candidates(
             control,
             &mut views,
             swept.candidates,
             range_end,
+            progress,
             &mut report,
         );
         progress.emit(ScanEvent::StageFinished {
@@ -125,12 +176,14 @@ where
         findings.extend(carved);
 
         if config.stages().reassembly && !broken.is_empty() {
-            progress.emit(ScanEvent::StageStarted {
-                stage: Stage::Reassembly,
-                bytes_total: 0,
-            });
-            let reassembled =
-                reassemble_broken(control, &mut views, &broken, range_end, &mut report);
+            let reassembled = reassemble_broken(
+                control,
+                &mut views,
+                &broken,
+                range_end,
+                progress,
+                &mut report,
+            );
             progress.emit(ScanEvent::StageFinished {
                 stage: Stage::Reassembly,
                 findings: reassembled.len() as u64,
@@ -140,20 +193,36 @@ where
     }
 
     merge::consolidate(&mut findings, &report.unreadable);
-    let emitted = emit(&mut views, &findings, sink, progress, &mut report)?;
+    // Screening happens inside the report stage or not at all: whether to
+    // write an artifact has to be settled before it is written. It borrows the
+    // classifier for the length of that stage and hands it back.
+    let mut classifier = classifier;
+    let screen = match (config.exclude_assets(), classifier.as_deref_mut()) {
+        (true, Some(classifier)) => Some(Screen {
+            classifier,
+            buf: Vec::new(),
+        }),
+        _ => None,
+    };
+    let emitted = emit(&mut views, &findings, sink, screen, progress, &mut report)?;
 
-    // Triage runs last, over artifacts already persisted and recorded: its
-    // output annotates them and can no longer change what was recovered
-    // (A-TRIAGE-NOT-VERDICT).
-    if let Some(classifier) = classifier
+    // Annotation runs last, over artifacts already persisted and recorded:
+    // previews and triage labels describe them and can no longer change what
+    // was recovered (A-TRIAGE-NOT-VERDICT).
+    let work = crate::annotate::Work {
+        sink,
+        classifier,
+        previews: config.previews(),
+    };
+    if !work.is_idle()
         && let Some(view) = views.first_mut()
     {
-        crate::triage::run(
+        crate::annotate::run(
             control,
             view,
             &findings,
             &emitted,
-            classifier,
+            work,
             progress,
             &mut report,
         );
@@ -209,7 +278,8 @@ where
     let stages = config.stages();
     progress.emit(ScanEvent::StageStarted {
         stage: Stage::Carve,
-        bytes_total: span.end.saturating_sub(span.start),
+        unit: Unit::Bytes,
+        total: span.end.saturating_sub(span.start),
     });
 
     let depth = config.queue_depth().max(1);
@@ -352,8 +422,9 @@ fn read_chunks<V, P>(
         report.bytes_swept = pos.saturating_add(want as u64).saturating_sub(span.start);
         progress.emit(ScanEvent::StageProgress {
             stage: Stage::Carve,
-            bytes_done: report.bytes_swept,
-            bytes_total: total,
+            unit: Unit::Bytes,
+            done: report.bytes_swept,
+            total,
         });
         if last {
             return;
@@ -397,11 +468,12 @@ fn read_exact_at<V: Read + Seek>(view: &mut V, at: u64, buf: &mut [u8]) -> std::
 
 /// Recovers deleted files from every volume the sweep located, current and
 /// residual, plus the orphaned NTFS records left behind by a re-format.
-fn recover_filesystems<V: Read + Seek>(
+fn recover_filesystems<V: Read + Seek, P: ProgressSink + ?Sized>(
     control: &Control,
     views: &mut [V],
     medium_len: u64,
     sweep: &mut residue::Sweep,
+    progress: &P,
     report: &mut ScanReport,
 ) -> Vec<Finding> {
     let Some(view) = views.first_mut() else {
@@ -423,11 +495,16 @@ fn recover_filesystems<V: Read + Seek>(
     // file reuses the same working memory as every other validation.
     let mut scratch = Scratch::new();
     let mut found = Vec::new();
+    // Counted in volumes: one volume's metadata can take minutes to walk, and
+    // a count of volumes is the only honest denominator this stage has before
+    // it opens them.
+    let counter = Counter::start(progress, Stage::Filesystem, sweep.volumes.len() as u64);
     for volume in &sweep.volumes {
         if control.is_cancelled() {
             return found;
         }
         found.extend(recover_volume(view, *volume, &mut scratch));
+        counter.step();
     }
 
     // Orphaned `FILE` records store volume-relative cluster numbers, so they
@@ -586,16 +663,21 @@ fn structure_of<V: Read + Seek>(
 /// Each worker owns one view of the medium, so validation is parallel without
 /// the views ever being shared. A hit that fails to validate is counted, never
 /// reported: a magic number is not evidence.
-fn validate_candidates<V>(
+fn validate_candidates<V, P>(
     control: &Control,
     views: &mut [V],
     candidates: Vec<Candidate>,
     medium_end: u64,
+    progress: &P,
     report: &mut ScanReport,
 ) -> (Vec<Finding>, Vec<Broken>)
 where
     V: Read + Seek + Send,
+    P: ProgressSink + ?Sized,
 {
+    // Announced even when there is nothing to do, so the stage order a client
+    // sees is the stage order that ran.
+    let counter = Counter::start(progress, Stage::Validation, candidates.len() as u64);
     if candidates.is_empty() || views.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -611,6 +693,7 @@ where
         let mut workers = Vec::with_capacity(views.len());
         for view in views.iter_mut() {
             let queue = queue_rx.clone();
+            let counter = &counter;
             workers.push(scope.spawn(move || {
                 let mut scratch = Scratch::new();
                 let mut found = Vec::new();
@@ -626,6 +709,7 @@ where
                     }
                     found.extend(validated.findings);
                     broken.extend(validated.broken);
+                    counter.step();
                 }
                 (found, broken, rejected)
             }));
@@ -778,13 +862,15 @@ const CLASSIFY_READ_BYTES: usize = 1024 * 1024;
 /// medium carrying thousands of false signature hits must not be able to turn
 /// a scan into an overnight job; when the budget runs out the report says so
 /// rather than implying the medium held nothing more.
-fn reassemble_broken<V: Read + Seek>(
+fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
     control: &Control,
     views: &mut [V],
     broken: &[Broken],
     medium_len: u64,
+    progress: &P,
     report: &mut ScanReport,
 ) -> Vec<Finding> {
+    let counter = Counter::start(progress, Stage::Reassembly, broken.len() as u64);
     let Some(view) = views.first_mut() else {
         return Vec::new();
     };
@@ -826,6 +912,7 @@ fn reassemble_broken<V: Read + Seek>(
             // A candidate we cannot read is one we cannot reassemble.
             Err(_) => {}
         }
+        counter.step();
     }
 
     if unresolved.is_empty() || spent >= crate::config::REASSEMBLY_BUDGET {
@@ -943,82 +1030,182 @@ fn finding_from_reassembly(broken: Broken, reassembly: &reassemble::Reassembly) 
     }
 }
 
+/// Decides, before an artifact is written, whether the run was asked to leave
+/// it out.
+///
+/// Only ever reached when a caller passed `--exclude-assets`; a scan that
+/// stores everything never constructs one. It reads the artifact back and
+/// decodes it, which is the same work the annotation pass does — so a run that
+/// screens pays for the decode once here instead of once there.
+pub(crate) struct Screen<'a, C> {
+    /// The classifier whose label decides. It labels; the decision to act on
+    /// the label is the caller's, and it is stated in the manifest.
+    pub classifier: &'a mut C,
+    /// Scratch for reading an artifact back.
+    pub buf: Vec<u8>,
+}
+
+impl<C: Classifier> Screen<'_, C> {
+    /// The reason to omit an artifact, or `None` to store it.
+    ///
+    /// `None` for anything that cannot be decoded within bounds or that the
+    /// rules did not settle as an asset. An artifact this cannot judge is
+    /// stored: an unclear label must never cost evidence.
+    fn asset_label<V: Read + Seek>(
+        &mut self,
+        view: &mut V,
+        finding: &Finding,
+        sha256: Digest,
+    ) -> Option<argos_core::classify::TriageScore> {
+        let length = usize::try_from(finding.length()).ok()?;
+        if length > argos_carve::decode::MAX_DECODE_BYTES {
+            return None;
+        }
+        self.buf.clear();
+        self.buf.reserve(length);
+        let mut bytes = ExtentReader::new(view, &finding.extents);
+        bytes.read_to_end(&mut self.buf).ok()?;
+        if self.buf.len() != length {
+            return None;
+        }
+        if Digest::new(Sha256::digest(&*self.buf).into()) != sha256 {
+            return None;
+        }
+        let image = argos_carve::decode::decode_rgba(finding.format, &self.buf)?;
+        let score = self.classifier.score(&image).ok().flatten()?;
+        (score.label == TriageLabel::SyntheticAsset).then_some(score)
+    }
+}
+
 /// Hashes every finding in medium order and hands the survivors to the sink.
 ///
 /// Sequential on purpose: the order artifacts reach the sink is the order they
 /// appear in the manifest, and that order must not depend on how many workers
 /// the machine had. Returns what was actually persisted, which is what the
 /// triage stage is allowed to see.
-fn emit<V, S, P>(
+fn emit<V, S, P, C>(
     views: &mut [V],
     findings: &[Finding],
     sink: &mut S,
+    mut screen: Option<Screen<'_, C>>,
     progress: &P,
     report: &mut ScanReport,
-) -> Result<Vec<crate::triage::Emitted>, ScanError>
+) -> Result<Vec<crate::annotate::Emitted>, ScanError>
 where
     V: Read + Seek,
     S: ArtifactSink,
     P: ProgressSink + ?Sized,
+    C: Classifier,
 {
     let mut emitted = Vec::new();
     let Some(view) = views.first_mut() else {
         return Ok(emitted);
     };
+    // The work this stage has to get through: every finding costs a read of
+    // its extents whatever becomes of it. This is the denominator of the
+    // progress figure, and the numerator counts findings *disposed of* rather
+    // than findings stored — a duplicate, an unreadable run and an artifact a
+    // caller asked not to write all cost this stage the same read, so counting
+    // only the stored ones is what leaves a bar resting short of the end on a
+    // run that did everything it could. What was actually stored is a separate
+    // figure, reported by `ArtifactStored` and totalled in the manifest.
+    let total_work = findings
+        .iter()
+        .fold(0_u64, |sum, finding| sum.saturating_add(finding.length()));
     progress.emit(ScanEvent::StageStarted {
         stage: Stage::Report,
-        bytes_total: 0,
+        unit: Unit::Bytes,
+        total: total_work,
     });
 
     let mut seen: HashSet<Digest> = HashSet::with_capacity(findings.len());
     let mut buf = vec![0_u8; STREAM_CHUNK_BYTES];
+    let mut stored_bytes = 0_u64;
+    let mut done_work = 0_u64;
     for (index, finding) in findings.iter().enumerate() {
         let expected = finding.length();
-        let Some((sha256, read)) = hash_extents(view, &finding.extents, &mut buf) else {
-            // The bytes this finding claims cannot be read back. It is not
-            // reported, and nothing is invented in its place.
-            report.unrecoverable = report.unrecoverable.saturating_add(1);
-            continue;
-        };
-        if read != expected {
-            report.unrecoverable = report.unrecoverable.saturating_add(1);
-            continue;
-        }
-        if !seen.insert(sha256) {
-            report.duplicates = report.duplicates.saturating_add(1);
-            continue;
-        }
+        let disposition = 'disposition: {
+            let Some((sha256, read)) = hash_extents(view, &finding.extents, &mut buf) else {
+                // The bytes this finding claims cannot be read back. It is not
+                // reported, and nothing is invented in its place.
+                report.unrecoverable = report.unrecoverable.saturating_add(1);
+                break 'disposition None;
+            };
+            if read != expected {
+                report.unrecoverable = report.unrecoverable.saturating_add(1);
+                break 'disposition None;
+            }
+            if !seen.insert(sha256) {
+                report.duplicates = report.duplicates.saturating_add(1);
+                break 'disposition None;
+            }
 
-        let artifact = Artifact {
-            format: finding.format,
-            stage: finding.stage,
-            confidence: finding.confidence,
-            extents: &finding.extents,
-            length: expected,
-            expected_length: finding.declared_size,
-            sha256,
-            timestamps: finding.timestamps,
-            recovered_name: finding.name.as_deref(),
-            source_object: finding.source_object,
-            parent: finding.parent,
+            let artifact = Artifact {
+                format: finding.format,
+                stage: finding.stage,
+                confidence: finding.confidence,
+                extents: &finding.extents,
+                length: expected,
+                expected_length: finding.declared_size,
+                sha256,
+                timestamps: finding.timestamps,
+                recovered_name: finding.name.as_deref(),
+                source_object: finding.source_object,
+                parent: finding.parent,
+            };
+
+            // A run may be asked to leave synthetic assets unwritten. The label
+            // is decided here rather than in the annotation pass because a
+            // decision about *whether to write* has to happen before the write
+            // — and the artifact is recorded either way, so the manifest
+            // describes the medium whole even when the directory does not.
+            if let Some(screen) = screen.as_mut()
+                && let Some(score) = screen.asset_label(view, finding, sha256)
+            {
+                sink.omit(
+                    &artifact,
+                    &score.label.to_string(),
+                    &score.decided_by.to_string(),
+                )
+                .map_err(ScanError::sink)?;
+                report.omitted_assets = report.omitted_assets.saturating_add(1);
+                break 'disposition None;
+            }
+            // The sink reads through a hasher, so the digest in the manifest is
+            // checked against the bytes the sink actually received rather than
+            // against an earlier, separate read of the same extents.
+            let mut bytes = Hashing::new(ExtentReader::new(view, &finding.extents));
+            sink.accept(&artifact, &mut bytes)
+                .map_err(ScanError::sink)?;
+            if bytes.finish() != sha256 {
+                // The medium answered differently between the two reads.
+                // Nothing recovered from it can be trusted, so the run stops
+                // rather than record a hash that does not describe the stored
+                // bytes.
+                return Err(ScanError::unstable_medium(finding.start()));
+            }
+            report.artifacts = report.artifacts.saturating_add(1);
+            stored_bytes = stored_bytes.saturating_add(expected);
+            progress.emit(ScanEvent::ArtifactStored {
+                artifacts: report.artifacts,
+                bytes: stored_bytes,
+            });
+            Some(crate::annotate::Emitted {
+                finding: index,
+                sha256,
+            })
         };
-        // The sink reads through a hasher, so the digest in the manifest is
-        // checked against the bytes the sink actually received rather than
-        // against an earlier, separate read of the same extents.
-        let mut bytes = Hashing::new(ExtentReader::new(view, &finding.extents));
-        sink.accept(&artifact, &mut bytes)
-            .map_err(ScanError::sink)?;
-        if bytes.finish() != sha256 {
-            // The medium answered differently between the two reads. Nothing
-            // recovered from it can be trusted, so the run stops rather than
-            // record a hash that does not describe the stored bytes.
-            return Err(ScanError::unstable_medium(finding.start()));
-        }
-        report.artifacts = report.artifacts.saturating_add(1);
-        emitted.push(crate::triage::Emitted {
-            finding: index,
-            sha256,
+
+        done_work = done_work.saturating_add(expected);
+        progress.emit(ScanEvent::StageProgress {
+            stage: Stage::Report,
+            unit: Unit::Bytes,
+            done: done_work,
+            total: total_work,
         });
+        if let Some(item) = disposition {
+            emitted.push(item);
+        }
     }
 
     progress.emit(ScanEvent::StageFinished {

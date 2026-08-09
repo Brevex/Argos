@@ -4,7 +4,8 @@ The automated suite covers everything that can be checked without a disk: the
 path conventions, the class and TRIM decisions, the mount-table parsing, and
 that an image-file scan recovers the same bytes on all three operating
 systems. What it cannot cover is the part where a real kernel answers a real
-ioctl.
+ioctl, or where a real desktop's elevation prompt hands back a process that
+can still be spoken to.
 
 **Every value below is unverified against hardware until someone runs this and
 records the result.** That is not a formality: the request codes in
@@ -144,7 +145,41 @@ originating volume come from the VSS COM API, which Argos does not use. If the
 count or the paths look wrong, that is a bug; if the timestamps are absent,
 that is the documented boundary.
 
-## 6. Bad-sector handling
+## 6. The shell, against a real device
+
+The window never runs elevated. It spawns `argos serve` and speaks JSON-RPC to
+it, and asking for privileges is only a choice about how that child is
+started. Which means this step is about one thing: whether the elevated child
+can still be talked to.
+
+- [ ] Launch the shell, tick "raise privileges", and start the engine. On
+      Linux the desktop's authentication agent should prompt, and the engine
+      should connect afterwards.
+- [ ] **Windows and macOS are expected to refuse here, with an explanation.**
+      Both elevate through a shell verb — `ShellExecuteW` with `runas`,
+      `osascript … with administrator privileges` — that does not give the
+      caller the child's pipes, so there is nothing to speak JSON-RPC over.
+      What must be true is that the refusal *says so* and points at
+      `argos scan` from an elevated terminal. A hang, a silent failure, or an
+      engine that connects and then reports an empty medium because it is
+      running unprivileged are all bugs.
+- [ ] Without elevation, scanning a raw **image file** works in the shell on
+      all three platforms. This is the path that does not depend on any of the
+      above.
+- [ ] With a scan running, open the gear and switch themes. Nothing should be
+      interrupted: the rings keep moving, the figures keep counting, and the
+      warnings stay on screen. A theme switch rewrites custom properties and
+      remounts nothing, so anything lost here is a bug.
+- [ ] Watch the two rings against a real medium. **Scan** should climb steadily
+      while **Recovery**, "Images recovered" and "Data recovered" stay at zero
+      until the sweep finishes — this pipeline validates after it sweeps, and
+      those figures count artifacts actually written, never candidates seen. A
+      count that moves during the sweep would mean something is reporting
+      unvalidated hits as recoveries.
+- [ ] Stop a scan partway with the button and confirm the destination folder
+      holds a `manifest.json` describing exactly the files beside it.
+
+## 7. Bad-sector handling
 
 Optional, and only with a medium that already has read errors — do not create
 them.

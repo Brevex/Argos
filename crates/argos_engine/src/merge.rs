@@ -6,6 +6,9 @@
 //! evidence that produced it (A-CONFIDENCE-HONEST). Content-hash deduplication
 //! happens later, at emit time, because it needs the bytes.
 
+use std::cmp::Reverse;
+use std::collections::BTreeSet;
+
 use argos_core::Stage;
 use argos_core::geometry::ByteRange;
 
@@ -77,6 +80,19 @@ pub(crate) fn consolidate(findings: &mut Vec<Finding>, unreadable: &[ByteRange])
     });
 
     let mut kept: Vec<Finding> = Vec::with_capacity(findings.len());
+    // Indices into `kept`, ordered by the byte each one reaches, furthest
+    // first.
+    //
+    // A container has to reach at least as far as what it contains, so a
+    // search can stop at the first candidate that does not reach far enough.
+    // Without that order the search is against everything kept so far, and
+    // there is a shape of medium that makes that quadratic: one weakly
+    // evidenced carve spanning thousands of files the filesystem also named.
+    // It cannot cover any of them — its evidence is weaker — so every one of
+    // them is kept, and every one of them is then compared against every one
+    // before it. That is a real disk, not a contrived one, and it costs hours
+    // in a stage that says nothing while it runs.
+    let mut by_reach: BTreeSet<(Reverse<u64>, usize)> = BTreeSet::new();
     let mut furthest_end = 0_u64;
     for finding in findings.drain(..) {
         let end = finding
@@ -86,16 +102,21 @@ pub(crate) fn consolidate(findings: &mut Vec<Finding>, unreadable: &[ByteRange])
             .max()
             .unwrap_or(0);
         // Reaching past everything kept so far cannot be covered by it: the
-        // common case, and what keeps this a linear sweep.
+        // common case, and the cheapest possible answer.
         let covered = end <= furthest_end
             && finding.parent.is_none()
-            && kept.iter().rev().any(|container| {
-                container.confidence >= finding.confidence
-                    && container.extents != finding.extents
-                    && finding.is_covered_by(container)
-            });
+            && by_reach
+                .iter()
+                .take_while(|(Reverse(reach), _)| *reach >= end)
+                .any(|&(_, index)| {
+                    let container = &kept[index];
+                    container.confidence >= finding.confidence
+                        && container.extents != finding.extents
+                        && finding.is_covered_by(container)
+                });
         if !covered {
             furthest_end = furthest_end.max(end);
+            by_reach.insert((Reverse(end), kept.len()));
             kept.push(finding);
         }
     }

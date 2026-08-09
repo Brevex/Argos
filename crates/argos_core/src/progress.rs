@@ -46,25 +46,59 @@ impl std::fmt::Display for RunState {
     }
 }
 
+/// What a stage counts its work in.
+///
+/// A stage that reads the medium measures itself in bytes; one that examines
+/// candidates or labels artifacts measures itself in those. Naming the unit is
+/// what lets a display say `43%` for either without claiming a candidate count
+/// is a byte count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Unit {
+    /// Bytes of the medium.
+    #[default]
+    Bytes,
+    /// Whatever the stage handles one at a time: a candidate to validate, a
+    /// fragment set to reassemble, an artifact to label.
+    Items,
+}
+
+impl std::fmt::Display for Unit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Bytes => "bytes",
+            Self::Items => "items",
+        })
+    }
+}
+
 /// One structured progress event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ScanEvent {
-    /// A stage began; `bytes_total` is the work it expects to cover.
+    /// A stage began.
+    ///
+    /// Emitted by every stage, including one that will never report progress,
+    /// because a stage that cannot say how far along it is must at least be
+    /// able to say that it is the one running. Silence between two stages is
+    /// indistinguishable from a stall.
     StageStarted {
         /// Stage that began.
         stage: Stage,
-        /// Bytes the stage expects to process, zero when not known ahead.
-        bytes_total: u64,
+        /// What `total` counts.
+        unit: Unit,
+        /// Work the stage expects to cover, zero when not known ahead.
+        total: u64,
     },
     /// Cumulative progress within a stage, emitted once per chunk of work.
     StageProgress {
         /// Stage reporting progress.
         stage: Stage,
-        /// Bytes processed so far.
-        bytes_done: u64,
-        /// Bytes the stage expects to process, zero when not known ahead.
-        bytes_total: u64,
+        /// What `done` and `total` count.
+        unit: Unit,
+        /// Work processed so far.
+        done: u64,
+        /// Work the stage expects to cover, zero when not known ahead.
+        total: u64,
     },
     /// A stage ended, having produced `findings` results.
     StageFinished {
@@ -83,6 +117,23 @@ pub enum ScanEvent {
     RegionUnreadable {
         /// Byte range that failed to read.
         range: ByteRange,
+    },
+    /// An artifact reached the sink. Counts are cumulative for the run.
+    ///
+    /// Emitted once per artifact, which is the granularity a recovery happens
+    /// at — not per sector and not per candidate (`M-LOG-OVERHEAD`). It exists
+    /// so a display can say what has actually been recovered while it is
+    /// happening, rather than only once the stage ends.
+    ///
+    /// Both figures describe artifacts **stored**, never candidates seen: a
+    /// signature hit that has not passed its format's state machine is not a
+    /// recovery, and counting one as such would overstate the result
+    /// (A-CONFIDENCE-HONEST).
+    ArtifactStored {
+        /// Artifacts handed to the sink so far.
+        artifacts: u64,
+        /// Sum of their lengths in bytes.
+        bytes: u64,
     },
 }
 

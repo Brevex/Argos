@@ -108,6 +108,8 @@ pub struct ScanConfig {
     start: u64,
     end: Option<u64>,
     stages: Stages,
+    previews: bool,
+    exclude_assets: bool,
 }
 
 impl Default for ScanConfig {
@@ -129,6 +131,8 @@ impl ScanConfig {
             start: 0,
             end: None,
             stages: Stages::default(),
+            previews: false,
+            exclude_assets: false,
         }
     }
 
@@ -136,6 +140,17 @@ impl ScanConfig {
     #[must_use]
     pub fn workers(&self) -> NonZeroUsize {
         self.workers
+    }
+
+    /// Whether artifacts triage labels a synthetic asset are left unwritten.
+    ///
+    /// Off by default, and it is the one setting that lets a label decide what
+    /// reaches the output directory. A run with it on still records every
+    /// artifact it omits, with its extents and digest, so the manifest remains
+    /// a complete account of the medium (A-TRIAGE-NOT-VERDICT).
+    #[must_use]
+    pub fn exclude_assets(&self) -> bool {
+        self.exclude_assets
     }
 
     /// Bytes read per chunk.
@@ -164,6 +179,15 @@ impl ScanConfig {
         self.stages
     }
 
+    /// Whether the scan renders a preview of every artifact that decodes.
+    ///
+    /// Off by default: previews are derived files, and a forensic tool should
+    /// not put bytes in an output directory that nobody asked for.
+    #[must_use]
+    pub fn previews(&self) -> bool {
+        self.previews
+    }
+
     /// The byte range of a medium of `medium_len` bytes this scan covers,
     /// clamped to the medium.
     #[must_use]
@@ -182,6 +206,8 @@ pub struct ScanConfigBuilder {
     start: u64,
     end: Option<u64>,
     stages: Stages,
+    previews: bool,
+    exclude_assets: bool,
 }
 
 impl ScanConfigBuilder {
@@ -197,6 +223,26 @@ impl ScanConfigBuilder {
     #[must_use]
     pub fn chunk_bytes(mut self, chunk_bytes: usize) -> Self {
         self.chunk_bytes = chunk_bytes;
+        self
+    }
+
+    /// Leaves artifacts triage labels a synthetic asset unwritten. Defaults
+    /// to off.
+    ///
+    /// The one setting that lets a label decide what reaches the output
+    /// directory. Every omitted artifact is still recorded with its extents
+    /// and digest, so the manifest stays a complete account of the medium and
+    /// `argos export` can fetch the bytes later without a second scan.
+    #[must_use]
+    pub fn exclude_assets(mut self, exclude_assets: bool) -> Self {
+        self.exclude_assets = exclude_assets;
+        self
+    }
+
+    /// Whether to render a preview of every artifact that decodes.
+    #[must_use]
+    pub fn previews(mut self, previews: bool) -> Self {
+        self.previews = previews;
         self
     }
 
@@ -257,6 +303,8 @@ impl ScanConfigBuilder {
             start: self.start,
             end: self.end,
             stages: self.stages,
+            previews: self.previews,
+            exclude_assets: self.exclude_assets,
         })
     }
 }

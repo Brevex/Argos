@@ -8,3 +8,13 @@ target/
 # The trainer writes its artifact beside itself; the copy that ships is the
 # one committed under crates/argos_classify/model/.
 /tools/train_triage/*.safetensors
+
+# The shell's frontend: installed packages and the bundle Vite produces from
+# the sources beside them. `package-lock.json` is committed, so the tree that
+# built a release is reproducible.
+/crates/argos_ui/ui/node_modules/
+/crates/argos_ui/ui/dist/
+
+# Tauri regenerates these from tauri.conf.json and the capabilities on every
+# build. The inputs are committed; the output is not.
+/crates/argos_ui/gen/

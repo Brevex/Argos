@@ -33,7 +33,7 @@ cite it by id (`M-UNSOUND`, `M-HOTPATH`).
 | open a device/image, parse bytes from a medium, record or report an artifact | `argos-evidence-handling` |
 | write a parser of on-disk structures, or its fuzz target/fixtures | `argos-ondisk-parsing` |
 | implement or change a recovery technique (carving, FS recovery, reassembly) | `argos-recovery-algorithms` |
-| touch `argos_classify`: model, thresholds, inference, dedup | `argos-ml-triage` |
+| touch `argos_classify`: rules, thresholds, dedup | `argos-ml-triage` |
 | touch `argos_ui` or the `--serve` IPC surface | `argos-tauri-shell` |
 
 Reviews are on demand, read-only, and cite rule ids: `rust-design-reviewer`, `rust-safety-reviewer`,
@@ -68,7 +68,7 @@ These hold without consulting a skill:
 ## Layout
 
 ```
-crates/argos/          CLI binary — stdout is its UI; also the engine process (`--serve`);
+crates/argos/          CLI binary — stdout is its UI; also the engine process (`serve`);
                        may use one app-error crate (anyhow/eyre)
 crates/argos_core/     domain newtypes (Lba, ByteOffset, SectorSize, DeviceClass, Confidence),
                        port traits (BlockSource, …) and canonical errors shared across crates
@@ -81,10 +81,15 @@ crates/argos_fs/       partition tables + filesystem metadata recovery (NTFS/ext
                        + prior-filesystem residue scan
 crates/argos_carve/    signature carving, block classification and fragment reassembly over
                        `impl Read + Seek` (sans-IO, testable in memory)
-crates/argos_classify/ ML triage (pure-Rust inference) + perceptual-hash dedup
+crates/argos_classify/ triage by deterministic image statistics + perceptual-hash dedup
 crates/argos_engine/   scan pipeline, session lifecycle, concurrency, finding merge, confidence
 crates/argos_report/   findings, manifests, hashes, chain of custody
-crates/argos_ui/       Tauri presentation shell — no recovery logic
+crates/argos_ipc/      the wire format between the engine process and its clients — DTOs,
+                       schema version, JSON-RPC framing; depends on nothing in the workspace,
+                       which is what stops an engine type reaching a client
+crates/argos_ui/       Tauri presentation shell. Outside the workspace, and it does not link
+                       argos_engine: it cannot contain recovery logic because it cannot reach
+                       any. Frontend is Svelte 5 + TypeScript under crates/argos_ui/ui/
 ```
 
 Library crates use canonical error structs (`M-ERRORS-CANONICAL-STRUCTS`); only the binary may use

@@ -60,7 +60,7 @@ Driven ports (the engine calls out through these):
 | --- | --- | --- |
 | `BlockSource` | Sector-addressed, read-only access: `read_at(Lba, &mut [u8]) -> Result<…>`, geometry (`SectorSize`, capacity), bad-sector reporting, device class (HDD/SSD/image) | OS device HAL (`argos_device`), raw image file, in-memory fixture (`argos_core` test-util) |
 | `ArtifactSink` | Receives validated artifacts + metadata; owns output layout | Output-directory writer (`argos_report`), collecting sink for tests |
-| `Classifier` | Scores a decoded image: photograph vs synthetic asset | ML adapter (`argos_classify`), `AcceptAll` null adapter |
+| `Classifier` | Labels a decoded image: photograph vs synthetic asset | Deterministic rules (`argos_classify`), `AcceptAll` null adapter |
 | `ProgressSink` | Structured progress/telemetry events | CLI renderer, Tauri event bridge, test collector |
 
 Where `std` already provides the abstraction, the std trait **is** the port (`M-IMPL-IO`):
@@ -83,22 +83,33 @@ crates/argos_fs/       partition tables (MBR/GPT incl. backup GPT) + filesystem 
                        recovery (NTFS, ext4, FAT/exFAT, APFS) + prior-filesystem residue scan
 crates/argos_carve/    signature carving, block classification, fragment reassembly, format
                        validators — sans-IO over `impl Read + Seek`
-crates/argos_classify/ ML triage adapter (pure-Rust inference) + perceptual-hash dedup
+crates/argos_classify/ triage by deterministic image statistics + perceptual-hash dedup
 crates/argos_engine/   the hexagon's center: scan pipeline, session lifecycle, concurrency,
                        merge/dedup of findings, confidence model
 crates/argos_report/   findings, manifests, SHA-256 hashing, chain of custody, export
-crates/argos_ui/       Tauri shell — presentation adapter only (§6)
+crates/argos_ipc/      the wire format between the engine process and its clients: DTOs,
+                       schema version, JSON-RPC framing. Depends on nothing in the workspace
+crates/argos_ui/       Tauri shell — presentation adapter only (§6). Excluded from the
+                       workspace: the Tauri dependency tree must not decide the outcome of a
+                       lint or an audit that exists for the code that reads evidence
 ```
 
 Dependency DAG (arrows = "depends on"; must stay acyclic — enforce with `cargo tree` in CI):
 
 ```
-argos_ui ──▶ argos_engine ──▶ argos_fs ──▶ argos_core
-argos    ──▶ argos_engine ──▶ argos_carve ──▶ argos_core
+argos    ──▶ argos_engine ──▶ argos_fs ──▶ argos_core
+                          ──▶ argos_carve ──▶ argos_core
                           ──▶ argos_classify ──▶ argos_core
                           ──▶ argos_report ──▶ argos_core
-argos / argos_ui ──▶ argos_device ──▶ argos_core   (adapter injected into engine)
+argos    ──▶ argos_device ──▶ argos_core           (adapter injected into engine)
+argos    ──▶ argos_ipc                             (translates engine ↔ wire)
+argos_ui ──▶ argos_ipc                             (+ tauri; and nothing else)
 ```
+
+`argos_ui` does **not** appear above `argos_ipc`. It cannot reach `argos_engine`, `argos_carve`
+or `argos_fs`, so it cannot contain recovery logic — `A-SHELL-NO-DOMAIN` is a property of this
+graph rather than something a review has to keep noticing (§6.1). `argos_ipc` depends on nothing
+in the workspace, which is what makes it unable to leak an engine type onto the wire.
 
 `argos_fs` and `argos_carve` never depend on each other or on `argos_device`; they meet only in
 `argos_engine`. `argos_core` depends on nothing in the workspace. Circular references are
@@ -270,11 +281,36 @@ is the shell's job (§6.2); the HAL only reports "permission denied" precisely
 4. Progress flows engine→UI via Tauri **events** fed from the `ProgressSink` port; commands never
    poll. Thumbnails/previews are written by `argos_report` into the session output directory and
    served via Tauri's asset-protocol scope restricted to that directory — never base64 over IPC.
-5. Frontend stays minimal: TypeScript + a light framework (Svelte or vanilla), no state
-   management beyond mirroring engine events, no business rules in JS. If a value is computed in
-   TS, it is display formatting only.
-6. Tauri allowlist/capabilities: only the commands and the one asset scope — no shell, no fs, no
-   http permissions to the webview.
+5. Frontend stays minimal: **Svelte 5 + TypeScript**, no router, no state library, no CSS
+   framework. State is a mirror of engine events and user view preferences; if a value is
+   computed in TS, it is display formatting only. The IPC types are **generated** from
+   `argos_ipc` — one definition of the wire format, two languages.
+6. **The layout is fixed**: one screen, three blocks — the drive table, the destination folder,
+   and the live activity block (two progress rings and five figures) — plus one button that
+   starts and stops the run, and a gear in the title bar that opens the theme picker. There are
+   no other views and no navigation. That button runs exactly what
+   `argos scan <source> --out <destination>` runs, with no options of its own; a window that
+   could ask for a different recovery than the command line would be a second interface to the
+   engine rather than a view of it.
+7. **Every figure the window shows has one source, and estimates say so.** Bytes analysed comes
+   from the sweep's progress; artifacts and bytes *recovered* are the engine's own counts of what
+   reached the output directory, never candidates seen — this pipeline validates after it sweeps,
+   so both sit at zero while the surface is read, and that is reported rather than filled in
+   (`A-CONFIDENCE-HONEST`). Only "remaining" is arithmetic, and it is marked `≈`.
+8. **Every stage reports, and says what it counts.** A run spends most of its time in passes that
+   are not the read — validation drives every signature hit through a state machine, triage runs
+   inference over every artifact — so each stage announces itself and reports progress in its own
+   unit, bytes or items, with the unit on the wire. The scan ring follows the stage in progress
+   and the status line names it; one bar spanning passes measured in different things would need
+   an invented exchange rate between bytes and candidates. "Remaining" is shown only while the
+   medium is being read, because that is the only pass whose rate predicts anything.
+9. Themes are presentation modules and nothing more. The base layout owns all structure and
+   behaviour and reads only `var(--token)`; a theme supplies a value for every token in a total
+   `Record<ThemeToken, string>`, so **a theme missing a token does not compile**. Switching one
+   rewrites custom properties on the document root: no remount, no lost state, safe mid-scan.
+   One theme ships, `default`.
+10. Tauri allowlist/capabilities: only the commands and the one asset scope — no shell, no fs, no
+    http permissions to the webview.
 
 ### 6.2 Process model and elevation
 
@@ -376,7 +412,8 @@ recovery rates reported per pattern; all reassembled artifacts flagged `reconstr
 `argos_classify`: rule-based pre-filter; CNN (MobileNet-class) exported to a pinned local model
 file; inference via `candle` (pure Rust, chosen so training and inference share one graph
 definition); batch worker; perceptual-hash dedup. Training pipeline lives outside the workspace
-(`tools/train_triage`), only the eval harness and the pinned model artifact enter the repo.
+was removed with the model it produced: triage is deterministic image statistics, and what enters
+the repo is the rules, the eval harness and the threshold-derivation harness beside it.
 Threshold defaults are named constants derived on the trainer's validation range, never on the
 eval corpus (`M-DOCUMENTED-MAGIC`).
 *Skills*: `argos-ml-triage`, `rust-performance`, `rust-testing`. *Review*: `rust-test-reviewer`,
@@ -402,14 +439,35 @@ documented and executed once per OS. **The checklist is written and unexecuted**
 request codes and storage-driver descriptors cannot be verified without the hardware, and no
 value they produce should be trusted until a row appears in its results table.
 
-**P8 — Tauri shell.**
-`--serve` JSON-RPC mode in `argos` (same session API), then `argos_ui`: spawn-elevated bridge,
-DTO module, event streaming, device picker, scan dashboard, results gallery (asset-protocol
-thumbnails), export. Frontend per §6.1-5.
+**P8 — Tauri shell.** *(delivered; elevation on Windows/macOS outstanding)*
+In order:
+
+- **P8.1 — the capabilities the CLI was missing.** `ArtifactSink::preview`, a defaulted port
+  method the annotation pass calls with the pixels it already decoded for triage, so previews and
+  triage share one decode and previews do not depend on triage running. `argos_report` renders
+  them to `previews/<sha256>.jpg`, keyed by content hash exactly as triage annotations are.
+  `argos scan --previews` (opt-in: a forensic tool does not write derived files nobody asked
+  for), `argos report <session>` and `argos export --from … --to … [--sha256 …]`, which re-hashes
+  every artifact while copying and refuses one whose bytes no longer reproduce the recorded
+  digest. The scan driver moves out of `main.rs` into `scan.rs`, reporting through a sink — in
+  `serve` mode stdout is the protocol and a stray `println!` corrupts it.
+- **P8.2 — `argos_ipc` and `argos serve`.** The wire format in a crate that depends on nothing:
+  `SCHEMA_VERSION` in a mandatory handshake, JSON-RPC 2.0 one value per line, a `Call` enum so an
+  unknown method fails at the edge. The engine reads stdin, dispatches, and pushes progress as
+  notifications. Its exit criterion is the **parity test**: a scan driven over the pipe recovers
+  byte-for-byte and record-for-record what `argos scan` recovers from the same medium.
+- **P8.3/P8.4 — the shell.** `argos_ui` spawns the engine, bridges notifications to Tauri events
+  and grants the web view the session's `previews/` directory and nothing else. Frontend per
+  §6.1-5: Svelte 5, a base layout, an event mirror, and themes as total token records.
+- **P8.5 — elevation.** `pkexec` on Linux. Windows and macOS elevate through a shell verb that
+  drops the caller's pipes, which is refused with an explanation rather than silently producing
+  an unprivileged scan; see §6.2.
+
 *Skills*: `argos-tauri-shell`, `rust-api-surface`, `rust-telemetry`. *Review*:
 `forensic-boundary-reviewer` (boundary audit: zero domain logic in `argos_ui`),
-`rust-design-reviewer`. *Exit*: every UI action reproducible via CLI alone; UI is a pure client
-of `--serve`; capability allowlist minimal.
+`rust-design-reviewer`. *Exit*: every UI action reproducible via CLI alone — mechanised by the
+parity test; UI is a pure client of `serve`, mechanised by the dependency graph; capability
+allowlist minimal; `dto.ts` regenerated in CI and diffed, so the two languages cannot drift.
 
 **P9 — Hardening and forensic validation.**
 Extended fuzz corpus (real-world file corpora), long-run fuzzing in CI, performance baselines,

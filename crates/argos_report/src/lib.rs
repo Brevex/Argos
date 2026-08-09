@@ -18,18 +18,29 @@ use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use argos_core::artifact::{Artifact, ArtifactSink};
-use serde::Serialize;
+use argos_core::classify::PixelImage;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+mod preview;
 
 /// Name of the manifest file inside the output directory.
 const MANIFEST_FILE: &str = "manifest.json";
+
+/// Subdirectory of the output holding preview images.
+///
+/// Separate from the artifacts on purpose: it is the one part of a session
+/// directory that holds derived rather than recovered bytes, so a viewer can
+/// be given access to it without being given access to the evidence
+/// (`A-DTO-VERSIONED`).
+pub const PREVIEW_DIR: &str = "previews";
 
 /// Bytes copied per streaming step while hashing and writing an artifact.
 /// 64 KiB balances syscall count against buffer size.
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
 
 /// The scan manifest: tool identity, source description and every artifact.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Manifest {
     /// Version of the tool that produced this manifest.
     pub tool_version: String,
@@ -45,10 +56,48 @@ pub struct Manifest {
     /// were never fabricated.
     pub unreadable: Vec<ExtentRecord>,
     /// How triage ran over this scan, when the caller reported it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage: Option<TriageRecord>,
     /// One record per recovered artifact.
     pub artifacts: Vec<ArtifactRecord>,
+}
+
+impl Manifest {
+    /// Reads the manifest of the session directory `dir`.
+    ///
+    /// This is how anything other than the scan that produced it learns what a
+    /// session recovered — the export command, the report command, and the
+    /// engine's IPC surface all read it rather than keeping a second account
+    /// of the same facts.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the manifest is missing, unreadable, or not the JSON this
+    /// tool writes.
+    pub fn read(dir: impl AsRef<Path>) -> Result<Self, ReportError> {
+        let path = dir.as_ref().join(MANIFEST_FILE);
+        let bytes = fs::read(&path).map_err(|source| ReportError::new(&path, source))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|source| ReportError::new(&path, io::Error::other(source)))
+    }
+
+    /// Writes this manifest into the directory `dir`, returning its path.
+    ///
+    /// Used where a manifest is assembled from records rather than from a
+    /// scan — an export describing exactly the artifacts that landed in its
+    /// destination, for instance. The format is the one [`Store::finish`]
+    /// writes, because there is only one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the manifest cannot be serialized or written.
+    pub fn write(&self, dir: impl AsRef<Path>) -> Result<PathBuf, ReportError> {
+        let path = dir.as_ref().join(MANIFEST_FILE);
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|source| ReportError::new(&path, io::Error::other(source)))?;
+        fs::write(&path, json).map_err(|source| ReportError::new(&path, source))?;
+        Ok(path)
+    }
 }
 
 /// How ML triage ran over a scan.
@@ -56,19 +105,17 @@ pub struct Manifest {
 /// Recorded whatever happened: a disabled triage is stated with its reason,
 /// never silently absent, so the absence of scores is attributable
 /// (A-MODEL-PINNED).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TriageRecord {
-    /// `scored` when a model ran, `disabled` when it did not.
+    /// `scored` when triage ran, `disabled` when it did not.
     pub status: String,
     /// Why triage did not run, when it did not.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
-    /// Version of the model that scored the scan.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Version of the decision procedure that labelled the scan, which is what
+    /// makes a label reproducible (A-MODEL-PINNED).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_version: Option<String>,
-    /// SHA-256 of the model file, for reproduction.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_sha256: Option<String>,
     /// Artifacts that received a score.
     pub scored: u64,
     /// Artifacts triage saw but could not score.
@@ -89,14 +136,12 @@ pub struct TriageAnnotation {
     pub near_duplicate_of: Option<String>,
     /// Triage label.
     pub label: Option<String>,
-    /// Probability the image is a photograph.
-    pub photograph: Option<f32>,
-    /// What produced the score: `rules` or `model`.
-    pub scored_by: Option<String>,
+    /// The property that settled the label.
+    pub decided_by: Option<String>,
 }
 
 /// One contiguous source range, as recorded in the manifest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ExtentRecord {
     /// Absolute byte offset of the range's first byte in the source.
     pub offset: u64,
@@ -105,10 +150,12 @@ pub struct ExtentRecord {
 }
 
 /// Provenance record of one recovered artifact.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ArtifactRecord {
-    /// File name of the artifact inside the output directory.
-    pub name: String,
+    /// File name of the artifact inside the output directory, when its bytes
+    /// were stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Recovery stage that produced the artifact.
     pub stage: String,
     /// Image format the artifact validated as.
@@ -118,12 +165,12 @@ pub struct ArtifactRecord {
     /// Artifact length in bytes: what was actually recovered and stored.
     pub length: u64,
     /// Length the source metadata claimed, when it said one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_length: Option<u64>,
     /// Bytes the metadata expected that were not recovered. Absent when the
     /// recovery is whole; present and non-zero states the truncation plainly
     /// (A-CONFIDENCE-HONEST).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_bytes: Option<u64>,
     /// Evidence tier, as its canonical display name.
     pub confidence: String,
@@ -131,41 +178,55 @@ pub struct ArtifactRecord {
     pub extents: Vec<ExtentRecord>,
     /// Creation time recovered from metadata, in seconds since the Unix
     /// epoch. Never inferred; absent when the filesystem did not record one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_unix: Option<i64>,
     /// Last modification time recovered from metadata, in seconds since the
     /// Unix epoch.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_unix: Option<i64>,
     /// File name recovered from filesystem metadata, when one survived.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovered_name: Option<String>,
     /// Filesystem object the metadata came from — MFT record number, inode
     /// number or first cluster.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_object: Option<u64>,
     /// For embedded thumbnails, the source offset of the parent candidate.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_offset: Option<u64>,
     /// SHA-256 of the artifact bytes, computed while writing them.
     pub sha256: String,
     /// Triage label, when the artifact was scored. A label orders and groups;
     /// every artifact stays in this manifest whatever it says
     /// (A-TRIAGE-NOT-VERDICT).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage_label: Option<String>,
-    /// Probability the image is a photograph, when scored.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub triage_photograph: Option<f32>,
-    /// What produced the score: `rules` or `model`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub triage_scored_by: Option<String>,
+    /// The property that settled the label, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage_decided_by: Option<String>,
+    /// Whether the artifact's bytes were stored in the output directory.
+    ///
+    /// False only when the run was asked to leave synthetic assets unwritten.
+    /// The record still describes the artifact completely, so the account of
+    /// what the medium held stays whole either way.
+    #[serde(default = "stored_by_default")]
+    pub written: bool,
+    /// Why the bytes were not stored, when they were not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_because: Option<String>,
     /// Perceptual hash of the decoded image, 16 hex digits.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perceptual_hash: Option<String>,
     /// SHA-256 of the artifact this one is a near-duplicate of; both stay.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub near_duplicate_of: Option<String>,
+    /// Path of this artifact's preview, relative to the output directory.
+    ///
+    /// Derived presentation, reproducible from the artifact at any time.
+    /// Absent when previews were not requested, or when this artifact did not
+    /// decode into one — which says nothing about the recovery itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// Writes artifacts and the manifest into one output directory.
@@ -265,7 +326,7 @@ impl Store {
         }
 
         self.records.push(ArtifactRecord {
-            name,
+            name: Some(name),
             stage: artifact.stage.to_string(),
             format: artifact.format.to_string(),
             source_offset: artifact
@@ -294,10 +355,12 @@ impl Store {
             parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
             sha256,
             triage_label: None,
-            triage_photograph: None,
-            triage_scored_by: None,
+            triage_decided_by: None,
+            written: true,
+            omitted_because: None,
             perceptual_hash: None,
             near_duplicate_of: None,
+            preview: None,
         });
         Ok(self
             .records
@@ -330,8 +393,7 @@ impl Store {
             // for no substantive reason, and a manifest that differs between
             // machines undermines the reproducibility the rest of it exists
             // for. Four decimals is far finer than the label thresholds.
-            record.triage_photograph = annotation.photograph.map(round_score);
-            record.triage_scored_by.clone_from(&annotation.scored_by);
+            record.triage_decided_by.clone_from(&annotation.decided_by);
             record
                 .perceptual_hash
                 .clone_from(&annotation.perceptual_hash);
@@ -339,6 +401,101 @@ impl Store {
                 .near_duplicate_of
                 .clone_from(&annotation.near_duplicate_of);
         }
+    }
+
+    /// Records an artifact whose bytes were deliberately not stored.
+    ///
+    /// The record is the same in every respect a stored one is — extents,
+    /// digest, format, confidence, provenance — except that it names no file
+    /// and says so. That is what keeps the manifest a complete account of the
+    /// medium while the directory holds only what the caller asked for: the
+    /// bytes are still at the extents recorded here, and `argos export` can
+    /// fetch them from the source without a second scan.
+    pub fn record_only(&mut self, artifact: &Artifact<'_>, label: &str, decided_by: &str) {
+        self.records.push(ArtifactRecord {
+            name: None,
+            stage: artifact.stage.to_string(),
+            format: artifact.format.to_string(),
+            source_offset: artifact
+                .extents
+                .first()
+                .map_or(0, |first| first.start.get()),
+            length: artifact.length,
+            expected_length: artifact.expected_length,
+            missing_bytes: artifact
+                .expected_length
+                .map(|expected| expected.saturating_sub(artifact.length))
+                .filter(|missing| *missing > 0),
+            confidence: artifact.confidence.to_string(),
+            extents: artifact
+                .extents
+                .iter()
+                .map(|extent| ExtentRecord {
+                    offset: extent.start.get(),
+                    length: extent.len,
+                })
+                .collect(),
+            created_unix: artifact.timestamps.created.map(unix_seconds),
+            modified_unix: artifact.timestamps.modified.map(unix_seconds),
+            recovered_name: artifact.recovered_name.map(str::to_owned),
+            source_object: artifact.source_object,
+            parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
+            sha256: artifact.sha256.to_string(),
+            written: false,
+            triage_label: Some(label.to_owned()),
+            triage_decided_by: Some(decided_by.to_owned()),
+            perceptual_hash: None,
+            near_duplicate_of: None,
+            preview: None,
+            omitted_because: Some(format!(
+                "the run was asked to leave synthetic assets unwritten; this one was settled by \
+                 {decided_by}"
+            )),
+        });
+    }
+
+    /// Writes a preview of an artifact already saved, named by its hash.
+    ///
+    /// Strictly additive, exactly like [`annotate_triage`](Store::annotate_triage):
+    /// a preview for an artifact this store never saved is dropped, and no
+    /// record is created, removed or reordered by one. An artifact with no
+    /// preview is an artifact with no thumbnail — nothing more.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the preview directory or the preview file cannot be written.
+    /// The artifact itself is already stored and recorded by then, so a caller
+    /// that counts the failure and continues loses a thumbnail rather than
+    /// evidence.
+    pub fn save_preview(
+        &mut self,
+        sha256: &argos_core::artifact::Digest,
+        image: &PixelImage,
+    ) -> Result<(), ReportError> {
+        let hash = sha256.to_string();
+        let Some(index) = self.records.iter().position(|record| record.sha256 == hash) else {
+            return Ok(());
+        };
+        // An image the encoder declines is one with no pixels to show. That is
+        // not a failure of the output directory, and reporting it as one would
+        // make a caller count it against the medium.
+        let Some(encoded) = preview::encode(image) else {
+            return Ok(());
+        };
+
+        let dir = self.dir.join(PREVIEW_DIR);
+        fs::create_dir_all(&dir).map_err(|source| ReportError::new(&dir, source))?;
+        // Named by content hash, so the manifest joins previews to records the
+        // same way it joins triage annotations, and a rerun overwrites rather
+        // than accumulating.
+        let name = format!("{hash}.jpg");
+        let path = dir.join(&name);
+        fs::write(&path, encoded).map_err(|source| ReportError::new(&path, source))?;
+
+        if let Some(record) = self.records.get_mut(index) {
+            record.preview = Some(format!("{PREVIEW_DIR}/{name}"));
+        }
+        Ok(())
     }
 
     /// Writes `manifest.json` and returns its path.
@@ -373,6 +530,24 @@ impl ArtifactSink for Store {
         bytes: &mut R,
     ) -> Result<(), Self::Error> {
         Self::save(self, artifact, bytes).map(|_| ())
+    }
+
+    fn omit(
+        &mut self,
+        artifact: &Artifact<'_>,
+        label: &str,
+        decided_by: &str,
+    ) -> Result<(), Self::Error> {
+        Self::record_only(self, artifact, label, decided_by);
+        Ok(())
+    }
+
+    fn preview(
+        &mut self,
+        sha256: &argos_core::artifact::Digest,
+        image: &PixelImage,
+    ) -> Result<(), Self::Error> {
+        Self::save_preview(self, sha256, image)
     }
 }
 
@@ -454,8 +629,10 @@ fn unix_seconds(at: std::time::SystemTime) -> i64 {
 }
 
 /// Rounds a classifier score to four decimals.
-fn round_score(score: f32) -> f32 {
-    (score * 10_000.0).round() / 10_000.0
+/// A manifest written before this field existed described stored artifacts
+/// only, so an absent flag means the bytes are there.
+const fn stored_by_default() -> bool {
+    true
 }
 
 /// Lowercase hex of a digest.

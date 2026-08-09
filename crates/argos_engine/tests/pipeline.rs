@@ -9,7 +9,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use argos_core::progress::{Discard, ProgressSink, RunState, ScanEvent};
+use argos_core::progress::{Discard, ProgressSink, RunState, ScanEvent, Unit};
 use argos_core::{Confidence, Format, Stage};
 use argos_engine::fixture::{Collected, Collector, Events};
 use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession, Stages};
@@ -460,6 +460,137 @@ fn progress_events_bracket_every_stage_and_carry_no_content() {
     assert!(
         (1..=16).contains(&progress),
         "unbatched progress: {progress} events"
+    );
+}
+
+#[test]
+fn every_stage_that_can_run_long_reports_progress_while_it_runs() {
+    // A display can only show what the pipeline says. Validation drives every
+    // signature hit through a state machine and the report stage reads each
+    // finding back: on a real medium either can run for minutes, and a stage
+    // that reports nothing for minutes is indistinguishable from a stalled
+    // one. The sweep having reached its total is not an answer, because by
+    // then it is over.
+    let (image, _) = disk_with_images(3);
+    let session = ScanSession::new(config(2));
+    let medium = Medium::new(views(&image, 2), image.len() as u64).expect("medium");
+    let mut sink = Collector::new();
+    let events = Events::new();
+
+    session.start(medium, &mut sink, &events).expect("scan");
+    let seen = events.seen();
+
+    for stage in [Stage::Carve, Stage::Validation, Stage::Report] {
+        assert!(
+            seen.iter().any(
+                |event| matches!(event, ScanEvent::StageProgress { stage: s, .. } if *s == stage)
+            ),
+            "stage {stage} ran without ever reporting progress"
+        );
+    }
+
+    // And each says what it counted, so a percentage over candidates is never
+    // read as one over bytes.
+    let unit_of = |wanted: Stage| {
+        seen.iter().find_map(|event| match event {
+            ScanEvent::StageProgress { stage, unit, .. } if *stage == wanted => Some(*unit),
+            _ => None,
+        })
+    };
+    assert_eq!(unit_of(Stage::Carve), Some(Unit::Bytes));
+    assert_eq!(unit_of(Stage::Validation), Some(Unit::Items));
+    assert_eq!(unit_of(Stage::Report), Some(Unit::Bytes));
+}
+
+#[test]
+fn the_report_stage_reaches_its_total_even_when_findings_are_not_stored() {
+    // Progress measures the work a stage got through, and every finding costs
+    // it a read whatever becomes of it. The duplicate below is read, hashed and
+    // then not stored — as is any finding that reads back short, and any a
+    // caller asked to leave unwritten. If those were missing from the numerator
+    // the bar would stop short of the end on a run that did everything it
+    // could, which reads on screen as a failure. What was *stored* is a
+    // separate figure and stays separate.
+    let mut disk = argos_carve::fixture::Disk::filled(CHUNK * 4);
+    let jpeg = argos_carve::fixture::Jpeg::new()
+        .with_entropy_bytes(96)
+        .build();
+    disk = disk.with(CHUNK / 2, &jpeg);
+    disk = disk.with(CHUNK * 2, &jpeg);
+    let image = disk.into_bytes();
+
+    let session = ScanSession::new(config(2));
+    let medium = Medium::new(views(&image, 2), image.len() as u64).expect("medium");
+    let mut sink = Collector::new();
+    let events = Events::new();
+
+    let report = session.start(medium, &mut sink, &events).expect("scan");
+
+    assert_eq!(report.duplicates, 1, "the fixture must produce a duplicate");
+    assert_eq!(report.artifacts, 1, "and only one copy may be stored");
+
+    let last = events
+        .seen()
+        .into_iter()
+        .filter_map(|event| match event {
+            ScanEvent::StageProgress {
+                stage: Stage::Report,
+                done,
+                total,
+                ..
+            } => Some((done, total)),
+            _ => None,
+        })
+        .next_back()
+        .expect("the report stage reports progress");
+    assert_eq!(
+        last.0, last.1,
+        "the report stage ended at {}/{} of its own work",
+        last.0, last.1
+    );
+}
+
+#[test]
+fn stored_events_count_recoveries_and_never_candidates() {
+    // What a live display shows while a scan runs comes from these events, so
+    // what they count matters: a signature hit that has not passed its
+    // format's state machine is not a recovery. The fixture disk below holds
+    // three real images in noise that also yields hits which fail validation —
+    // and the counts must follow the three (A-CONFIDENCE-HONEST).
+    let (image, expected) = disk_with_images(3);
+    let session = ScanSession::new(config(2));
+    let medium = Medium::new(views(&image, 2), image.len() as u64).expect("medium");
+    let mut sink = Collector::new();
+    let events = Events::new();
+
+    let report = session.start(medium, &mut sink, &events).expect("scan");
+    let stored: Vec<(u64, u64)> = events
+        .seen()
+        .iter()
+        .filter_map(|event| match event {
+            ScanEvent::ArtifactStored { artifacts, bytes } => Some((*artifacts, *bytes)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        stored.len() as u64,
+        report.artifacts,
+        "one event per artifact stored, no more and no fewer"
+    );
+    // Cumulative and monotonic: a display reads the latest and shows it, so a
+    // figure that ever went backwards would be a figure that lied.
+    for pair in stored.windows(2) {
+        let (before, after) = (pair[0], pair[1]);
+        assert_eq!(after.0, before.0 + 1, "artifact counts skip nothing");
+        assert!(after.1 > before.1, "byte counts only grow");
+    }
+    let last = stored.last().copied().expect("at least one artifact");
+    assert_eq!(last.0, report.artifacts);
+    assert_eq!(
+        last.1,
+        expected.iter().map(|image| image.len() as u64).sum::<u64>(),
+        "the bytes reported are the bytes of the images that were recovered"
     );
 }
 

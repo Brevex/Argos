@@ -1,0 +1,84 @@
+/*
+ * The only stylesheet not scoped to a component, and the only place a theme's
+ * tokens are consumed outside one.
+ *
+ * Every value here is `var(--token)`. There is no literal colour in this file
+ * and there must not be one: a hardcoded colour is a part of the interface a
+ * theme cannot reach, which is the failure mode the theme contract exists to
+ * prevent.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/*
+ * The scale of the whole interface, in one number.
+ *
+ * Every length in this application is a `rem`, so the layout is this value
+ * multiplied out. That is what makes a smaller window show the same picture
+ * smaller rather than a differently proportioned one.
+ *
+ * The screen is about 46rem tall, or 50rem with an error message under the
+ * statistics, so 1.98vh fits the second case at the smallest window this one
+ * opens at and leaves the first case room to breathe. The `vw` term is the
+ * guard for a window narrower than it is tall; the bounds keep text readable
+ * at the smallest window and stop the layout inflating on a large display.
+ */
+html {
+  font-size: clamp(11px, min(1.9vw, 1.98vh), 17px);
+}
+
+body {
+  background: var(--backdrop);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  height: 100%;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+::-webkit-scrollbar {
+  width: 0.625rem;
+  height: 0.625rem;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 0.19rem solid transparent;
+  border-radius: 99px;
+  background: var(--track);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--pane-border);
+  background-clip: content-box;
+}

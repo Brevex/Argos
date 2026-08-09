@@ -11,9 +11,8 @@ use std::convert::Infallible;
 use std::io::Cursor;
 use std::num::NonZeroUsize;
 
-use argos_core::artifact::Digest;
 use argos_core::classify::{
-    Classifier, ModelIdentity, PixelImage, ScoredBy, TriageLabel, TriageScore,
+    Classifier, Decision, ModelIdentity, PixelImage, TriageLabel, TriageScore,
 };
 use argos_core::progress::Discard;
 use argos_engine::fixture::{Collected, Collector};
@@ -37,7 +36,6 @@ impl Classifier for CondemnEverything {
     fn model(&self) -> Option<ModelIdentity> {
         Some(ModelIdentity {
             version: "condemn-everything",
-            sha256: Digest::new([0; Digest::LEN]),
         })
     }
 
@@ -48,9 +46,8 @@ impl Classifier for CondemnEverything {
         self.seen += images.len();
         Ok(vec![
             Some(TriageScore {
-                photograph: 0.0,
                 label: TriageLabel::SyntheticAsset,
-                scored_by: ScoredBy::Model,
+                decided_by: Decision::SensorTexture,
             });
             images.len()
         ])
@@ -78,7 +75,6 @@ impl Classifier for AlwaysBroken {
     fn model(&self) -> Option<ModelIdentity> {
         Some(ModelIdentity {
             version: "always-broken",
-            sha256: Digest::new([0; Digest::LEN]),
         })
     }
 

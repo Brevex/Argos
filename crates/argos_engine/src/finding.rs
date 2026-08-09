@@ -8,7 +8,7 @@ use argos_core::progress::RunState;
 use argos_core::{Confidence, Format, Stage, Timestamps};
 use argos_fs::Volume;
 
-use crate::triage::TriageOutcome;
+use crate::annotate::TriageOutcome;
 
 /// One recoverable image located by some stage.
 ///
@@ -145,6 +145,10 @@ pub struct ScanReport {
     /// Findings whose claimed bytes could not be read back from the medium,
     /// so they were dropped rather than reported from whatever was there.
     pub unrecoverable: u64,
+    /// Artifacts recognised, recorded and deliberately not written, because
+    /// the run was asked to leave synthetic assets out of the directory. They
+    /// are in the manifest with their extents: the account stays complete.
+    pub omitted_assets: u64,
     /// Bytes of the medium the sweep covered.
     pub bytes_swept: u64,
     /// Ranges the medium refused to read. Their content is unknown; nothing
@@ -182,6 +186,12 @@ pub struct ScanReport {
     /// Whether the classifier failed mid-run, leaving artifacts unscored that
     /// a healthy one would have scored.
     pub triage_degraded: bool,
+    /// Preview images rendered. Zero when previews were not requested.
+    pub previews_written: u64,
+    /// Artifacts whose preview could not be written. Each one is a thumbnail
+    /// that is missing from the output directory and nothing more: the
+    /// artifact itself was stored, hashed and recorded before this was tried.
+    pub previews_failed: u64,
 }
 
 impl ScanReport {

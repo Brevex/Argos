@@ -7,8 +7,10 @@
 //! are ordered by (A-EVAL-GATED).
 //!
 //! Precision and recall are printed per slice and overall, and held to
-//! documented floors. Changing a threshold or replacing the model means
-//! re-running this and committing the new numbers with the change.
+//! documented floors. Changing a rule or a threshold means re-running this and
+//! committing the new numbers with the change. The thresholds themselves are
+//! derived in `tests/thresholds.rs`, over a disjoint range of the generator —
+//! deriving them here would leave nothing grading anything.
 //!
 //! Nothing here decides what a scan reports. A classifier that scored every
 //! sample wrongly would still recover every artifact; that property is proved
@@ -115,35 +117,11 @@ mod floor {
     /// so a classifier that has quietly learned "big means photo" passes
     /// overall and collapses here.
     pub const HIGH_RES_ASSET_ACCURACY: f32 = 0.95;
-
-    /// Photograph recall of the model alone, with the pre-filter bypassed.
-    ///
-    /// Guards the half of the classifier the shipped numbers cannot see. A
-    /// model that stopped recognizing photographs would still score well
-    /// above through the rules, because the rules never claim a photograph —
-    /// they would simply defer, and every photograph would come back
-    /// `Ambiguous`. This floor is what fails in that case.
-    pub const MODEL_ONLY_PHOTOGRAPH_RECALL: f32 = 0.90;
-
-    /// Fraction of synthetic assets the model alone keeps out of the
-    /// photograph label.
-    ///
-    /// Not a precision floor: with the pre-filter bypassed the model sees
-    /// icons and sprites whose defining signal is transparency, which its
-    /// input does not carry, so some of them are genuinely undecidable for
-    /// it. What must hold is that it does not confidently call them
-    /// photographs.
-    pub const MODEL_ONLY_ASSET_REJECTION: f32 = 0.90;
 }
 
 #[test]
 fn eval_corpus_meets_the_recorded_precision_and_recall() {
-    let mut triage = match Triage::new() {
-        Ok(triage) => triage,
-        Err(err) => {
-            panic!("the pinned model must load for the eval harness to gate anything: {err}")
-        }
-    };
+    let mut triage = Triage::new();
 
     let mut results = Vec::new();
     let mut overall = Confusion::default();
@@ -152,7 +130,7 @@ fn eval_corpus_meets_the_recorded_precision_and_recall() {
         let images: Vec<_> = (0..EVAL_PER_SLICE)
             .map(|index| sample(slice, eval_seed(index)).image)
             .collect();
-        let scores = triage.score_batch(&images).expect("the model must score");
+        let scores = triage.score_batch(&images).expect("deciding cannot fail");
 
         let mut correct = 0;
         let mut ambiguous = 0;
@@ -227,71 +205,13 @@ fn eval_corpus_meets_the_recorded_precision_and_recall() {
 }
 
 #[test]
-fn the_model_alone_still_separates_the_classes() {
-    let mut triage = Triage::new().expect("the pinned model must load");
-
-    let mut photograph_hits = 0;
-    let mut photographs = 0;
-    let mut asset_rejections = 0;
-    let mut assets = 0;
-    let mut table = String::from("\ntriage eval — model alone, pre-filter bypassed\n");
-
-    for slice in Slice::ALL {
-        let images: Vec<_> = (0..EVAL_PER_SLICE)
-            .map(|index| sample(slice, eval_seed(index)).image)
-            .collect();
-        let scores = triage.score_batch_model_only(&images);
-        let called_photograph = scores
-            .iter()
-            .filter(|score| score.label == TriageLabel::Photograph)
-            .count();
-
-        if slice.truth() == TriageLabel::Photograph {
-            photographs += images.len();
-            photograph_hits += called_photograph;
-        } else {
-            assets += images.len();
-            asset_rejections += images.len() - called_photograph;
-        }
-        let _ = writeln!(
-            table,
-            "  {:<18} {:>3}/{} called photograph",
-            slice.name(),
-            called_photograph,
-            images.len()
-        );
-    }
-
-    let recall = ratio(photograph_hits, photographs);
-    let rejection = ratio(asset_rejections, assets);
-    let _ = writeln!(
-        table,
-        "\n  photograph recall {recall:.3}   asset rejection {rejection:.3}"
-    );
-    println!("{table}");
-
-    assert!(
-        recall >= floor::MODEL_ONLY_PHOTOGRAPH_RECALL,
-        "the model alone recalls {recall:.3} of photographs, below the {:.2} this harness \
-         records\n{table}",
-        floor::MODEL_ONLY_PHOTOGRAPH_RECALL
-    );
-    assert!(
-        rejection >= floor::MODEL_ONLY_ASSET_REJECTION,
-        "the model alone keeps only {rejection:.3} of synthetic assets out of the photograph \
-         label, below the {:.2} this harness records\n{table}",
-        floor::MODEL_ONLY_ASSET_REJECTION
-    );
-}
-
-#[test]
-fn the_model_is_pinned_to_its_recorded_hash() {
-    let triage = Triage::new().expect("the pinned model must verify");
-    let identity = triage.model().expect("a real classifier names its model");
-    assert_eq!(identity.version, argos_classify::MODEL_VERSION);
-    assert_eq!(
-        identity.sha256.to_string(),
-        argos_classify::MODEL_SHA256_HEX,
-        "the model that scored differs from the one the source tree pins"
-    );
+fn the_manifest_can_name_what_labelled_it() {
+    // A label is only reproducible against the procedure that produced it, and
+    // with no model file there is no hash to pin — so what a scan records is
+    // the version of the rules (A-MODEL-PINNED).
+    let triage = Triage::new();
+    let identity = triage
+        .model()
+        .expect("a real classifier names its procedure");
+    assert_eq!(identity.version, argos_classify::RULES_VERSION);
 }

@@ -53,7 +53,7 @@ fn saved_artifact_is_written_hashed_and_recorded() {
     assert_eq!(record.sha256, SHA256_ABC);
     assert_eq!(record.length, 3);
     assert_eq!(record.source_offset, 1234);
-    assert_eq!(record.name, "000000.jpg");
+    assert_eq!(record.name.as_deref(), Some("000000.jpg"));
     let written = std::fs::read(dir.path().join("out/000000.jpg")).expect("artifact file");
     assert_eq!(written, b"abc");
 }

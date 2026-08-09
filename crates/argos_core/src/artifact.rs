@@ -10,6 +10,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::Read;
 
+use crate::classify::PixelImage;
 use crate::geometry::{ByteOffset, ByteRange};
 use crate::recovery::{Confidence, Format, Stage, Timestamps};
 
@@ -136,4 +137,53 @@ pub trait ArtifactSink {
         artifact: &Artifact<'_>,
         bytes: &mut R,
     ) -> Result<(), Self::Error>;
+
+    /// Records an artifact that was recognised but whose bytes were not
+    /// stored, carrying the label that decided it and the property behind
+    /// that label.
+    ///
+    /// The one way an artifact can exist in the account without existing in
+    /// the output directory. It is reached only when a caller asked for it —
+    /// a run told to leave synthetic assets unwritten — and the record it
+    /// produces carries the same extents, digest, format and confidence as a
+    /// stored one, so the manifest still describes everything the medium held.
+    /// Nothing about it is inferred here: the label was decided elsewhere and
+    /// is copied in (A-TRIAGE-NOT-VERDICT).
+    ///
+    /// The default records nothing, which is what a sink that stores
+    /// everything wants.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the record cannot be kept.
+    fn omit(
+        &mut self,
+        artifact: &Artifact<'_>,
+        label: &str,
+        decided_by: &str,
+    ) -> Result<(), Self::Error> {
+        let _ = (artifact, label, decided_by);
+        Ok(())
+    }
+
+    /// Accepts a preview of an artifact already handed to
+    /// [`accept`](ArtifactSink::accept), named by its content hash.
+    ///
+    /// A preview is derived presentation, not evidence: it lets a viewer show
+    /// what was recovered without opening a full-resolution image, and it is
+    /// reproducible from the artifact at any time. A sink with no use for one
+    /// ignores it, which is what the default does.
+    ///
+    /// Called at most once per artifact, only for artifacts that decoded, and
+    /// only when the caller asked for previews. An artifact whose preview
+    /// fails stays recovered and recorded — losing a thumbnail must never cost
+    /// evidence, so the caller counts the failure instead of propagating it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the preview cannot be stored.
+    fn preview(&mut self, sha256: &Digest, image: &PixelImage) -> Result<(), Self::Error> {
+        let _ = (sha256, image);
+        Ok(())
+    }
 }

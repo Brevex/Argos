@@ -1,0 +1,24 @@
+[package]
+name = "argos_ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# No workspace dependency belongs here, and that absence is the point: a crate
+# that cannot name an engine type cannot leak one onto the wire
+# (`A-DTO-VERSIONED`, `M-DONT-LEAK-TYPES`). Anything this module needs to say
+# about a recovery, it says in its own vocabulary.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { workspace = true, optional = true }
+
+[features]
+# Emits the TypeScript definitions of every DTO. Off for the engine and the
+# shell; on for the one CI lane that regenerates the bindings and checks the
+# checkout still matches.
+bindings = ["dep:ts-rs"]
+
+[lints]
+workspace = true

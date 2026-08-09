@@ -11,8 +11,6 @@ use std::convert::Infallible;
 use std::error::Error;
 use std::fmt;
 
-use crate::artifact::Digest;
-
 /// A decoded image, RGBA8 row-major, as handed to a [`Classifier`].
 ///
 /// `Debug` prints dimensions only: decoded pixels are recovered content and
@@ -110,47 +108,60 @@ impl fmt::Display for TriageLabel {
     }
 }
 
-/// Which part of a classifier produced a score.
+/// What settled a label.
+///
+/// Named rather than scored. A deterministic rule either fired or it did not,
+/// and attaching a probability to that would be a number with nothing behind
+/// it — the classifier does not estimate a likelihood, so it must not report
+/// one. What an examiner can act on is *which* property decided, because that
+/// is checkable against the image in front of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ScoredBy {
-    /// The rule-based pre-filter: dimensions, alpha usage, palette statistics.
-    Rules,
-    /// Model inference.
-    Model,
+pub enum Decision {
+    /// Meaningful transparency. Photographs are opaque; alpha is authoring.
+    Transparency,
+    /// Too few distinct colours and luminance levels for a sensor's output.
+    Palette,
+    /// Long runs of byte-identical neighbours: flat fills and drawn edges.
+    FlatFill,
+    /// A high-frequency floor over the whole frame, which is what a sensor and
+    /// a quantizer leave behind and drawn art does not.
+    SensorTexture,
+    /// No rule fired either way.
+    Inconclusive,
 }
 
-impl fmt::Display for ScoredBy {
+impl fmt::Display for Decision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::Rules => "rules",
-            Self::Model => "model",
+            Self::Transparency => "transparency",
+            Self::Palette => "palette",
+            Self::FlatFill => "flat-fill",
+            Self::SensorTexture => "sensor-texture",
+            Self::Inconclusive => "inconclusive",
         };
         f.write_str(name)
     }
 }
 
 /// A classifier's opinion of one image.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TriageScore {
-    /// Probability in `0.0..=1.0` that the image is a user photograph.
-    pub photograph: f32,
-    /// The label the probability maps to under the classifier's documented
-    /// thresholds.
+    /// What the image most likely is.
     pub label: TriageLabel,
-    /// What produced the score.
-    pub scored_by: ScoredBy,
+    /// The property that settled it.
+    pub decided_by: Decision,
 }
 
-/// Identity of the model behind a classifier, for the manifest.
+/// Identity of the decision procedure behind a classifier, for the manifest.
 ///
-/// A scan records exactly which model scored it, so a result can be reproduced
-/// with the same model and nothing else (A-MODEL-PINNED).
+/// A scan records exactly what labelled it, so a result can be reproduced with
+/// the same rules and nothing else (A-MODEL-PINNED). With no model file there
+/// is no file hash to pin; what is pinned instead is the version of the rules,
+/// which lives in the source tree the binary was built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelIdentity {
-    /// Human-readable model version.
+    /// Human-readable version of the decision procedure.
     pub version: &'static str,
-    /// SHA-256 of the model file.
-    pub sha256: Digest,
 }
 
 /// Scores decoded images: photograph vs synthetic asset.

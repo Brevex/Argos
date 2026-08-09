@@ -11,14 +11,16 @@ argos_classify.workspace = true
 argos_core.workspace = true
 argos_device.workspace = true
 argos_engine.workspace = true
+argos_ipc.workspace = true
 argos_report.workspace = true
 clap.workspace = true
 mimalloc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 argos_carve = { workspace = true, features = ["test-util"] }
-serde_json.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 
 [lints]

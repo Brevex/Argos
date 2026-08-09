@@ -139,7 +139,7 @@ fn scan_refuses_an_output_directory_containing_the_source() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the compiled binary")]
-fn the_manifest_carries_triage_labels_and_the_model_that_produced_them() {
+fn the_manifest_carries_triage_labels_and_what_decided_them() {
     let photo = argos_carve::fixture::photo_jpeg(320, 240, 0xC0FF_EE01);
     let disk = Disk::noisy(1024 * 1024, 0x5EED_0001)
         .with(10_000, &photo)
@@ -167,19 +167,32 @@ fn the_manifest_carries_triage_labels_and_the_model_that_produced_them() {
         serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
             .expect("valid json");
 
-    // The model that scored the scan is named, so a result can be reproduced
-    // with that model and no other (A-MODEL-PINNED).
+    // What labelled the scan is named, so a result can be reproduced against
+    // that procedure and no other (A-MODEL-PINNED).
     assert_eq!(manifest["triage"]["status"], "scored");
-    assert_eq!(manifest["triage"]["model_version"], "triage-cnn-v1");
     assert_eq!(
-        manifest["triage"]["model_sha256"],
-        argos_classify::MODEL_SHA256_HEX
+        manifest["triage"]["model_version"],
+        argos_classify::RULES_VERSION
     );
     assert_eq!(manifest["triage"]["degraded"], false);
 
+    // The annotation reaches the record, and says what decided it — which is
+    // checkable against the image in a way a probability never was. *Which*
+    // label a given image earns is gated by the eval harness in
+    // `argos_classify`, against a corpus built for it; asserting a particular
+    // one here would tie the plumbing test to one fixture's statistics.
     let artifact = &manifest["artifacts"][0];
-    assert_eq!(artifact["triage_label"], "photograph");
-    assert_eq!(artifact["triage_scored_by"], "model");
+    let label = artifact["triage_label"].as_str().expect("a label");
+    let decided = artifact["triage_decided_by"].as_str().expect("a reason");
+    assert!(
+        ["photograph", "synthetic-asset", "ambiguous"].contains(&label),
+        "unknown label {label}"
+    );
+    assert_eq!(
+        label == "ambiguous",
+        decided == "inconclusive",
+        "an unclear label and an unclear reason go together: {label} / {decided}"
+    );
     assert!(
         artifact["perceptual_hash"].as_str().is_some_and(|hash| {
             hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit())
@@ -378,4 +391,89 @@ fn the_recovery_is_identical_on_every_platform() {
          deterministic and the recovery must be too: a difference here is a real difference in \
          what an examiner would be shown on one operating system versus another"
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn excluding_assets_leaves_them_unwritten_and_still_recorded() {
+    // The one option that lets a label decide what reaches the output
+    // directory, and the condition that keeps it defensible: what it omits, it
+    // still accounts for. A record with `written: false` describes bytes that
+    // are on the medium at the extents beside it, so the manifest remains a
+    // complete statement of what the scan found (A-TRIAGE-NOT-VERDICT).
+    // Flat blocks of a few colours with hard edges between them: an icon, and
+    // the shape every asset rule was measured against. The generator's own
+    // `png` helper draws a dithered gradient, which is genuinely unclear and
+    // would prove nothing here.
+    let icon = argos_carve::fixture::icon_png(96, 0);
+    let disk = Disk::noisy(1024 * 1024, 0x5EED_0002)
+        .with(20_000, &icon)
+        .into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+
+    let run = |out: &std::path::Path, exclude: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_argos"));
+        command.arg("scan").arg(&image).arg("--out").arg(out);
+        if exclude {
+            command.arg("--exclude-assets");
+        }
+        let output = command.output().expect("run argos scan");
+        assert!(
+            output.status.success(),
+            "scan failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
+                .expect("valid json");
+        manifest
+    };
+
+    let kept = dir.path().join("kept");
+    let trimmed = dir.path().join("trimmed");
+    let all = run(&kept, false);
+    let some = run(&trimmed, true);
+
+    let all_records = all["artifacts"].as_array().expect("artifacts");
+    let some_records = some["artifacts"].as_array().expect("artifacts");
+    assert!(
+        !all_records.is_empty(),
+        "the fixture must recover something"
+    );
+    assert_eq!(
+        all_records.len(),
+        some_records.len(),
+        "excluding assets must not change how many artifacts are accounted for"
+    );
+
+    // The flat PNG is an asset by every rule there is, so this run omitted it.
+    let omitted: Vec<&serde_json::Value> = some_records
+        .iter()
+        .filter(|record| record["written"] == serde_json::json!(false))
+        .collect();
+    assert_eq!(omitted.len(), 1, "the planted icon should be the omission");
+    let record = omitted[0];
+    assert_eq!(record["triage_label"], "synthetic-asset");
+    assert!(record["omitted_because"].is_string());
+    assert!(
+        record["name"].is_null(),
+        "an unwritten artifact names no file"
+    );
+
+    // Everything that makes the artifact findable again is still there.
+    assert!(
+        record["sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 64)
+    );
+    assert!(!record["extents"].as_array().expect("extents").is_empty());
+    assert!(record["length"].as_u64().is_some_and(|length| length > 0));
+
+    // And the bytes really are absent from the directory while present in the
+    // other run's.
+    assert!(kept.join("000000.png").is_file());
+    assert!(!trimmed.join("000000.png").exists());
 }

@@ -7,6 +7,12 @@ Argos-specific rules (`A-*` namespace). Index: [../../guidelines-index.md](../..
 <why>duplicated recovery logic in a UI drifts from the engine and turns the presentation layer
 into a second, unreviewed implementation of forensics.</why>
 
+The guarantee is the dependency graph, not a reading of the code: `argos_ui` depends on
+`argos_ipc` and Tauri, and on nothing else from this project. It cannot call a carver, a
+filesystem parser or the confidence model because it does not link them. A change that adds an
+engine crate to its manifest is the thing to reject; everything below follows from not doing
+that.
+
 `argos_ui` — its Rust side, its frontend, and any glue — contains no parsing, no carving, no
 scoring, no filesystem knowledge, no confidence rules, no thresholds:
 
@@ -36,8 +42,11 @@ breaks silently at the worst boundary to debug.</why>
 - DTOs never re-export engine types (`M-DONT-LEAK-TYPES`) and never contain raw sector data or
   bulk image bytes. Previews and exports are files in the session output directory, reached
   through the Tauri asset-protocol scope limited to exactly that directory.
-- The same DTO module serves the in-process adapter and the `--serve` JSON-RPC mode — one wire
-  format, two transports.
+- One transport: the shell always speaks JSON-RPC to a spawned `argos serve`, whether or not the
+  scan needed elevation. There is no in-process path to drift from it.
+- The TypeScript definitions are generated from the Rust ones and diffed in CI. Two hand-written
+  descriptions of one wire format drift silently, and the failure lands in a web view with no
+  type error anywhere.
 
 ## Progress is events, never polling (A-EVENTS-NOT-POLLING) { #A-EVENTS-NOT-POLLING }
 

@@ -14,6 +14,14 @@ results unreproducible and opens a supply-chain hole into an evidence pipeline.<
   `AcceptAll` behaviour, and the condition is reported in the manifest — never a silent fallback,
   never a hard failure of the scan.
 
+**Implemented: there is no model.** Triage is deterministic image statistics — transparency,
+palette, flat runs, and the high-frequency floor a sensor and a JPEG quantizer leave behind. The
+rule above has no artifact to govern, and what it protects is satisfied differently: reproducibility
+comes from the procedure being in the source tree the binary was built from, so every manifest
+records `RULES_VERSION` where it used to record a model hash. Bump that constant when a rule or a
+threshold changes; a label is only reproducible against the procedure that produced it. Nothing is
+loaded at startup, so the load-failure path is gone with the thing that could fail.
+
 ## Triage orders, it never decides (A-TRIAGE-NOT-VERDICT) { #A-TRIAGE-NOT-VERDICT }
 
 <why>a false negative that deletes or hides a recovered photo is an evidence-destroying bug; no
@@ -26,7 +34,30 @@ classifier is reliable enough to be given that power.</why>
 - The rule-based pre-filter (dimensions, alpha usage, palette statistics) obeys the same law: it
   short-circuits *inference*, never recovery or reporting.
 
+**One exception exists, and it is written down here because a rule quietly broken is worse than a
+rule with a stated exception.** `--exclude-assets` leaves artifacts labelled `synthetic-asset`
+unwritten, which is a label deciding what reaches the output directory. Its conditions are what keep
+it defensible, and all four hold together or the exception is void:
+
+1. **Opt-in.** Off by default on the command line. A caller asks for it by name.
+2. **Nothing leaves the account.** Every omitted artifact is examined, hashed and recorded with its
+   extents, format, confidence, label and the property that decided the label, plus `written: false`
+   and why. The manifest stays a complete statement of what the medium held; only the directory is
+   smaller, and `argos export` can fetch the bytes from the source without a second scan.
+3. **Only a settled label acts.** `Ambiguous` is written, and so is anything that did not decode or
+   could not be judged. An unclear label must never cost evidence.
+4. **The label is decided before the write, not after.** That is why screening happens inside the
+   report stage rather than in the annotation pass — a decision about whether to write cannot run
+   after the write. The annotation pass is unchanged and still only annotates.
+
 ## Inference is pure Rust (A-INFERENCE-PURE-RUST) { #A-INFERENCE-PURE-RUST }
+
+**Implemented: there is no inference.** The rule is satisfied vacuously and stays as written,
+because it governs what may be introduced rather than what is there. Bringing a native runtime into
+the result path is still an architecture decision, not a dependency bump — and the bar it has to
+clear is now higher, since deterministic statistics reach 1.000 precision and recall on the eval
+corpus at a fraction of the cost.
+
 
 <why>the workspace's safety story is "unsafe lives in argos_device"; a C++ inference runtime in the
 result path would be its largest unauditable exception.</why>
@@ -34,49 +65,14 @@ result path would be its largest unauditable exception.</why>
 Inference is pure Rust. Introducing a native runtime (onnxruntime, libtorch) requires revisiting
 the workspace unsafe policy explicitly — it is an architecture decision, not a dependency bump.
 
-**Implemented: no inference runtime at all in the shipped crate.** `argos_classify::net` writes
-the forward pass out directly — three convolutions, max-pooling, global average pooling, one
-linear head — over weights read from a `safetensors` file by `argos_classify::weights`. Both
-pure-Rust runtimes were weighed and rejected for the *evidence path*: `candle` makes `tokenizers`
-a mandatory dependency, which brings roughly two hundred crates and several duplicated versions
-(`cargo clippy`'s `multiple_crate_versions` fails on it) into the process that reads a disk, and
-`tract` requires an ONNX export step that puts a second graph description between training and
-inference. Four layers of arithmetic do not justify either. Training does use `candle`, in
-`tools/train_triage`, which is `exclude`d from the workspace.
+**Implemented: nothing to cross-check.** The crate that ships holds no network, no weights file and
+no second description of the decision to drift from the first. What used to guard that — a
+`crosscheck` binary comparing a hand-written forward pass against `candle` over pinned weights — was
+deleted with the thing it guarded.
 
-**The condition on that choice is `crosscheck`.** Two descriptions of one network can drift, and
-drift would show up as an eval number nobody can explain — or not show up at all.
-`tools/train_triage/src/bin/crosscheck.rs` runs the hand-written forward pass and the `candle` one
-over the same pinned weights and the same inputs, and fails if any probability differs by more
-than `1e-4`. It must pass before a new model's hash is pinned; it is the reason the split is safe,
-and a change to either description without running it is a change that has left the standard.
-
-Measured cost per artifact on the eval corpus: 2.61 ms inference, 1.00 ms pre-filter, 0.18 ms
-perceptual hash, 0.03 ms input reduction. Batching does not amortize anything here — a plain loop
-has no per-call setup — so the engine's batch worker exists for pipelining decode against scoring,
-not for throughput.
-
-## The pipeline (implemented)
-
-Triage is two mechanisms with different inputs, and the split is deliberate:
-
-- **Rule pre-filter** (`argos_classify::prefilter`) reads alpha, quantized palette size,
-  luminance-level count and horizontal flat-run fraction. It may only ever return *synthetic
-  asset*; a photograph verdict rests on absence of signal, and absence is not evidence.
-- **Model** (`argos_classify::net`) reads texture from a 64x64 point-sampled, per-channel
-  standardized RGB input. It never sees alpha — `model_input` composites it over white — so the
-  two mechanisms are genuinely complementary rather than redundant.
-
-Two consequences the eval harness has to respect. Point sampling is required, not incidental:
-area-averaging the input erases the sensor noise the classes separate on, and training on
-averaged inputs plateaus at chance-plus-epsilon. And any statistic quantized per channel is blind
-to greyscale — a monochrome photograph has at most 32 distinct 5-bit colours — so the palette rule
-requires a low **luminance**-level count alongside the low colour count, or every black-and-white
-photograph is short-circuited away from the model.
-
-Perceptual-hash dedup (blockhash, 8x8 block means against the median) runs before inference so
-near-duplicates share one score. Grouping is an annotation: both artifacts stay in the manifest,
-and the near-duplicate records which artifact it matched.
+Measured cost per artifact: 1.00 ms for the statistics pass, 0.18 ms for the perceptual hash. The
+inference it replaced measured 2.61 ms, and a recovery from a system disk pays that per artifact —
+twenty-three thousand of them on the run that prompted the change.
 
 ## Model and threshold changes are eval-gated (A-EVAL-GATED) { #A-EVAL-GATED }
 
@@ -92,16 +88,20 @@ set makes the trade-off visible.</why>
   the repo.
 
 **Thresholds are derived on the validation range, never on the eval corpus.** Fitting a threshold
-to the corpus that gates it leaves nothing gating anything. `tools/train_triage`'s `thresholds`
-binary reports the score distribution over the trainer's validation seeds — disjoint from both
-training and eval — and the constants come from its percentiles.
+to the corpus that gates it leaves nothing gating anything. `crates/argos_classify/tests/thresholds.rs`
+prints each feature's distribution over a range of the generator disjoint from the eval seeds, and
+the constants come from its extremes — the two ends that have to be separated, never the middle of
+either distribution. It is `#[ignore]`d because it measures rather than asserts.
 
-**The harness measures the model alone as well as the shipped pipeline.** The pre-filter settles
-most synthetic assets before inference, so the shipped numbers say almost nothing about the model
-on that class: a model that stopped working entirely would still score well, because the rules
-never claim a photograph and every photograph would merely come back `Ambiguous`. The model-only
-floors are what make a model regression fail the gate.
+**A threshold is placed on the expensive error's side.** The two mistakes are not equally costly:
+with `--exclude-assets` a photograph labelled an asset is a photograph missing from the output,
+while an asset labelled a photograph is a file on disk. Every threshold in `rules.rs` documents both
+ends of the gap it sits in and which side it leans to.
 
 **Corpus slices are a claim about what has been tested.** Each slice is a shape the classifier is
 asserted to handle; a shape with no slice has no evidence behind it. Greyscale photographs earned
 their own slice after a colour-only palette rule was found to discard every one of them.
+
+**The corpus is synthetic.** Every number this harness reports is against generated images, which
+is what makes it reproducible and what limits what it proves. It gates regressions in the rules; it
+is not a measurement of real media.
