@@ -11,7 +11,7 @@ import type { ThemeModule } from './contract';
 export const THEMES: Readonly<Record<string, () => Promise<{ default: ThemeModule }>>> = {
   default: () => import('./default'),
   aero: () => import('./aero'),
-  phosphor: () => import('./phosphor'),
+  retro: () => import('./retro'),
 };
 
 /** What the window opens with, and what a stored id falls back to. */

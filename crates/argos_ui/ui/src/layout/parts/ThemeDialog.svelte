@@ -48,10 +48,7 @@
             onclick={() => onChoose(choice.id)}
           >
             <span class="swatch" style:background={choice.tokens['--accent']}></span>
-            <span class="text">
-              <span class="name">{choice.name}</span>
-              <span class="what">{choice.description}</span>
-            </span>
+            <span class="name">{choice.name}</span>
             {#if choice.id === active}
               <svg class="tick" viewBox="0 0 14 14" aria-hidden="true">
                 <path d="M2.5 7.4l3 3 6-6.4" />
@@ -167,20 +164,8 @@
     border: 1px solid var(--pane-border);
   }
 
-  .text {
-    display: flex;
-    flex-direction: column;
-    gap: 0.125rem;
-    min-width: 0;
-  }
-
   .name {
     font-size: 0.84rem;
-  }
-
-  .what {
-    font-size: 0.72rem;
-    color: var(--text-faint);
   }
 
   .tick {

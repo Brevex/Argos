@@ -197,14 +197,16 @@ where
     // write an artifact has to be settled before it is written. It borrows the
     // classifier for the length of that stage and hands it back.
     let mut classifier = classifier;
-    let screen = match (config.exclude_assets(), classifier.as_deref_mut()) {
-        (true, Some(classifier)) => Some(Screen {
-            classifier,
-            buf: Vec::new(),
-        }),
-        _ => None,
-    };
-    let emitted = emit(&mut views, &findings, sink, screen, progress, &mut report)?;
+    let screen = screen_for(config, classifier.as_deref_mut());
+    let emitted = emit(
+        control,
+        &mut views,
+        &findings,
+        sink,
+        screen,
+        progress,
+        &mut report,
+    )?;
 
     // Annotation runs last, over artifacts already persisted and recorded:
     // previews and triage labels describe them and can no longer change what
@@ -1077,6 +1079,24 @@ impl<C: Classifier> Screen<'_, C> {
     }
 }
 
+/// The asset screen for this run, when one was asked for and there is a
+/// classifier to answer with.
+///
+/// Both conditions, because either alone decides nothing: a run that did not
+/// ask keeps everything, and a run with no classifier has nothing to ask.
+fn screen_for<'a, C: Classifier>(
+    config: &ScanConfig,
+    classifier: Option<&'a mut C>,
+) -> Option<Screen<'a, C>> {
+    match (config.exclude_assets(), classifier) {
+        (true, Some(classifier)) => Some(Screen {
+            classifier,
+            buf: Vec::new(),
+        }),
+        _ => None,
+    }
+}
+
 /// Hashes every finding in medium order and hands the survivors to the sink.
 ///
 /// Sequential on purpose: the order artifacts reach the sink is the order they
@@ -1084,10 +1104,11 @@ impl<C: Classifier> Screen<'_, C> {
 /// the machine had. Returns what was actually persisted, which is what the
 /// triage stage is allowed to see.
 fn emit<V, S, P, C>(
+    control: &Control,
     views: &mut [V],
     findings: &[Finding],
     sink: &mut S,
-    mut screen: Option<Screen<'_, C>>,
+    screen: Option<Screen<'_, C>>,
     progress: &P,
     report: &mut ScanReport,
 ) -> Result<Vec<crate::annotate::Emitted>, ScanError>
@@ -1118,85 +1139,26 @@ where
         total: total_work,
     });
 
-    let mut seen: HashSet<Digest> = HashSet::with_capacity(findings.len());
-    let mut buf = vec![0_u8; STREAM_CHUNK_BYTES];
-    let mut stored_bytes = 0_u64;
+    let mut writer = Writing {
+        sink,
+        screen,
+        seen: HashSet::with_capacity(findings.len()),
+        buf: vec![0_u8; STREAM_CHUNK_BYTES],
+        stored_bytes: 0,
+    };
     let mut done_work = 0_u64;
     for (index, finding) in findings.iter().enumerate() {
-        let expected = finding.length();
-        let disposition = 'disposition: {
-            let Some((sha256, read)) = hash_extents(view, &finding.extents, &mut buf) else {
-                // The bytes this finding claims cannot be read back. It is not
-                // reported, and nothing is invented in its place.
-                report.unrecoverable = report.unrecoverable.saturating_add(1);
-                break 'disposition None;
-            };
-            if read != expected {
-                report.unrecoverable = report.unrecoverable.saturating_add(1);
-                break 'disposition None;
-            }
-            if !seen.insert(sha256) {
-                report.duplicates = report.duplicates.saturating_add(1);
-                break 'disposition None;
-            }
+        // Between two artifacts, which is the only place this stage can stop
+        // without leaving a half-written file: cancelling still writes the
+        // manifest, and the manifest has to describe files that are whole.
+        // A stage that reads no flag is a stage where the button does nothing,
+        // and on a system disk this is the stage a run spends its time in.
+        if control.is_cancelled() {
+            break;
+        }
+        let disposition = writer.dispose(view, finding, index, progress, report)?;
 
-            let artifact = Artifact {
-                format: finding.format,
-                stage: finding.stage,
-                confidence: finding.confidence,
-                extents: &finding.extents,
-                length: expected,
-                expected_length: finding.declared_size,
-                sha256,
-                timestamps: finding.timestamps,
-                recovered_name: finding.name.as_deref(),
-                source_object: finding.source_object,
-                parent: finding.parent,
-            };
-
-            // A run may be asked to leave synthetic assets unwritten. The label
-            // is decided here rather than in the annotation pass because a
-            // decision about *whether to write* has to happen before the write
-            // — and the artifact is recorded either way, so the manifest
-            // describes the medium whole even when the directory does not.
-            if let Some(screen) = screen.as_mut()
-                && let Some(score) = screen.asset_label(view, finding, sha256)
-            {
-                sink.omit(
-                    &artifact,
-                    &score.label.to_string(),
-                    &score.decided_by.to_string(),
-                )
-                .map_err(ScanError::sink)?;
-                report.omitted_assets = report.omitted_assets.saturating_add(1);
-                break 'disposition None;
-            }
-            // The sink reads through a hasher, so the digest in the manifest is
-            // checked against the bytes the sink actually received rather than
-            // against an earlier, separate read of the same extents.
-            let mut bytes = Hashing::new(ExtentReader::new(view, &finding.extents));
-            sink.accept(&artifact, &mut bytes)
-                .map_err(ScanError::sink)?;
-            if bytes.finish() != sha256 {
-                // The medium answered differently between the two reads.
-                // Nothing recovered from it can be trusted, so the run stops
-                // rather than record a hash that does not describe the stored
-                // bytes.
-                return Err(ScanError::unstable_medium(finding.start()));
-            }
-            report.artifacts = report.artifacts.saturating_add(1);
-            stored_bytes = stored_bytes.saturating_add(expected);
-            progress.emit(ScanEvent::ArtifactStored {
-                artifacts: report.artifacts,
-                bytes: stored_bytes,
-            });
-            Some(crate::annotate::Emitted {
-                finding: index,
-                sha256,
-            })
-        };
-
-        done_work = done_work.saturating_add(expected);
+        done_work = done_work.saturating_add(finding.length());
         progress.emit(ScanEvent::StageProgress {
             stage: Stage::Report,
             unit: Unit::Bytes,
@@ -1213,6 +1175,111 @@ where
         findings: report.artifacts,
     });
     Ok(emitted)
+}
+
+/// What the writing stage carries from one finding to the next.
+struct Writing<'a, S, C> {
+    sink: &'a mut S,
+    screen: Option<Screen<'a, C>>,
+    /// Digests already stored, so one file recovered twice is stored once.
+    seen: HashSet<Digest>,
+    /// Working memory for the hashing read, reused by every finding.
+    buf: Vec<u8>,
+    /// Bytes handed to the sink so far.
+    stored_bytes: u64,
+}
+
+impl<S: ArtifactSink, C: Classifier> Writing<'_, S, C> {
+    /// Settles one finding: stores it, records it unwritten, or drops it.
+    ///
+    /// `Ok(None)` means nothing was stored, and the counter in `report` says
+    /// which of the reasons it was. The error cases are a sink that refused
+    /// and a medium that changed underneath the run; both end the scan.
+    fn dispose<V, P>(
+        &mut self,
+        view: &mut V,
+        finding: &Finding,
+        index: usize,
+        progress: &P,
+        report: &mut ScanReport,
+    ) -> Result<Option<crate::annotate::Emitted>, ScanError>
+    where
+        V: Read + Seek,
+        P: ProgressSink + ?Sized,
+    {
+        let expected = finding.length();
+        let Some((sha256, read)) = hash_extents(view, &finding.extents, &mut self.buf) else {
+            // The bytes this finding claims cannot be read back. It is not
+            // reported, and nothing is invented in its place.
+            report.unrecoverable = report.unrecoverable.saturating_add(1);
+            return Ok(None);
+        };
+        if read != expected {
+            report.unrecoverable = report.unrecoverable.saturating_add(1);
+            return Ok(None);
+        }
+        if !self.seen.insert(sha256) {
+            report.duplicates = report.duplicates.saturating_add(1);
+            return Ok(None);
+        }
+
+        let artifact = Artifact {
+            format: finding.format,
+            stage: finding.stage,
+            confidence: finding.confidence,
+            extents: &finding.extents,
+            length: expected,
+            expected_length: finding.declared_size,
+            sha256,
+            timestamps: finding.timestamps,
+            recovered_name: finding.name.as_deref(),
+            source_object: finding.source_object,
+            parent: finding.parent,
+        };
+
+        // A run may be asked to leave synthetic assets unwritten. The label is
+        // decided here rather than in the annotation pass because a decision
+        // about *whether to write* has to happen before the write — and the
+        // artifact is recorded either way, so the manifest describes the medium
+        // whole even when the directory does not.
+        if let Some(screen) = self.screen.as_mut()
+            && let Some(score) = screen.asset_label(view, finding, sha256)
+        {
+            self.sink
+                .omit(
+                    &artifact,
+                    &score.label.to_string(),
+                    &score.decided_by.to_string(),
+                )
+                .map_err(ScanError::sink)?;
+            report.omitted_assets = report.omitted_assets.saturating_add(1);
+            return Ok(None);
+        }
+
+        // The sink reads through a hasher, so the digest in the manifest is
+        // checked against the bytes the sink actually received rather than
+        // against an earlier, separate read of the same extents.
+        let mut bytes = Hashing::new(ExtentReader::new(view, &finding.extents));
+        self.sink
+            .accept(&artifact, &mut bytes)
+            .map_err(ScanError::sink)?;
+        if bytes.finish() != sha256 {
+            // The medium answered differently between the two reads. Nothing
+            // recovered from it can be trusted, so the run stops rather than
+            // record a hash that does not describe the stored bytes.
+            return Err(ScanError::unstable_medium(finding.start()));
+        }
+        report.artifacts = report.artifacts.saturating_add(1);
+        self.stored_bytes = self.stored_bytes.saturating_add(expected);
+        progress.emit(ScanEvent::ArtifactStored {
+            artifacts: report.artifacts,
+            bytes: self.stored_bytes,
+        });
+        Ok(Some(crate::annotate::Emitted {
+            finding: index,
+            sha256,
+        }))
+    }
 }
 
 /// Wraps a reader and digests everything that passes through it.

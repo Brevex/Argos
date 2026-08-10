@@ -35,9 +35,11 @@ cite it by id (`M-UNSOUND`, `M-HOTPATH`).
 | implement or change a recovery technique (carving, FS recovery, reassembly) | `argos-recovery-algorithms` |
 | touch `argos_classify`: rules, thresholds, dedup | `argos-ml-triage` |
 | touch `argos_ui` or the `--serve` IPC surface | `argos-tauri-shell` |
+| remove a capability, add a support directory, or add surface with one consumer | `argos-code-hygiene` |
 
 Reviews are on demand, read-only, and cite rule ids: `rust-design-reviewer`, `rust-safety-reviewer`,
-`rust-perf-reviewer`, `rust-test-reviewer`, `forensic-boundary-reviewer` (the `A-*` rules).
+`rust-perf-reviewer`, `rust-test-reviewer`, `forensic-boundary-reviewer` (the `A-*` rules) and
+`code-hygiene-reviewer` (what has stopped earning its place).
 
 The development plan — target architecture, algorithm pipeline, phases P0–P9 with per-phase skills,
 reviewers and exit criteria — is [docs/DEVELOPMENT-PLAN.md](docs/DEVELOPMENT-PLAN.md).

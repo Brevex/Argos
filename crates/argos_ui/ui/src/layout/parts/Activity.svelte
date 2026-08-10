@@ -29,6 +29,12 @@
       case 'connecting':
         return 'Starting the recovery engine…';
       case 'scanning': {
+        // A stop was asked for. The engine finishes the artifact in flight,
+        // writes it and writes the manifest, and saying so is what makes the
+        // wait legible instead of looking like a button that did nothing.
+        if (session.stopping) {
+          return 'Stopping — finishing the image being written, then the manifest';
+        }
         // The stage, named, because a run spends most of its time in passes
         // that are not the read: a screen that only ever said "Scanning" while
         // candidates were being validated for ten minutes would look stalled.
@@ -137,8 +143,9 @@
 
   .status {
     margin: 0 0 1rem;
-    font-size: 1.03rem;
+    font-size: 1.06rem;
     color: var(--text-dim);
+    text-shadow: var(--text-glow);
     text-align: center;
   }
 
@@ -154,8 +161,6 @@
     display: flex;
     gap: 5.5rem;
     margin-bottom: 1.2rem;
-    /* One knob the whole ring reads from, so both scale together. */
-    --ring-size: 8rem;
   }
 
   .stats {
@@ -165,7 +170,7 @@
     max-width: 56.25rem;
     margin: 0;
     padding: 0.9rem 0;
-    background: var(--pane);
+    background: var(--scanlines), var(--pane);
     backdrop-filter: var(--pane-blur);
     -webkit-backdrop-filter: var(--pane-blur);
     border: 1px solid var(--pane-border);
@@ -182,7 +187,18 @@
     min-width: 0;
   }
 
+  /* The rule between two figures stops short of the box, so the strip reads
+     as one panel with divisions rather than as five boxes in a row. */
   .stats > div + div {
+    position: relative;
+  }
+
+  .stats > div + div::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.35rem;
+    bottom: 0.35rem;
     border-left: 1px solid var(--pane-border);
   }
 
@@ -195,6 +211,7 @@
   dd {
     margin: 0;
     font-size: 1.56rem;
+    text-shadow: var(--text-glow);
     font-weight: 300;
     letter-spacing: -0.01em;
     color: var(--text);

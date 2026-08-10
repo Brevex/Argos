@@ -16,16 +16,13 @@
   import type { Device } from '../lib/dto';
   import * as ipc from '../lib/ipc';
   import { session, subscribe } from '../lib/session.svelte';
-  import { DEFAULT_THEME, loadTheme } from '../themes';
+  import { active, apply, remembered } from '../themes/active.svelte';
 
   import TitleBar from './parts/TitleBar.svelte';
   import DriveTable from './parts/DriveTable.svelte';
   import Destination from './parts/Destination.svelte';
   import Activity from './parts/Activity.svelte';
   import ThemeDialog from './parts/ThemeDialog.svelte';
-
-  /** Where the theme choice is remembered. A view preference, nothing more. */
-  const THEME_KEY = 'argos.theme';
 
   /** How often the elapsed clock advances while a scan runs. */
   const TICK_MS = 500;
@@ -36,29 +33,24 @@
   let busy = $state(false);
   let refreshing = $state(false);
   let themeOpen = $state(false);
-  let theme = $state(DEFAULT_THEME);
 
   const ready = $derived(source !== '' && destination !== '' && !busy);
 
-  /** The single button: what it says, and whether it can be pressed. */
+  /**
+   * The single button: what it says, and whether it can be pressed.
+   *
+   * Once a stop has been asked for there is nothing left to press: the engine
+   * has been told, and it stops between two artifacts rather than instantly.
+   * Saying so is the difference between a button that is working and a button
+   * that looks ignored.
+   */
   const action = $derived(
-    session.running ? { label: 'Cancel', enabled: !busy } : { label: 'Start scan', enabled: ready },
+    session.stopping
+      ? { label: 'Stopping…', enabled: false }
+      : session.running
+        ? { label: 'Cancel', enabled: !busy }
+        : { label: 'Start scan', enabled: ready },
   );
-
-  async function applyTheme(id: string): Promise<void> {
-    const module = await loadTheme(id);
-    const root = document.documentElement;
-    for (const [token, value] of Object.entries(module.tokens)) {
-      root.style.setProperty(token, value);
-    }
-    root.style.colorScheme = module.scheme;
-    theme = module.id;
-    try {
-      localStorage.setItem(THEME_KEY, module.id);
-    } catch {
-      // A window that cannot persist a preference still has to render.
-    }
-  }
 
   /**
    * Connects to the engine and lists what this machine has.
@@ -139,23 +131,22 @@
 
   async function stop(): Promise<void> {
     busy = true;
+    // Set before the call, not after it: the engine stops at the next artifact
+    // boundary and the run can go on for a moment afterwards, and a screen
+    // that says nothing in that moment is a screen the user presses again.
+    session.stopping = true;
     try {
       await ipc.scanCancel();
     } catch (err) {
       session.problem = String(err);
+      session.stopping = false;
     } finally {
       busy = false;
     }
   }
 
   onMount(() => {
-    let stored = DEFAULT_THEME;
-    try {
-      stored = localStorage.getItem(THEME_KEY) ?? DEFAULT_THEME;
-    } catch {
-      // Ignored: the default is a working theme.
-    }
-    void applyTheme(stored);
+    void apply(remembered());
 
     let unlisten: (() => void) | undefined;
     void subscribe().then((stop) => {
@@ -175,10 +166,10 @@
 </script>
 
 <div class="window">
-  <TitleBar onSettings={() => (themeOpen = true)} />
+  <TitleBar />
 
   <main>
-    <div class="pane">
+    <div class="form">
       <DriveTable
         {devices}
         {refreshing}
@@ -186,6 +177,7 @@
         disabled={session.running}
         onSelect={(path) => (source = path)}
         onRefresh={() => void refresh()}
+        onConfig={() => (themeOpen = true)}
       />
       <Destination
         value={destination}
@@ -204,21 +196,34 @@
 
 {#if themeOpen}
   <ThemeDialog
-    active={theme}
-    onChoose={(id) => void applyTheme(id)}
+    active={active.id}
+    onChoose={(id) => void apply(id)}
     onClose={() => (themeOpen = false)}
   />
 {/if}
 
 <style>
+  /* The frame. The system draws no decorations, so the edge, the corner and
+     the shadow around this application are this rule and nothing else. */
   .window {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: 100%;
     background: var(--backdrop);
     background-image: var(--backdrop-glow);
+    border: 1px solid var(--window-border);
+    border-radius: var(--window-radius);
+    box-shadow: var(--window-shadow);
+    /* The corner has to cut what is inside it, or a pane's own corner would
+       show through the frame's. */
+    overflow: hidden;
   }
 
+  /* The client area, inside the frame band. On a theme whose frame is a
+     hairline this is the whole window and nothing shows; on one with a wide
+     translucent border it is the sheet the controls sit on, and the band
+     around it is the frame. */
   main {
     flex: 1;
     min-height: 0;
@@ -230,27 +235,31 @@
     flex-direction: column;
     align-items: center;
     gap: 1.1rem;
-    padding: 0.4rem 2rem 1.1rem;
+    margin: 0 var(--window-inset) var(--window-inset);
+    padding: 1.35rem 2.3rem 1.5rem;
+    background: var(--main-surface);
+    border: 1px solid var(--main-border);
+    border-radius: var(--main-radius);
+    box-shadow: var(--main-shadow);
   }
 
-  /* Blocks one and two share one sheet, as they do in the design: choosing
-     what to read and choosing where to write are one decision. */
-  .pane {
+  /* Whether choosing what to read and choosing where to write are one sheet or
+     two separate controls is the theme's call, so this carries no appearance
+     of its own beyond what a theme gives it. */
+  .form {
     width: 100%;
     max-width: 70rem;
-    /* Never shrinks. Its height is fixed by the drive table's, and a pane that
+    /* Never shrinks. Its height is fixed by the drive table's, and a sheet that
        gave ground would clip a row rather than hide one. */
     flex: none;
     display: flex;
     flex-direction: column;
     gap: 1.1rem;
     padding: 1.2rem 1.375rem;
-    background: var(--pane);
-    backdrop-filter: var(--pane-blur);
-    -webkit-backdrop-filter: var(--pane-blur);
-    border: 1px solid var(--pane-border);
+    background: var(--scanlines), var(--form-pane);
+    border: 1px solid var(--form-pane-border);
     border-radius: var(--pane-radius);
-    box-shadow: var(--pane-shadow);
+    box-shadow: var(--form-pane-shadow);
   }
 
   .action {
@@ -261,9 +270,10 @@
     font-size: 0.97rem;
     color: var(--action-text);
     background: var(--action);
-    border: 1px solid var(--row-selected-border);
+    text-shadow: var(--text-glow);
+    border: 1px solid var(--action-border);
     border-radius: var(--radius);
-    box-shadow: 0 0.375rem 1.125rem -0.5rem var(--accent-glow);
+    box-shadow: var(--action-shadow);
     cursor: pointer;
   }
 
@@ -276,4 +286,5 @@
     cursor: not-allowed;
     box-shadow: none;
   }
+
 </style>

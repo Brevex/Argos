@@ -38,8 +38,15 @@ html {
   font-size: clamp(11px, min(1.9vw, 1.98vh), 17px);
 }
 
+/*
+ * The page behind the window is nothing at all.
+ *
+ * The application draws its own frame, corner included, and the system draws
+ * no decorations; a page with a background of its own would fill the corner
+ * back in and square it off.
+ */
 body {
-  background: var(--backdrop);
+  background: transparent;
   color: var(--text);
   font-family: var(--font);
   font-size: 0.875rem;

@@ -379,6 +379,65 @@ fn cancelling_stops_the_scan_and_keeps_what_was_already_found() {
     );
 }
 
+/// A progress sink that cancels the run once the writing stage has started.
+struct CancelOnStage {
+    session: ScanSession,
+    stage: Stage,
+}
+
+impl ProgressSink for CancelOnStage {
+    fn emit(&self, event: ScanEvent) {
+        if let ScanEvent::StageStarted { stage, .. } = event
+            && stage == self.stage
+        {
+            self.session.cancel();
+        }
+    }
+}
+
+#[test]
+fn cancelling_stops_the_stage_that_writes_artifacts() {
+    // The stage a run spends its time in on a real disk, and the one where a
+    // cancel button that does nothing is most visible: reading each finding
+    // back and handing it to the sink takes as long as there are findings.
+    // Cancellation is read between two artifacts, so what was written is whole
+    // and the manifest still describes it.
+    let mut disk = argos_carve::fixture::Disk::filled(CHUNK * 6);
+    for index in 0..24 {
+        let jpeg = argos_carve::fixture::Jpeg::new()
+            .with_entropy_bytes(512 + index * 3)
+            .build();
+        disk = disk.with(4096 + index * 8192, &jpeg);
+    }
+    let image = disk.into_bytes();
+
+    let session = ScanSession::new(config(2));
+    let progress = CancelOnStage {
+        session: session.clone(),
+        stage: Stage::Report,
+    };
+    let medium = Medium::new(views(&image, 2), image.len() as u64).expect("medium");
+    let mut sink = Collector::new();
+
+    let report = session.start(medium, &mut sink, &progress).expect("scan");
+
+    assert_eq!(report.state, RunState::Cancelled);
+    assert_eq!(
+        sink.artifacts().len(),
+        0,
+        "cancelling before the first artifact must stop the stage, not run it to the end"
+    );
+
+    // And the same medium, uncancelled, has plenty for it to have written —
+    // otherwise the assertion above would hold for the wrong reason.
+    let (all, _) = scan(&image);
+    assert!(
+        all.len() > 8,
+        "the fixture recovers {} artifacts",
+        all.len()
+    );
+}
+
 #[test]
 fn pausing_suspends_the_run_until_it_is_resumed() {
     let (image, _) = disk_with_images(2);

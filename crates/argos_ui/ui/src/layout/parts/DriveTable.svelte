@@ -9,6 +9,7 @@
    */
   import type { Device } from '../../lib/dto';
   import { bytes } from '../../lib/format';
+  import { active } from '../../themes/active.svelte';
 
   let {
     devices,
@@ -17,6 +18,7 @@
     refreshing,
     onSelect,
     onRefresh,
+    onConfig,
   }: {
     devices: Device[];
     selected: string;
@@ -24,6 +26,7 @@
     refreshing: boolean;
     onSelect: (path: string) => void;
     onRefresh: () => void;
+    onConfig: () => void;
   } = $props();
 </script>
 
@@ -38,6 +41,8 @@
     >
       {refreshing ? 'Refreshing…' : 'Refresh'}
     </button>
+
+    <button class="config" onclick={onConfig} title="Appearance">Config</button>
   </header>
 
   <div class="table" role="radiogroup" aria-label="Select drive to scan">
@@ -61,13 +66,7 @@
         <span class="dot" aria-hidden="true"></span>
 
         <span class="disk" aria-hidden="true">
-          <svg viewBox="0 0 20 16">
-            <rect class="case" x="0.7" y="0.7" width="18.6" height="14.6" rx="2" />
-            <circle class="platter" cx="8.2" cy="8" r="5" />
-            <circle class="spindle" cx="8.2" cy="8" r="1.15" />
-            <path class="arm" d="M16.4 4.1 12.1 9.7" />
-            <circle class="pivot" cx="16.6" cy="3.6" r="1.05" />
-          </svg>
+          <svg viewBox="0 0 20 16">{@html active.icon('disk')}</svg>
         </span>
 
         <span class="name">{device.path}</span>
@@ -100,13 +99,22 @@
   }
 
   h2 {
-    font-size: 0.81rem;
+    font-size: 0.88rem;
     font-weight: 400;
     color: var(--text-dim);
     margin: 0;
+    text-shadow: var(--text-glow);
   }
 
-  .refresh {
+  /* Opposite ends of one line: what re-reads the machine on the left, beside
+     the heading it belongs to, and what changes the window's appearance at the
+     far right, away from anything that touches a disk. */
+  .config {
+    margin-left: auto;
+  }
+
+  .refresh,
+  .config {
     /* Wide enough for the longer of the two labels, so pressing it does not
        shift the heading beside it. */
     min-width: 5.5rem;
@@ -120,7 +128,8 @@
     cursor: pointer;
   }
 
-  .refresh:hover:not(:disabled) {
+  .refresh:hover:not(:disabled),
+  .config:hover:not(:disabled) {
     background: var(--row-selected);
     color: var(--text);
   }
@@ -134,11 +143,11 @@
     /* Rows have a set height and the list stops after three of them, so this
        block's height is the same on every window and a scrollbar appears only
        when a machine actually has a fourth disk. */
-    --row-height: 2.65rem;
+    --row-height: 2.7rem;
     max-height: calc(var(--row-height) * 3 + 2px);
     border: 1px solid var(--inset-border);
     border-radius: var(--radius);
-    background: var(--inset);
+    background: var(--scanlines), var(--inset);
     overflow-y: auto;
   }
 
@@ -152,7 +161,7 @@
 
   .row {
     display: grid;
-    grid-template-columns: 1rem 1.375rem minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr) 8.6rem;
+    grid-template-columns: 1rem 1.5rem minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr) 8.6rem;
     align-items: center;
     gap: 0.875rem;
     width: 100%;
@@ -184,55 +193,33 @@
     width: 0.81rem;
     height: 0.81rem;
     border-radius: 50%;
-    border: 1.4px solid var(--text-faint);
+    border: 1.4px solid var(--dot-idle);
     justify-self: center;
   }
 
   .row.selected .dot {
     border-color: var(--accent-strong);
     background:
-      radial-gradient(circle at 50% 50%, var(--accent-strong) 0 0.2rem, transparent 0.215rem);
-    box-shadow: 0 0 0.5rem var(--accent-glow);
+      radial-gradient(circle at 50% 50%, var(--accent-strong) 0 0.22rem, transparent 0.235rem);
   }
 
+  /* The drawing is the theme's. What the layout decides is how big it is and,
+     for artwork drawn in `currentColor`, that the selected row lights it. A
+     theme whose drive is drawn in its own colours ignores both. */
   .disk svg {
-    width: 1.25rem;
-    height: 1rem;
+    width: 1.4rem;
+    height: 1.12rem;
     display: block;
-    fill: none;
-    stroke: var(--text-faint);
-    stroke-width: 1.05;
-    stroke-linecap: round;
+    color: var(--text-faint);
   }
 
   .row.selected .disk svg {
-    stroke: var(--text-dim);
-  }
-
-  /* The platter is the part that carries the accent: it is the surface the
-     scan reads, and on the selected row it is what the eye should land on. */
-  .disk .platter {
-    stroke-width: 0.95;
-  }
-
-  .disk .spindle,
-  .disk .pivot {
-    fill: var(--text-faint);
-    stroke: none;
-  }
-
-  .row.selected .disk .platter {
-    stroke: var(--accent-strong);
-  }
-
-  .row.selected .disk .spindle,
-  .row.selected .disk .pivot {
-    fill: var(--accent-strong);
+    color: var(--accent-strong);
   }
 
   .name {
-    font-family: var(--font-mono);
     font-size: 0.84rem;
+    text-shadow: var(--text-glow);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

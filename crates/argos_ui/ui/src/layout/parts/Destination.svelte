@@ -40,7 +40,8 @@
 
 <style>
   h2 {
-    font-size: 0.81rem;
+    font-size: 0.88rem;
+    text-shadow: var(--text-glow);
     font-weight: 400;
     color: var(--text-dim);
     margin: 0 0 0.625rem;
@@ -55,7 +56,7 @@
     align-items: stretch;
     border: 1px solid var(--inset-border);
     border-radius: var(--radius);
-    background: var(--inset);
+    background: var(--scanlines), var(--inset);
     overflow: hidden;
   }
 
@@ -64,7 +65,7 @@
   }
 
   .field.disabled {
-    opacity: 0.55;
+    opacity: 0.78;
   }
 
   input {

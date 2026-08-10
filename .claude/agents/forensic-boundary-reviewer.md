@@ -27,7 +27,8 @@ match the written spec, or the same change must update the spec.
 
 Read the relevant files before reporting. Every finding **must cite the `A-*` id it violates**
 (cite an `M-*` id alongside when one applies, but the `A-*` id is what makes it yours to report —
-purely `M-*` findings belong to the four `rust-*` reviewers). If you cannot attach an id, drop the
+purely `M-*` findings belong to the four `rust-*` reviewers, and hygiene
+findings to `code-hygiene-reviewer`). If you cannot attach an id, drop the
 finding. Do not invent rules.
 
 ## Scope

@@ -107,6 +107,16 @@ class Session {
   /** Whatever went wrong, when something did. */
   problem = $state('');
 
+  /**
+   * Whether a stop has been asked for and not yet taken effect.
+   *
+   * The engine stops between two artifacts, not instantly: it finishes the one
+   * in flight, writes it and writes the manifest. That gap is short on a
+   * fixture and not always short on a disk, and a screen that says nothing
+   * during it is a screen whose stop button looks broken.
+   */
+  stopping = $state(false);
+
   /** When the current run started, for the elapsed clock. */
   startedAt = $state(0);
 
@@ -193,6 +203,7 @@ class Session {
     this.omitted = 0;
     this.warnings = [];
     this.problem = '';
+    this.stopping = false;
     this.startedAt = Date.now();
     this.now = this.startedAt;
   }
@@ -265,6 +276,7 @@ class Session {
     // shown afterwards is the run's, not the run's plus part of a poll.
     this.now = Date.now();
     this.stage = '';
+    this.stopping = false;
     this.artifacts = summary.artifacts;
     this.stored = summary.bytes;
     this.omitted = summary.omitted;

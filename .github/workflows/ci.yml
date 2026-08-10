@@ -217,4 +217,4 @@ jobs:
           test -z "$(grep -rhoE '^## .*\((M-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | grep -oE 'M-[A-Z0-9-]+' | sort | uniq -d)"
           test "$(grep -rhoE '^## .*\((M-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l)" = 89
           test -z "$(grep -rhoE '^## .*\((A-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | grep -oE 'A-[A-Z0-9-]+' | sort | uniq -d)"
-          test "$(grep -rhoE '^## .*\((A-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l)" = 18
+          test "$(grep -rhoE '^## .*\((A-[A-Z0-9-]+)\)' .claude/skills/*/reference.md | wc -l)" = 23
