@@ -32,11 +32,39 @@ export type EngineMessage =
 /**
  * Connects to the engine process.
  *
- * `elevated` asks the operating system for the privileges a raw device needs.
- * Scanning an image file does not need them and should not ask.
+ * Nothing is asked about privileges here. This window is already running with
+ * the ones a raw device needs — it asked for them before it was drawn — and
+ * the engine inherits them as an ordinary child.
  */
-export function connect(elevated: boolean): Promise<void> {
-  return invoke('connect', { elevated });
+export function connect(): Promise<void> {
+  return invoke('connect');
+}
+
+/**
+ * Where a folder picker should open.
+ *
+ * The window runs as an administrator, so its idea of "home" is the
+ * administrator's, which is not where anyone keeps anything. Empty when the
+ * platform has no answer, and the picker then chooses for itself.
+ */
+export function invokerHome(): Promise<string> {
+  return invoke('invoker_home');
+}
+
+/**
+ * The view preferences this account last stored, as JSON text.
+ *
+ * Not `localStorage`: the window runs as an administrator, so a web view store
+ * lands in the administrator's profile and belongs to the machine rather than
+ * to the person looking at it. This is a file in their own home.
+ */
+export function preferencesRead(): Promise<string> {
+  return invoke('preferences_read');
+}
+
+/** Replaces the stored view preferences. */
+export function preferencesWrite(text: string): Promise<void> {
+  return invoke('preferences_write', { text });
 }
 
 /** The media this machine exposes. */

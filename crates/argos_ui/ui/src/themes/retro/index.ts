@@ -101,7 +101,6 @@ export default theme({
     '--accent': '#3ad13a',
     '--accent-strong': '#6dff6d',
     '--accent-text': '#02150a',
-    '--accent-glow': 'rgba(78, 228, 78, 0.35)',
 
     // Outlined, not filled: the border and the label carry it, the way a
     // terminal drew a control it could not shade.
@@ -116,7 +115,6 @@ export default theme({
 
     '--radius': '0',
     '--font': 'ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, Menlo, monospace',
-    '--font-mono': 'ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, Menlo, monospace',
   },
   icons: {
     // Line art on the character grid: a case, a slot and two spindles. Every

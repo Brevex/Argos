@@ -98,7 +98,7 @@ pub fn summarize(report: &ScanReport) {
             report.reassembled, report.reassembly_attempted
         );
     }
-    if report.reassembly_budget_exhausted {
+    if report.ceilings.reassembly_decodes {
         println!(
             "budget    reassembly ran out of its decode budget; candidates were left \
              untried and the medium may hold more"
@@ -178,7 +178,7 @@ pub fn summarize(report: &ScanReport) {
             report.unreadable.len()
         );
     }
-    if report.detection_truncated {
+    if report.ceilings.detection {
         println!(
             "capped    the surface held more signature or anchor matches than one scan \
              reports; results are incomplete"

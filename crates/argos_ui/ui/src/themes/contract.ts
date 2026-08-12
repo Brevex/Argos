@@ -146,7 +146,6 @@ export const THEME_TOKENS = [
   '--accent',
   '--accent-strong',
   '--accent-text',
-  '--accent-glow',
 
   // The one button that starts and stops a scan. Its fill is a whole
   // background value rather than a colour, so a theme can make it a gloss, a
@@ -163,7 +162,6 @@ export const THEME_TOKENS = [
   // Shape and rhythm.
   '--radius',
   '--font',
-  '--font-mono',
 ] as const;
 
 /** One custom property the base layout reads. */

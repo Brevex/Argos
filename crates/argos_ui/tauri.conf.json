@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Argos",
-  "version": "0.1.0",
+  "mainBinaryName": "argos-shell",
   "identifier": "org.argos.shell",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -29,6 +29,40 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/argos"],
+    "category": "Utility",
+    "shortDescription": "Forensic recovery of deleted images",
+    "longDescription": "Recovers permanently deleted images from block devices. The medium is opened read-only and never written to; every artifact is recorded with the extents it came from and the hash of what was written.",
+    "linux": {
+      "deb": {
+        "section": "utils",
+        "priority": "optional",
+        "depends": ["polkit"],
+        "files": {
+          "/usr/share/polkit-1/actions/org.argos.shell.policy": "packaging/org.argos.shell.policy"
+        }
+      },
+      "rpm": {
+        "depends": ["polkit"],
+        "files": {
+          "/usr/share/polkit-1/actions/org.argos.shell.policy": "packaging/org.argos.shell.policy"
+        }
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

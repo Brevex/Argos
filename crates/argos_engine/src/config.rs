@@ -70,6 +70,21 @@ const MIN_QUEUE_DEPTH: usize = 2;
 /// (`M-DOCUMENTED-MAGIC`).
 pub const REASSEMBLY_BUDGET: u32 = 250_000;
 
+/// Smallest long side, in pixels, an artifact is written to disk for.
+///
+/// A disk holds far more derived images than photographs, and they are small:
+/// icons, sprites, avatars and — dominating everything else — the thumbnail
+/// caches that desktops and phones keep. Measured over a 1 TB disk of ten
+/// years' use, out of 154,023 images written by a run with no floor, a sample
+/// of 1,499 found 57% at exactly 258x258, 87% at 300 pixels or less, and 1.2%
+/// above 1024. The dimensions cluster because a cache writes one size.
+///
+/// The floor sits above the caches measured there and below 640x480, the
+/// smallest resolution a camera of that era produced, so no photograph on that
+/// medium falls under it. Nothing is discarded: what is not written is still
+/// recorded with its extents and digest (`M-DOCUMENTED-MAGIC`).
+pub const DEFAULT_MIN_LONG_SIDE: u32 = 300;
+
 /// Which recovery stages a scan runs.
 ///
 /// Both are on by default: filesystem metadata is the strongest evidence and
@@ -109,7 +124,7 @@ pub struct ScanConfig {
     end: Option<u64>,
     stages: Stages,
     previews: bool,
-    exclude_assets: bool,
+    min_long_side: u32,
 }
 
 impl Default for ScanConfig {
@@ -132,7 +147,7 @@ impl ScanConfig {
             end: None,
             stages: Stages::default(),
             previews: false,
-            exclude_assets: false,
+            min_long_side: DEFAULT_MIN_LONG_SIDE,
         }
     }
 
@@ -142,15 +157,16 @@ impl ScanConfig {
         self.workers
     }
 
-    /// Whether artifacts triage labels a synthetic asset are left unwritten.
+    /// Smallest long side, in pixels, an artifact is written to disk for.
     ///
-    /// Off by default, and it is the one setting that lets a label decide what
-    /// reaches the output directory. A run with it on still records every
-    /// artifact it omits, with its extents and digest, so the manifest remains
-    /// a complete account of the medium (A-TRIAGE-NOT-VERDICT).
+    /// Zero writes everything. Whatever is not written is still recorded with
+    /// its extents, digest and dimensions, so the manifest stays a complete
+    /// account of the medium and the extents locate the bytes exactly — a
+    /// rerun with a lower floor produces them. `argos export` cannot: it reads
+    /// the session directory, where an unwritten artifact has no file.
     #[must_use]
-    pub fn exclude_assets(&self) -> bool {
-        self.exclude_assets
+    pub fn min_long_side(&self) -> u32 {
+        self.min_long_side
     }
 
     /// Bytes read per chunk.
@@ -207,7 +223,7 @@ pub struct ScanConfigBuilder {
     end: Option<u64>,
     stages: Stages,
     previews: bool,
-    exclude_assets: bool,
+    min_long_side: u32,
 }
 
 impl ScanConfigBuilder {
@@ -226,16 +242,15 @@ impl ScanConfigBuilder {
         self
     }
 
-    /// Leaves artifacts triage labels a synthetic asset unwritten. Defaults
-    /// to off.
+    /// Smallest long side, in pixels, an artifact is written for. Defaults to
+    /// [`DEFAULT_MIN_LONG_SIDE`]; zero writes everything.
     ///
-    /// The one setting that lets a label decide what reaches the output
-    /// directory. Every omitted artifact is still recorded with its extents
-    /// and digest, so the manifest stays a complete account of the medium and
-    /// `argos export` can fetch the bytes later without a second scan.
+    /// Every artifact below it is still recorded with its extents, digest and
+    /// dimensions, so the manifest stays a complete account of the medium and
+    /// the extents locate the bytes exactly for a rerun with a lower floor.
     #[must_use]
-    pub fn exclude_assets(mut self, exclude_assets: bool) -> Self {
-        self.exclude_assets = exclude_assets;
+    pub fn min_long_side(mut self, min_long_side: u32) -> Self {
+        self.min_long_side = min_long_side;
         self
     }
 
@@ -304,7 +319,7 @@ impl ScanConfigBuilder {
             end: self.end,
             stages: self.stages,
             previews: self.previews,
-            exclude_assets: self.exclude_assets,
+            min_long_side: self.min_long_side,
         })
     }
 }

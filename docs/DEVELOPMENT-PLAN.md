@@ -213,13 +213,14 @@ percentage, structural warnings. Assign the confidence tier: `FsMetadata > Journ
 ContiguousCarve > Reassembled > PartialOrThumbnail`. Hash (SHA-256) at the moment of recovery for
 chain of custody.
 
-**Stage G — ML triage.** Perceptual-hash dedup first (blockhash/pHash) so near-duplicates collapse
-before inference. Then a small CNN binary classifier — *user photograph* vs *synthetic asset*
-(icons, sprites, UI chrome, web cache graphics), which resolution alone cannot decide. A
-rule-based pre-filter (dimensions, alpha usage, palette size, edge/color statistics) short-cuts
-obvious cases so the CNN only sees ambiguous ones. Inference is **pure Rust** (`tract` or
-`candle`), local-only, model file versioned and SHA-256-pinned. **Triage never deletes**: it
-orders and labels results; the user decides. Full policy: `argos-ml-triage` skill (§7).
+**Stage G — Triage.** Perceptual-hash dedup first (blockhash/pHash) so near-duplicates collapse
+and one decision speaks for a group. Then a binary label — *user photograph* vs *synthetic asset*
+(icons, sprites, UI chrome, web cache graphics), which resolution alone cannot decide — from
+deterministic statistics of the decoded frame: dimensions, alpha usage, palette size, flat runs,
+and the high-frequency floor a sensor and a JPEG quantizer leave behind. No model, no weights,
+nothing loaded at startup; `RULES_VERSION` in the manifest is what a label is reproducible
+against. **Triage never deletes**: it orders and labels results; the user decides. Full policy:
+`argos-ml-triage` skill (§7).
 
 **Stage H — Reporting** (`argos_report`). Manifest of every artifact: provenance (stage, extents,
 source filesystem object if any), confidence tier, hashes, timestamps, classifier score, plus the
@@ -243,7 +244,7 @@ Where parallelism is fundamental vs forbidden:
 | Object validation/decode (D/F) | Scoped worker pool over a candidate queue, one medium view per worker | Decode is the CPU hot path, and per-candidate cost is uneven, so workers pull rather than being handed a slice |
 | Reassembly search (E2/E3) | Worker pool per header; the graph search itself is parallel-friendly (PUP) | Search dominates; independent per target image |
 | Hashing + report (F/H) | Fold into the validation task per artifact | Avoids a serialization point |
-| ML inference (G) | One dedicated batch worker thread | Batching amortizes; isolates the model runtime |
+| Triage (G) | One dedicated batch worker thread | Batching amortizes, and scoring one batch overlaps the decode of the next |
 | Stage wiring | **Bounded** `crossbeam-channel`s | Backpressure: the reader must stall rather than buffer the whole disk in RAM |
 | Cancellation | One control flag (atomic) checked at chunk granularity everywhere; pausing parks on a condvar rather than spinning | Pause/cancel from CLI/UI must take effect in ≤ one chunk |
 
@@ -314,14 +315,28 @@ is the shell's job (§6.2); the HAL only reports "permission denied" precisely
 
 ### 6.2 Process model and elevation
 
-Raw device access needs root/Administrator, and a GUI should not run elevated wholesale. The
-`argos` binary therefore has a `--serve` mode speaking **JSON-RPC over stdio** (newline-delimited,
-same DTO module as §6.1-3). The Tauri app spawns `argos --serve` elevated (UAC manifest on
-Windows, `pkexec`/`osascript` elevation on Linux/macOS) and bridges stdio ↔ Tauri events. The
-engine process is the hexagon; the UI is a client. This makes the "Tauri is only a shell"
-requirement structural rather than disciplinary — the shell literally talks to the same interface
-as any other client. Scanning a non-privileged image file falls back to running the engine
-in-process with no elevation.
+Raw device access needs root/Administrator. The `argos` binary therefore has a `--serve` mode
+speaking **JSON-RPC over stdio** (newline-delimited, same DTO module as §6.1-3). The Tauri app
+spawns `argos --serve` and bridges stdio ↔ Tauri events. The engine process is the hexagon; the UI
+is a client. This makes the "Tauri is only a shell" requirement structural rather than
+disciplinary — the shell literally talks to the same interface as any other client.
+
+**The application asks for administrator privileges before it draws anything, on every platform.**
+Windows declares `requireAdministrator` in its manifest; macOS relaunches itself through
+`osascript`; Linux relaunches itself through `pkexec`. The engine is then an ordinary child that
+inherits what it needs, and there is no unprivileged mode to end up in — a runtime flag choosing
+between privileged and not is a flag that can be set wrong, and wrong here means a scan that reports
+a medium it could not read as an empty one.
+
+Linux costs one extra step: `pkexec` replaces the environment with a minimal one, which is exactly
+what stops `LD_PRELOAD` and `GTK_MODULES` reaching a root process, so the session a window needs to
+draw travels as arguments against a closed list of names and is put back with `exec`.
+
+Two consequences. The web view runs elevated, and the capability allowlist, the CSP and
+`A-SHELL-NO-DOMAIN` are what contain it. And every file a scan writes is created by the
+administrator, so `argos_report` gives the output to the account the process is acting for
+(`ARGOS_INVOKER_UID`, `SUDO_UID`, `PKEXEC_UID`); where the destination filesystem has no ownership
+to change, that is a warning at the start of the scan rather than a surprise at the end.
 
 ## 7. New skills and agents (create in Phase 0 with `skill-creator`)
 
@@ -334,7 +349,7 @@ skills' `reference.md` files, listed in a separate section of `guidelines-index.
 | `argos-evidence-handling` | skill | `A-READ-ONLY` (no write path to source media, ever), `A-UNTRUSTED-ONDISK` (checked arithmetic/allocation/indexing for any medium-derived value — the concrete patterns: `checked_*`, `get()`, capped allocations), `A-PROVENANCE` (every artifact records stage + extents + hashes), `A-CONFIDENCE-HONEST` (never report above the evidence tier), `A-NO-CONTENT-IN-LOGS` |
 | `argos-ondisk-parsing` | skill | How on-disk structure parsers are written here: layout structs via `zerocopy`-style checked reads, no `unsafe` in parsers, every parser ships a fixture builder (`M-TEST-UTIL`) and a `cargo-fuzz` target (`A-FUZZ-EVERY-PARSER`), corrupt-input tests are first-class |
 | `argos-recovery-algorithms` | skill | Fixed written specs of §3's algorithms (residue sweep, NTFS orphan-MFT, ext4 journal mining, APFS checkpoints, JPEG/PNG state machines, block classification, bifragment gap, PUP) with literature references — agents implement from the spec instead of improvising |
-| `argos-ml-triage` | skill | `A-MODEL-PINNED` (local file, SHA-256-pinned, versioned; no runtime downloads), `A-TRIAGE-NOT-VERDICT` (classifier orders/labels, never discards or deletes), eval-set + threshold policy, pure-Rust inference requirement |
+| `argos-ml-triage` | skill | `A-MODEL-PINNED` (no runtime downloads; satisfied by there being no artifact — the procedure ships in the source tree and every manifest records `RULES_VERSION`), `A-TRIAGE-NOT-VERDICT` (classifier orders/labels, never discards or deletes), eval-set + threshold policy |
 | `argos-tauri-shell` | skill | The §6 contract as checkable rules: `A-SHELL-NO-DOMAIN`, `A-CLI-FIRST`, `A-DTO-VERSIONED`, `A-EVENTS-NOT-POLLING` |
 | `forensic-boundary-reviewer` | agent (read-only, like the four existing reviewers) | Audits untrusted-input parsing, evidence-handling invariants and the UI/IPC boundary; cites `A-*` and `M-*` ids |
 
@@ -408,19 +423,16 @@ hot path (`M-HOTPATH` — measure before optimizing).
 synthetically fragmented images (2-fragment and n-fragment, known ground truth) with measured
 recovery rates reported per pattern; all reassembled artifacts flagged `reconstructed`.
 
-**P6 — ML triage.** *(delivered)*
-`argos_classify`: rule-based pre-filter; CNN (MobileNet-class) exported to a pinned local model
-file; inference via `candle` (pure Rust, chosen so training and inference share one graph
-definition); batch worker; perceptual-hash dedup. Training pipeline lives outside the workspace
-was removed with the model it produced: triage is deterministic image statistics, and what enters
-the repo is the rules, the eval harness and the threshold-derivation harness beside it.
-Threshold defaults are named constants derived on the trainer's validation range, never on the
-eval corpus (`M-DOCUMENTED-MAGIC`).
+**P6 — Triage.** *(delivered)*
+`argos_classify`: rule-based classification over decoded-image statistics, batch worker,
+perceptual-hash dedup. Triage is deterministic and carries no artifact; what enters the repo is
+the rules, the eval harness and the threshold-derivation harness beside it. Threshold defaults are
+named constants derived on a validation range of the corpus generator disjoint from the one the
+eval harness grades them on (`M-DOCUMENTED-MAGIC`).
 *Skills*: `argos-ml-triage`, `rust-performance`, `rust-testing`. *Review*: `rust-test-reviewer`,
 `forensic-boundary-reviewer`. *Exit*: eval set (photos incl. greyscale and thumbnails vs
 icons/sprites/UI chrome/high-res assets) with precision/recall targets met and recorded in the
-eval harness, for the shipped pipeline **and** for the model alone; classifier output provably
-never filters artifacts out of the manifest.
+eval harness; classifier output provably never filters artifacts out of the manifest.
 
 **P7 — Windows and macOS HALs.** *(code delivered; hardware verification outstanding)*
 Per-OS `BlockSource` adapters (§5 table), device enumeration, TRIM/seek-penalty detection, VSS
@@ -439,7 +451,7 @@ documented and executed once per OS. **The checklist is written and unexecuted**
 request codes and storage-driver descriptors cannot be verified without the hardware, and no
 value they produce should be trusted until a row appears in its results table.
 
-**P8 — Tauri shell.** *(delivered; elevation on Windows/macOS outstanding)*
+**P8 — Tauri shell.** *(delivered)*
 In order:
 
 - **P8.1 — the capabilities the CLI was missing.** `ArtifactSink::preview`, a defaulted port
@@ -459,9 +471,9 @@ In order:
 - **P8.3/P8.4 — the shell.** `argos_ui` spawns the engine, bridges notifications to Tauri events
   and grants the web view the session's `previews/` directory and nothing else. Frontend per
   §6.1-5: Svelte 5, a base layout, an event mirror, and themes as total token records.
-- **P8.5 — elevation.** `pkexec` on Linux. Windows and macOS elevate through a shell verb that
-  drops the caller's pipes, which is refused with an explanation rather than silently producing
-  an unprivileged scan; see §6.2.
+- **P8.5 — elevation.** The application elevates itself before drawing, on all three platforms, and
+  hands the output back to the account that asked; see §6.2. No prompt is reachable from CI, so each
+  platform is a row in `docs/DEVICE-SMOKE-CHECKLIST.md` rather than a test.
 
 *Skills*: `argos-tauri-shell`, `rust-api-surface`, `rust-telemetry`. *Review*:
 `forensic-boundary-reviewer` (boundary audit: zero domain logic in `argos_ui`),

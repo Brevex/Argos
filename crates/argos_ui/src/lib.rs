@@ -6,14 +6,22 @@
 //! filesystem parser, no confidence model and no classifier — not by
 //! discipline but because none of them are linked (`A-SHELL-NO-DOMAIN`).
 //!
-//! What it does is spawn `argos --serve`, elevated when a raw device needs it,
-//! and translate between that process and a web view: commands out, events in.
-//! Every command here is a subcommand of `argos` as well, so anything this
-//! window can do is reproducible from a terminal (`A-CLI-FIRST`).
+//! What it does is spawn `argos --serve` and translate between that process
+//! and a web view: commands out, events in. Every command here is a subcommand
+//! of `argos` as well, so anything this window can do is reproducible from a
+//! terminal (`A-CLI-FIRST`).
+//!
+//! This process is privileged before it draws anything, on every platform (see
+//! [`elevate`]), and the engine inherits that. The web view runs inside it, so
+//! what keeps the privilege contained is the capability list, the content
+//! security policy, and the fact that this crate links no recovery logic to
+//! reach: nothing here loads a remote origin, and nothing here is allowed to
+//! run a shell, touch the filesystem or open a socket.
 
 mod commands;
 mod elevate;
 mod engine;
+mod preference;
 mod trace;
 
 use std::sync::Mutex;
@@ -76,6 +84,17 @@ impl Shell {
 /// which is a broken installation rather than anything a user did
 /// (`M-PANIC-ON-BUG`).
 pub fn run() {
+    match elevate::start() {
+        elevate::Start::Proceed => {}
+        // The privileged copy is the one that draws. Two windows over one
+        // medium would compete for it.
+        elevate::Start::Relaunched => return,
+        elevate::Start::Refused(reason) => {
+            elevate::report(&reason);
+            return;
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -84,6 +103,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect,
+            commands::invoker_home,
+            commands::preferences_read,
+            commands::preferences_write,
             commands::devices,
             commands::scan_start,
             commands::scan_cancel,

@@ -70,7 +70,6 @@ const complete: Record<ThemeToken, string> = {
   '--accent': '#00f',
   '--accent-strong': '#33f',
   '--accent-text': '#fff',
-  '--accent-glow': 'none',
   '--action': '#00f',
   '--action-text': '#fff',
   '--action-border': '#33f',
@@ -80,7 +79,6 @@ const complete: Record<ThemeToken, string> = {
   '--danger': '#f00',
   '--radius': '0',
   '--font': 'sans-serif',
-  '--font-mono': 'monospace',
 };
 
 const drawn: Record<ThemeIcon, string> = {

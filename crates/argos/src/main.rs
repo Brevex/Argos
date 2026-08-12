@@ -11,8 +11,10 @@
 mod console;
 mod destination;
 mod export;
+mod invoker;
 mod progress;
 mod scan;
+mod scanlog;
 mod serve;
 mod source;
 
@@ -66,17 +68,18 @@ enum Command {
         /// disabling it only removes the labels.
         #[arg(long)]
         no_triage: bool,
-        /// Do not write artifacts triage labels a synthetic asset — icons,
-        /// sprites, UI chrome. They are still examined, hashed and recorded in
-        /// the manifest with their extents, so the account of the medium stays
-        /// complete and `argos export` can fetch them later; what changes is
-        /// what lands in the output directory.
+        /// Smallest long side, in pixels, an image is written to disk for.
+        /// Defaults to 300; 0 writes everything.
         ///
-        /// This is the one option that lets a label decide what is written.
-        /// Only the `synthetic-asset` label is omitted: anything the rules
-        /// could not settle is written.
-        #[arg(long, conflicts_with = "no_triage")]
-        exclude_assets: bool,
+        /// A used disk holds far more derived images than photographs —
+        /// icons, avatars and above all the thumbnail caches desktops keep —
+        /// and they are small. Everything below the floor is still examined,
+        /// hashed and recorded in the manifest with its extents and its
+        /// dimensions, so the account of the medium stays complete and a rerun
+        /// with a lower floor produces the files; what changes is what lands in
+        /// the output directory.
+        #[arg(long, value_name = "PIXELS")]
+        min_long_side: Option<u32>,
         /// Render a small preview of every artifact that decodes, into a
         /// `previews/` subdirectory. Previews are derived files, reproducible
         /// from the artifacts, and no part of the recovery depends on them.
@@ -132,7 +135,7 @@ fn main() -> anyhow::Result<()> {
             metadata_only,
             no_reassemble,
             no_triage,
-            exclude_assets,
+            min_long_side,
             previews,
         } => run_scan(
             &source,
@@ -145,7 +148,7 @@ fn main() -> anyhow::Result<()> {
                     reassembly: !metadata_only && !no_reassemble,
                 },
                 triage: !no_triage,
-                exclude_assets,
+                min_long_side,
                 previews,
             },
         ),

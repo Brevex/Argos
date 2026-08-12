@@ -80,6 +80,10 @@ pub(crate) struct Emitted {
     pub finding: usize,
     /// Content hash the sink recorded.
     pub sha256: Digest,
+    /// Where the artifact starts on the medium.
+    pub offset: u64,
+    /// Decoded dimensions, when it decoded.
+    pub pixels: Option<(u32, u32)>,
 }
 
 /// What this pass has been asked to produce.

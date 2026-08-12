@@ -1,6 +1,6 @@
 //! Where the rule thresholds come from.
 //!
-//! Every constant in [`argos_classify::prefilter`] is a number on a scale, and
+//! Every constant in [`argos_classify::rules`] is a number on a scale, and
 //! a number chosen by eye silently reshapes what an examiner looks at first.
 //! This prints the distribution of each feature over a **validation** range of
 //! the corpus generator, and the constants come from its percentiles.

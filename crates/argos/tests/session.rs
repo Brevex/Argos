@@ -25,6 +25,9 @@ fn scanned(dir: &Path, extra: &[&str]) -> std::path::PathBuf {
         .arg(&image)
         .arg("--out")
         .arg(&out)
+        // The fixtures here are a few dozen pixels across: these tests are
+        // about sessions, exports and previews, so the size floor is off.
+        .args(["--min-long-side", "0"])
         .args(extra)
         .output()
         .expect("run argos scan");
@@ -111,6 +114,7 @@ fn an_artifact_that_carves_but_does_not_decode_is_reported_without_a_preview() {
         .arg("--out")
         .arg(&out)
         .arg("--previews")
+        .args(["--min-long-side", "0"])
         .output()
         .expect("run argos scan");
     assert!(output.status.success());

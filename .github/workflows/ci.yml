@@ -146,7 +146,16 @@ jobs:
     # `argos_ui` is excluded from the engine's workspace, so nothing above
     # builds it. This lane is the only thing that does: the Rust side of the
     # shell, the frontend's type check, and the production bundle.
-    runs-on: ubuntu-latest
+    #
+    # Three runners, because how the shell obtains privileges differs per
+    # platform and each way is written in code that only its own target
+    # compiles. On one runner the other two would first be compiled by a
+    # release, which is the worst moment to find out.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -154,13 +163,16 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/argos_ui
+          workspaces: |
+            .
+            crates/argos_ui
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: crates/argos_ui/ui/package-lock.json
       - name: Web view toolchain
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
@@ -174,12 +186,77 @@ jobs:
       - name: Frontend bundle
         working-directory: crates/argos_ui/ui
         run: npm run build
+      - name: Engine, staged where the bundler looks for it
+        # `externalBin` is checked by `tauri-build`, so the shell does not
+        # compile at all without the engine binary beside it. That is the
+        # arrangement the installed application relies on, and building the
+        # two together is what keeps it true.
+        shell: bash
+        run: |
+          cargo build -p argos
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          ext=""
+          [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          mkdir -p crates/argos_ui/binaries
+          cp "target/debug/argos$ext" "crates/argos_ui/binaries/argos-$triple$ext"
       - name: Shell
         working-directory: crates/argos_ui
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
           cargo test
+
+  bundle:
+    # The installers are only ever built from a tag, so without this the whole
+    # packaging chain — sidecar, icons, polkit file, bundler configuration —
+    # would go unexercised until the moment it is needed. One .deb is enough to
+    # prove the chain; the other two formats differ only in the bundler.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/argos_ui
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/argos_ui/ui/package-lock.json
+      - name: Web view toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+                                  libappindicator3-dev librsvg2-dev patchelf \
+                                  libsoup-3.0-dev
+      - name: Frontend dependencies
+        working-directory: crates/argos_ui/ui
+        run: npm ci
+      - name: Engine, staged where the bundler looks for it
+        run: |
+          cargo build --release -p argos --target x86_64-unknown-linux-gnu
+          mkdir -p crates/argos_ui/binaries
+          cp target/x86_64-unknown-linux-gnu/release/argos \
+             crates/argos_ui/binaries/argos-x86_64-unknown-linux-gnu
+      - name: Bundle
+        working-directory: crates/argos_ui/ui
+        env:
+          TAURI_APP_PATH: ${{ github.workspace }}/crates/argos_ui
+          TAURI_FRONTEND_PATH: ${{ github.workspace }}/crates/argos_ui/ui
+        run: npx tauri build --target x86_64-unknown-linux-gnu --bundles deb
+      - name: The engine ships beside the shell
+        # What `Engine::locate` depends on: the two binaries in one directory.
+        # A packaging change that separated them would install a window that
+        # cannot start a scan.
+        run: |
+          deb=$(find crates/argos_ui/target -name '*.deb' | head -1)
+          dpkg-deb -c "$deb"
+          dpkg-deb -c "$deb" | grep -qE ' usr/bin/argos-shell$'
+          dpkg-deb -c "$deb" | grep -qE ' usr/bin/argos$'
+          dpkg-deb -c "$deb" | grep -qE 'org\.argos\.shell\.policy$'
 
   ipc-bindings:
     # The wire format has one definition, in `argos_ipc`, and the frontend's

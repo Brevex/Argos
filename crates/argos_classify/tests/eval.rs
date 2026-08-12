@@ -1,10 +1,9 @@
-//! The eval harness: the gate every model or threshold change has to pass.
+//! The eval harness: the gate every rule or threshold change has to pass.
 //!
-//! The corpus is fixed by its seeds and disjoint from the training tool's
-//! range, so these numbers measure generalization rather than recall of the
-//! training set. The harness measures the *shipped* classifier — rule-based
-//! pre-filter and model together — because that is what an examiner's results
-//! are ordered by (A-EVAL-GATED).
+//! The corpus is fixed by its seeds and disjoint from the range the thresholds
+//! were derived over, so these numbers grade the rules against samples that did
+//! not shape them. The harness measures the *shipped* classifier, because that
+//! is what an examiner's results are ordered by (A-EVAL-GATED).
 //!
 //! Precision and recall are printed per slice and overall, and held to
 //! documented floors. Changing a rule or a threshold means re-running this and
@@ -27,8 +26,9 @@ const EVAL_PER_SLICE: u64 = 40;
 
 /// Seed of the sample at index `i` of a slice.
 ///
-/// Stays under `100_000`, where `tools/train_triage` starts, so no sample here
-/// was ever trained on.
+/// Stays under three hundred, far below `500_000`, where the validation range
+/// in `tests/thresholds.rs` starts — so no sample here shaped a threshold it is
+/// graded against.
 fn eval_seed(index: u64) -> u64 {
     index * 7 + 1
 }
@@ -85,18 +85,9 @@ impl Confusion {
 /// Floors this harness records. A change that drops below one fails here
 /// rather than quietly reordering what an examiner sees first.
 ///
-/// Each sits a little under what `triage-cnn-v1` measures, so ordinary
-/// retraining noise does not fail the build while a real regression does.
-/// Measured for the pinned model: precision 1.000, recall 0.958, high-res
-/// asset accuracy 1.000, model-only recall 0.958, model-only asset rejection
-/// 0.981.
-///
-/// Two sets, because the classifier is two mechanisms. The pre-filter reads
-/// alpha, palette and flat runs; the model reads texture, and never sees
-/// alpha at all — `model_input` composites it away. So the rules settle most
-/// synthetic assets before inference, and the shipped pipeline's numbers say
-/// almost nothing about the model on that class. The model-only floors below
-/// are what make a model regression visible.
+/// Each sits under what `rules-v1` measures on this corpus — precision 1.000,
+/// recall 1.000, high-res asset accuracy 1.000 — so a threshold moved by a
+/// fraction does not fail the build while a real regression does.
 mod floor {
     /// Photograph precision: of everything called a photograph, how much
     /// really is one. This is the number that matters most — a synthetic

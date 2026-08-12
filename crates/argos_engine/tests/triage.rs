@@ -100,6 +100,9 @@ fn config() -> ScanConfig {
     ScanConfig::builder()
         .workers(NonZeroUsize::new(2).expect("two workers"))
         .chunk_bytes(CHUNK)
+        // The generated fixtures are a few dozen pixels across; these tests
+        // are about the pipeline, not about which sizes reach a directory.
+        .min_long_side(0)
         .build()
         .expect("valid configuration")
 }

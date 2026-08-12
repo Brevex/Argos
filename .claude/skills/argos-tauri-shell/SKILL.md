@@ -21,8 +21,10 @@ structural — the UI is a client of the same `--serve` JSON-RPC interface any o
   version field. DTOs never leak engine types (`M-DONT-LEAK-TYPES`) and never carry raw sector
   data; previews travel as files via the scoped asset protocol, not base64 over IPC.
 - `A-EVENTS-NOT-POLLING` — progress flows engine → UI through events fed by the `ProgressSink`
-  port; commands never poll. Elevation uses the spawned `argos --serve` process (UAC / `pkexec` /
-  `osascript`); the GUI process itself never runs elevated.
+  port; commands never poll. The application elevates itself before drawing anything, on all three
+  platforms, and the engine inherits that; there is no unprivileged mode and no flag to get wrong.
+  Because the scan then writes as the administrator, the output is handed back to the account that
+  asked, and a failure to hand it back is said out loud.
 - Tauri capabilities stay minimal: the command set and one asset-protocol scope restricted to the
   session output directory — no shell, no fs, no http exposure to the webview.
 

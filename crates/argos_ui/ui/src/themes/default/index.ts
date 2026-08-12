@@ -86,7 +86,6 @@ export default theme({
     '--accent': '#2f7cf6',
     '--accent-strong': '#4d94ff',
     '--accent-text': '#ffffff',
-    '--accent-glow': 'rgba(47, 124, 246, 0.42)',
 
     '--action': 'linear-gradient(180deg, #4d94ff, #2f7cf6)',
     '--action-text': '#ffffff',
@@ -100,7 +99,6 @@ export default theme({
     '--radius': '0.5rem',
     '--font':
       'system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif',
-    '--font-mono': 'ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, monospace',
   },
   icons: {
     // A drive drawn as an outline: a case, a platter, a spindle and the arm

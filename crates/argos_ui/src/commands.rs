@@ -19,20 +19,32 @@ use crate::engine::{self, Engine};
 
 /// Connects to the engine, replacing any previous connection.
 ///
-/// `elevated` asks the operating system for the privileges a raw device needs.
-/// An image-file scan needs none and should not ask.
+/// Nothing here decides about privileges. This process holds them already —
+/// `crate::elevate` made sure of that before the window existed — and the
+/// engine inherits them by being its child.
 #[tauri::command]
-pub async fn connect(
-    app: AppHandle,
-    shell: State<'_, Shell>,
-    elevated: bool,
-) -> Result<(), String> {
+pub async fn connect(app: AppHandle, shell: State<'_, Shell>) -> Result<(), String> {
     let handle = app.clone();
-    let engine = tauri::async_runtime::spawn_blocking(move || Engine::connect(&handle, elevated))
+    let engine = tauri::async_runtime::spawn_blocking(move || Engine::connect(&handle))
         .await
         .map_err(|err| format!("the connection attempt did not finish: {err}"))??;
     shell.replace(engine);
     Ok(())
+}
+
+/// The home directory of the user this administrator session is acting for.
+///
+/// Empty when the platform has no answer. A path is not filesystem access:
+/// this is a string the folder picker opens at, and the picker is the only
+/// thing in this window that touches a directory.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a Tauri command's signature is its contract with the window, and every other one \
+              here can fail"
+)]
+#[tauri::command]
+pub fn invoker_home() -> Result<String, String> {
+    Ok(crate::elevate::invoker_home().unwrap_or_default())
 }
 
 /// The media this machine exposes.
@@ -61,4 +73,34 @@ pub async fn scan_start(
 #[tauri::command]
 pub async fn scan_cancel(shell: State<'_, Shell>) -> Result<(), String> {
     shell.call(Call::ScanCancel, engine::done).await
+}
+
+/// The view preferences this account last stored, as JSON text.
+///
+/// Empty when there are none. The window parses it; nothing here looks inside
+/// it, because a preference is presentation and this file carries no decisions
+/// about presentation (`A-SHELL-NO-DOMAIN`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a Tauri command's signature is its contract with the window, and every other one \
+              here can fail"
+)]
+#[tauri::command]
+pub fn preferences_read() -> Result<String, String> {
+    Ok(crate::preference::read())
+}
+
+/// Replaces the stored view preferences with `text`.
+///
+/// # Errors
+///
+/// Fails when the file cannot be written, which the window may ignore: a
+/// preference that did not persist still applies to the window that set it.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "a Tauri command receives its arguments owned, deserialized from the invocation"
+)]
+#[tauri::command]
+pub fn preferences_write(text: String) -> Result<(), String> {
+    crate::preference::write(&text)
 }

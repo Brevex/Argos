@@ -47,7 +47,7 @@ pub mod wire;
 /// misread this one: a field removed or renamed, a meaning changed. Adding an
 /// optional field does not bump it, because a client that ignores the field
 /// still reads everything else correctly.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 #[cfg(test)]
 mod tests {

@@ -3,7 +3,7 @@ use std::io::Cursor;
 use argos_core::artifact::{Artifact, ArtifactSink, Digest};
 use argos_core::geometry::{ByteOffset, ByteRange};
 use argos_core::{Confidence, Format, Stage};
-use argos_report::{ExtentRecord, Store, Summary};
+use argos_report::{ExtentRecord, Handback, Owner, Store, Summary};
 
 /// SHA-256 of the ASCII bytes `abc` — the FIPS 180-2 known-answer vector.
 const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -33,13 +33,14 @@ fn artifact<'a>(extents: &'a [ByteRange], length: u64, sha256: &str) -> Artifact
         recovered_name: None,
         source_object: None,
         parent: None,
+        pixels: None,
     }
 }
 
 #[test]
 fn saved_artifact_is_written_hashed_and_recorded() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut store = Store::create(dir.path().join("out")).expect("create store");
+    let mut store = Store::create(dir.path().join("out"), None).expect("create store");
     let extents = [ByteRange::new(ByteOffset::new(1234), 3)];
 
     let record = store
@@ -61,7 +62,7 @@ fn saved_artifact_is_written_hashed_and_recorded() {
 #[test]
 fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut store = Store::create(dir.path().join("out")).expect("create store");
+    let mut store = Store::create(dir.path().join("out"), None).expect("create store");
     let extents = [
         ByteRange::new(ByteOffset::new(99), 2),
         ByteRange::new(ByteOffset::new(512), 2),
@@ -122,7 +123,7 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
 #[test]
 fn a_short_save_is_refused_not_misrecorded() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut store = Store::create(dir.path().join("out")).expect("create store");
+    let mut store = Store::create(dir.path().join("out"), None).expect("create store");
     let extents = [ByteRange::new(ByteOffset::new(0), 3)];
 
     let err = store
@@ -138,7 +139,7 @@ fn a_short_save_is_refused_not_misrecorded() {
 #[test]
 fn bytes_that_do_not_reproduce_the_recovery_digest_are_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut store = Store::create(dir.path().join("out")).expect("create store");
+    let mut store = Store::create(dir.path().join("out"), None).expect("create store");
     let extents = [ByteRange::new(ByteOffset::new(0), 3)];
 
     // Right length, wrong bytes: the medium changed under us, or the extents
@@ -153,4 +154,55 @@ fn bytes_that_do_not_reproduce_the_recovery_digest_are_refused() {
     assert!(store.records().is_empty());
     // The refused bytes are not left behind for someone to mistake for output.
     assert!(!dir.path().join("out/000000.jpg").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn recovered_files_are_given_to_the_account_that_asked() {
+    use std::os::unix::fs::MetadataExt;
+
+    // A scan of a raw device runs elevated, so everything it writes is created
+    // by the administrator. Nothing here is elevated, so the account that asks
+    // is this one — which still exercises the whole path, because handing a
+    // file to the account that already owns it is a real `chown` that a
+    // filesystem without ownership still refuses.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let me = std::fs::metadata(dir.path()).expect("stat the temporary directory");
+    let owner = Owner::new(me.uid(), Some(me.gid()));
+
+    let out = dir.path().join("out");
+    let mut store = Store::create(&out, Some(owner)).expect("create store");
+    assert_eq!(
+        store.handback(),
+        &Handback::Done,
+        "a temporary directory belongs to this account already"
+    );
+
+    let extents = [ByteRange::new(ByteOffset::new(0), 3)];
+    store
+        .accept(
+            &artifact(&extents, 3, SHA256_ABC),
+            &mut Cursor::new(b"abc".to_vec()),
+        )
+        .expect("save the artifact");
+    let manifest = store
+        .finish(Summary {
+            tool_version: "test",
+            source: "fixture",
+            state: "completed",
+            rejected_candidates: 0,
+            unreadable: &[],
+            triage: None,
+        })
+        .expect("write the manifest");
+
+    for path in [out.join("000000.jpg"), manifest] {
+        let meta = std::fs::metadata(&path).expect("stat what was written");
+        assert_eq!(
+            (meta.uid(), meta.gid()),
+            (me.uid(), me.gid()),
+            "{} was left belonging to someone else",
+            path.display()
+        );
+    }
 }

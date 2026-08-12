@@ -1,13 +1,7 @@
-# Cargo build output, wherever it appears. Not root-anchored: the training
-# tool under tools/ is its own cargo project and its target directory is
-# nearly a gigabyte of compiled inference runtime — none of which belongs in
-# the repository of a forensic tool (A-EVAL-GATED: only the pinned model and
-# the eval harness enter the repo).
+# Cargo build output, wherever it appears. Not root-anchored: the fuzz crates
+# and the shell are cargo projects of their own, each with a target directory
+# beside its manifest.
 target/
-
-# The trainer writes its artifact beside itself; the copy that ships is the
-# one committed under crates/argos_classify/model/.
-/tools/train_triage/*.safetensors
 
 # The shell's frontend: installed packages and the bundle Vite produces from
 # the sources beside them. `package-lock.json` is committed, so the tree that
@@ -18,3 +12,9 @@ target/
 # Tauri regenerates these from tauri.conf.json and the capabilities on every
 # build. The inputs are committed; the output is not.
 /crates/argos_ui/gen/
+
+# Where the engine binary is copied, as `argos-<target-triple>`, so the bundler
+# can place it beside the shell. Produced by `cargo build -p argos` — by the
+# bundle step of .github/workflows/release.yml, or by hand before a local
+# `tauri build` (A-SUPPORT-DECLARED).
+/crates/argos_ui/binaries/

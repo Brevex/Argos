@@ -94,6 +94,14 @@ pub struct Artifact<'a> {
     pub source_object: Option<u64>,
     /// For an embedded thumbnail, the offset of the candidate it was found in.
     pub parent: Option<ByteOffset>,
+    /// Width and height of the decoded picture, when it decoded.
+    ///
+    /// The one property that tells a photograph from the derived images a used
+    /// disk is full of — cache entries, icons, avatars — and the one a reader
+    /// of the manifest cannot work out from a byte count. Absent when the
+    /// artifact did not decode, which is a statement about the decoder and not
+    /// about the bytes.
+    pub pixels: Option<(u32, u32)>,
 }
 
 impl fmt::Debug for Artifact<'_> {
@@ -139,16 +147,16 @@ pub trait ArtifactSink {
     ) -> Result<(), Self::Error>;
 
     /// Records an artifact that was recognised but whose bytes were not
-    /// stored, carrying the label that decided it and the property behind
-    /// that label.
+    /// stored, and why.
     ///
     /// The one way an artifact can exist in the account without existing in
-    /// the output directory. It is reached only when a caller asked for it —
-    /// a run told to leave synthetic assets unwritten — and the record it
-    /// produces carries the same extents, digest, format and confidence as a
-    /// stored one, so the manifest still describes everything the medium held.
-    /// Nothing about it is inferred here: the label was decided elsewhere and
-    /// is copied in (A-TRIAGE-NOT-VERDICT).
+    /// the output directory. The record it produces carries the same extents,
+    /// digest, format, confidence and dimensions as a stored one, so the
+    /// manifest still describes everything the medium held and its extents
+    /// locate the bytes on the medium exactly.
+    ///
+    /// `reason` is copied in as given. Nothing here decides anything: a sink
+    /// records what it is told (A-TRIAGE-NOT-VERDICT).
     ///
     /// The default records nothing, which is what a sink that stores
     /// everything wants.
@@ -156,13 +164,8 @@ pub trait ArtifactSink {
     /// # Errors
     ///
     /// Fails when the record cannot be kept.
-    fn omit(
-        &mut self,
-        artifact: &Artifact<'_>,
-        label: &str,
-        decided_by: &str,
-    ) -> Result<(), Self::Error> {
-        let _ = (artifact, label, decided_by);
+    fn omit(&mut self, artifact: &Artifact<'_>, reason: &str) -> Result<(), Self::Error> {
+        let _ = (artifact, reason);
         Ok(())
     }
 

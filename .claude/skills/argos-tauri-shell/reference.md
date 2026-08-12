@@ -55,6 +55,15 @@ already owns a progress port.</why>
 
 - The engine's `ProgressSink` port feeds Tauri events (or `--serve` notifications); the UI
   subscribes. Commands are verbs (start, pause, cancel, export) — none of them fetch progress.
-- Elevation: the shell spawns `argos --serve` elevated (UAC manifest on Windows, `pkexec` on
-  Linux, `osascript` on macOS) and bridges stdio to events. The GUI process never runs elevated;
-  scanning a plain image file may run in-process without elevation.
+- Elevation: the application asks for administrator privileges **before it draws anything**, on
+  every platform — a `requireAdministrator` manifest on Windows, a relaunch through `osascript` on
+  macOS and through `pkexec` on Linux — and the engine inherits them by being its child. There is
+  no unprivileged mode and no runtime choice about privileges: a flag that can be set wrong is a
+  scan that reports a medium it could not read as an empty one. Where an elevation mechanism
+  discards the environment, only a closed list of session variables is carried across, never an
+  arbitrary one; anything that can make a process load code stays out.
+- Two consequences of the web view running elevated, neither of which may be loosened: the
+  capability list, the content security policy and `A-SHELL-NO-DOMAIN` are what contain it; and
+  every file a scan writes is created by the administrator, so the account that asked for the
+  recovery is given ownership of the output, and a failure to do that is reported rather than
+  discovered later.

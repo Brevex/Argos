@@ -207,7 +207,7 @@ pub fn options(request: &dto::ScanRequest) -> crate::scan::Options {
             reassembly: request.reassembly,
         },
         triage: request.triage,
-        exclude_assets: request.exclude_assets,
+        min_long_side: request.min_long_side,
         previews: request.previews,
     }
 }

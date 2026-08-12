@@ -130,7 +130,6 @@ export default theme({
     '--accent': '#1b7fd4',
     '--accent-strong': '#1b7fd4',
     '--accent-text': '#ffffff',
-    '--accent-glow': 'rgba(27, 127, 212, 0.45)',
 
     // The highlight breaks at the middle instead of fading, which is what
     // makes a button of this era read as glass rather than as a gradient.
@@ -148,7 +147,6 @@ export default theme({
     '--radius': '0.24rem',
     '--font':
       '"Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif',
-    '--font-mono': 'ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace',
   },
   icons: {
     // A drive seen face on, the way the system's own drive icon draws one: a

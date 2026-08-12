@@ -127,10 +127,12 @@ dto! {
         pub reassembly: bool,
         /// Label artifacts photograph vs synthetic asset.
         pub triage: bool,
-        /// Leave artifacts labelled a synthetic asset unwritten. They are
-        /// still examined, hashed and recorded with their extents.
+        /// Smallest long side, in pixels, an image is written to disk for.
+        /// Absent takes the engine's default; zero writes everything.
+        /// Whatever is not written is still examined, hashed and recorded
+        /// with its extents and its dimensions.
         #[serde(default)]
-        pub exclude_assets: bool,
+        pub min_long_side: Option<u32>,
         /// Render a preview of every artifact that decodes.
         pub previews: bool,
     }
@@ -147,7 +149,7 @@ impl Default for ScanRequest {
             carving: true,
             reassembly: true,
             triage: true,
-            exclude_assets: false,
+            min_long_side: None,
             previews: false,
         }
     }

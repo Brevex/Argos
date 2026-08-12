@@ -26,6 +26,9 @@ fn config(workers: usize) -> ScanConfig {
     ScanConfig::builder()
         .workers(NonZeroUsize::new(workers).expect("at least one worker"))
         .chunk_bytes(CHUNK)
+        // The generated fixtures are a few dozen pixels across; these tests
+        // are about the pipeline, not about which sizes reach a directory.
+        .min_long_side(0)
         .build()
         .expect("valid configuration")
 }
@@ -663,6 +666,7 @@ fn restricting_the_range_restricts_what_is_found() {
     let config = ScanConfig::builder()
         .workers(NonZeroUsize::new(2).expect("two workers"))
         .chunk_bytes(CHUNK)
+        .min_long_side(0)
         .range(argos_core::geometry::ByteOffset::new(CHUNK as u64)..)
         .stages(Stages {
             filesystem: false,
@@ -836,5 +840,5 @@ fn a_medium_of_noise_costs_reassembly_nothing() {
 
     assert!(artifacts.is_empty());
     assert_eq!(report.reassembly_attempted, 0);
-    assert!(!report.reassembly_budget_exhausted);
+    assert!(!report.ceilings.reassembly_decodes);
 }

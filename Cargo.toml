@@ -29,8 +29,6 @@ argos_ipc = { path = "crates/argos_ipc", version = "0.1.0" }
 argos_report = { path = "crates/argos_report", version = "0.1.0" }
 
 anyhow = "1"
-candle-core = { version = "0.11", default-features = false }
-candle-nn = { version = "0.11", default-features = false }
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

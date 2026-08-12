@@ -147,22 +147,30 @@ that is the documented boundary.
 
 ## 6. The shell, against a real device
 
-The window never runs elevated. It spawns `argos serve` and speaks JSON-RPC to
-it, and asking for privileges is only a choice about how that child is
-started. Which means this step is about one thing: whether the elevated child
-can still be talked to.
+The application asks for administrator privileges before it draws anything, on
+every platform, and the engine it spawns inherits them. There is no toggle in
+the window: this step is about whether the prompt arrives, whether the window
+survives running elevated, and whether what comes back belongs to you.
 
-- [ ] Launch the shell, tick "raise privileges", and start the engine. On
-      Linux the desktop's authentication agent should prompt, and the engine
-      should connect afterwards.
-- [ ] **Windows and macOS are expected to refuse here, with an explanation.**
-      Both elevate through a shell verb — `ShellExecuteW` with `runas`,
-      `osascript … with administrator privileges` — that does not give the
-      caller the child's pipes, so there is nothing to speak JSON-RPC over.
-      What must be true is that the refusal *says so* and points at
-      `argos scan` from an elevated terminal. A hang, a silent failure, or an
-      engine that connects and then reports an empty medium because it is
-      running unprivileged are all bugs.
+- [ ] **The prompt comes first.** Open Argos from the desktop menu. The
+      administrator prompt appears **before** any window — polkit on Linux
+      naming Argos rather than `/usr/bin/argos-shell`, UAC on Windows, the
+      macOS authentication panel. No window is drawn until it is answered.
+- [ ] **The window draws afterwards.** This is the failure to look for on
+      Linux and macOS, where the web view itself now runs as root: a blank
+      window, a missing window, or a second copy in the Dock or the task
+      switcher are all bugs.
+- [ ] **Declining opens nothing**, and says why — a dialog, not silence.
+- [ ] **A scan of a raw device reports a non-zero medium.** An engine that
+      connects and then reports an empty medium because it is running
+      unprivileged is a bug, not an empty disk.
+- [ ] **The destination folder opens at your home**, not at the
+      administrator's.
+- [ ] **What was recovered belongs to you.** `ls -l` the destination
+      afterwards: the artifacts and `manifest.json` carry your account, not
+      `root`. On a destination that cannot represent ownership — an exFAT
+      stick, a mounted Windows volume — the scan says so in a warning at the
+      *start*, and the files are usable there anyway.
 - [ ] Without elevation, scanning a raw **image file** works in the shell on
       all three platforms. This is the path that does not depend on any of the
       above.

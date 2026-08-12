@@ -55,13 +55,13 @@
   /**
    * Connects to the engine and lists what this machine has.
    *
-   * Not elevated: enumeration needs no privileges anywhere, and asking for
-   * them before the user has chosen anything would be asking for more than the
-   * work in front of them needs.
+   * The engine runs with the privileges this window already holds, so what is
+   * listed here is what a scan will actually be able to read. There is no
+   * unprivileged mode to end up in by accident.
    */
   async function connect(): Promise<void> {
     try {
-      await ipc.connect(false);
+      await ipc.connect();
       await refresh();
     } catch (err) {
       session.problem = String(err);
@@ -111,13 +111,13 @@
         carving: true,
         reassembly: true,
         triage: true,
-        // Icons, sprites and UI chrome are the bulk of what a system disk
-        // gives back, and they are not what anyone is looking for. They are
-        // still examined, hashed and recorded in the manifest with their
-        // extents — what changes is that their bytes do not fill the
-        // destination folder. This is the same run as
-        // `argos scan … --exclude-assets`.
-        excludeAssets: true,
+        // The engine's own floor, not a number this window invented: a used
+        // disk holds far more cache entries and icons than photographs, and
+        // they are small. Everything under it is still examined, hashed and
+        // recorded with its extents and dimensions — what changes is that it
+        // does not fill the destination folder. This is the same run as
+        // `argos scan … ` with no `--min-long-side` given.
+        minLongSide: null,
         previews: false,
       });
       session.begin(started.source);
@@ -146,7 +146,7 @@
   }
 
   onMount(() => {
-    void apply(remembered());
+    void remembered().then(apply);
 
     let unlisten: (() => void) | undefined;
     void subscribe().then((stop) => {

@@ -31,6 +31,7 @@ pub mod config;
 pub mod finding;
 
 mod annotate;
+mod cache_run;
 mod error;
 mod merge;
 mod pipeline;
@@ -43,9 +44,10 @@ pub use annotate::TriageOutcome;
 /// The filesystem vocabulary a [`ScanReport`] speaks, re-exported so callers
 /// need no direct dependency on `argos_fs` (`M-FOREIGN-REEXPORTS`).
 pub use argos_fs::{FsKind, Origin, Volume};
-pub use config::{ScanConfig, ScanConfigBuilder, Stages};
+pub use cache_run::CacheRun;
+pub use config::{DEFAULT_MIN_LONG_SIDE, ScanConfig, ScanConfigBuilder, Stages};
 pub use error::ScanError;
-pub use finding::{Finding, ScanReport};
+pub use finding::{Ceilings, Finding, ScanReport};
 pub use session::{Medium, ScanSession};
 
 /// Merges findings the way a scan does, for tests that need to drive the

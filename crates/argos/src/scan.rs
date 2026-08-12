@@ -29,10 +29,10 @@ pub struct Options {
     pub stages: Stages,
     /// Whether to label artifacts photograph vs synthetic asset.
     pub triage: bool,
-    /// Whether to leave artifacts labelled a synthetic asset unwritten. They
-    /// are recorded either way (`A-TRIAGE-NOT-VERDICT`, and the exception a
-    /// caller has to ask for by name).
-    pub exclude_assets: bool,
+    /// Smallest long side, in pixels, an artifact is written for. `None`
+    /// takes the engine's default; zero writes everything. Whatever is not
+    /// written is recorded either way (`A-TRIAGE-NOT-VERDICT`).
+    pub min_long_side: Option<u32>,
     /// Whether to render a preview of every artifact that decodes.
     pub previews: bool,
 }
@@ -93,7 +93,11 @@ where
 
     let mut config = ScanConfig::builder()
         .stages(options.stages)
-        .exclude_assets(options.exclude_assets)
+        .min_long_side(
+            options
+                .min_long_side
+                .unwrap_or(argos_engine::DEFAULT_MIN_LONG_SIDE),
+        )
         .previews(options.previews);
     if let Some(jobs) = options.jobs {
         config = config.workers(jobs);
@@ -105,8 +109,28 @@ where
     let description = opened.describe();
     let medium = Medium::new(opened.views, opened.len).context("cannot read the source")?;
 
-    let mut store = argos_report::Store::create(out)
+    let owner = crate::invoker::owner();
+    let mut store = argos_report::Store::create(out, owner)
         .with_context(|| format!("cannot prepare output directory {}", out.display()))?;
+    // Said before the scan rather than after it: a person who learns at the
+    // end of a four-hour run that the results belong to root learns it too
+    // late to choose a different destination.
+    if let argos_report::Handback::Refused(reason) = store.handback() {
+        notice.warning(reason);
+    }
+
+    // The run's own account, next to what it recovers. A scan that has to be
+    // killed leaves nothing else behind to say where it was.
+    let log = crate::scanlog::ScanLog::create(out, owner)
+        .with_context(|| format!("cannot open the scan log in {}", out.display()))?;
+    log.line(&format!(
+        "source         {description}, {} workers",
+        config.workers()
+    ));
+    let progress = &crate::scanlog::Tee {
+        inner: progress,
+        log: &log,
+    };
 
     notice.opened(&description, config.workers().get());
     if !opened.expects_content {
@@ -149,6 +173,12 @@ where
     // (A-TRIAGE-NOT-VERDICT).
     if let Some(report) = report {
         store.annotate_triage(&annotations(report));
+        let runs: Vec<(String, u32)> = report
+            .cache_runs
+            .iter()
+            .map(|run| (run.sha256.to_string(), run.neighbours))
+            .collect();
+        store.annotate_same_size_runs(&runs);
     }
     let triage_record = report.map(|report| triage_record(report, triage_disabled.as_deref()));
     let manifest = store
@@ -161,6 +191,10 @@ where
             triage: triage_record.as_ref(),
         })
         .context("cannot write manifest")?;
+    match report {
+        Some(report) => log.summary(report),
+        None => log.line("scan failed before it could report"),
+    }
 
     Ok(Finished {
         report: outcome.ok(),

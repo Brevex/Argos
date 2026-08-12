@@ -229,6 +229,9 @@ fn a_scan_over_the_wire_recovers_exactly_what_the_command_line_does() {
         .arg("--out")
         .arg(&cli_out)
         .arg("--previews")
+        // Both legs run the same settings, floor included: the point of this
+        // test is that the wire and the command line recover the same thing.
+        .args(["--min-long-side", "0"])
         .output()
         .expect("run argos scan");
     assert!(
@@ -246,7 +249,7 @@ fn a_scan_over_the_wire_recovers_exactly_what_the_command_line_does() {
         &serde_json::json!({
             "source": image, "out": rpc_out,
             "filesystem": true, "carving": true, "reassembly": true,
-            "triage": true, "previews": true,
+            "triage": true, "minLongSide": 0, "previews": true,
         }),
     );
     assert!(started["result"]["source"].is_string(), "{started}");
@@ -346,7 +349,7 @@ fn results_and_export_read_a_session_the_scan_already_wrote() {
         &serde_json::json!({
             "source": image, "out": session,
             "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "previews": true,
+            "triage": false, "minLongSide": 0, "previews": true,
         }),
     );
     engine.drain_until_finished();
@@ -385,7 +388,7 @@ fn a_scan_that_cannot_open_its_source_fails_the_call_rather_than_the_process() {
             "source": dir.path().join("there-is-no-such-image.img"),
             "out": dir.path().join("out"),
             "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "previews": false,
+            "triage": false, "minLongSide": 0, "previews": false,
         }),
     );
     assert_eq!(refused["error"]["code"], -32002, "{refused}");
@@ -410,7 +413,7 @@ fn cancelling_over_the_wire_still_leaves_a_manifest_behind() {
         &serde_json::json!({
             "source": image, "out": session,
             "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "previews": false,
+            "triage": false, "minLongSide": 0, "previews": false,
         }),
     );
     let cancelled = engine.call("scan.cancel", &serde_json::json!(null));
@@ -448,7 +451,7 @@ fn a_client_that_disappears_mid_scan_still_leaves_a_manifest() {
         &serde_json::json!({
             "source": image, "out": session,
             "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "previews": false,
+            "triage": false, "minLongSide": 0, "previews": false,
         }),
     );
 
@@ -508,7 +511,7 @@ fn a_client_is_never_asked_to_keep_up_with_the_report_stage() {
         &serde_json::json!({
             "source": image, "out": session,
             "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "previews": false,
+            "triage": false, "minLongSide": 0, "previews": false,
         }),
     );
 
@@ -569,7 +572,7 @@ fn the_final_account_never_reports_an_unwritten_artifact_as_recovered() {
         &serde_json::json!({
             "source": image, "out": session,
             "filesystem": true, "carving": true, "reassembly": true,
-            "triage": true, "excludeAssets": true, "previews": false,
+            "triage": true, "minLongSide": 300, "previews": false,
         }),
     );
     let (_, summary) = engine.drain_until_finished();

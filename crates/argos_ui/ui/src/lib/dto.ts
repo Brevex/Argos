@@ -274,10 +274,12 @@ reassembly: boolean,
  */
 triage: boolean, 
 /**
- * Leave artifacts labelled a synthetic asset unwritten. They are
- * still examined, hashed and recorded with their extents.
+ * Smallest long side, in pixels, an image is written to disk for.
+ * Absent takes the engine's default; zero writes everything.
+ * Whatever is not written is still examined, hashed and recorded
+ * with its extents and its dimensions.
  */
-excludeAssets: boolean, 
+minLongSide: number | null, 
 /**
  * Render a preview of every artifact that decodes.
  */

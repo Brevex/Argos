@@ -7,11 +7,12 @@
  * middle of a running scan.
  */
 
+import * as ipc from '../lib/ipc';
 import type { ThemeIcon, ThemeModule } from './contract';
 import { DEFAULT_THEME, loadTheme } from './index';
 
-/** Where the theme choice is remembered. A view preference, nothing more. */
-const STORAGE_KEY = 'argos.theme';
+/** The key inside the stored preferences. A view preference, nothing more. */
+const STORAGE_KEY = 'theme';
 
 class Active {
   /** The module in force, or `null` before the first one has loaded. */
@@ -45,19 +46,27 @@ export async function apply(id: string): Promise<void> {
   }
   root.style.colorScheme = module.scheme;
   active.module = module;
-  try {
-    localStorage.setItem(STORAGE_KEY, module.id);
-  } catch {
-    // A window that cannot persist a preference still has to render.
-  }
+  // Stored where the person who opened Argos can find it. A window that cannot
+  // persist a preference still has to render, so this is never awaited into a
+  // failure path.
+  void ipc
+    .preferencesWrite(JSON.stringify({ [STORAGE_KEY]: module.id }))
+    .catch(() => undefined);
 }
 
 /** The theme to open with: the one last chosen, or the default. */
-export function remembered(): string {
+export async function remembered(): Promise<string> {
+  const text = await ipc.preferencesRead().catch(() => '');
+  if (text === '') return DEFAULT_THEME;
   try {
-    return localStorage.getItem(STORAGE_KEY) ?? DEFAULT_THEME;
+    const stored: unknown = JSON.parse(text);
+    const theme =
+      typeof stored === 'object' && stored !== null
+        ? (stored as Record<string, unknown>)[STORAGE_KEY]
+        : undefined;
+    return typeof theme === 'string' ? theme : DEFAULT_THEME;
   } catch {
-    // Ignored: the default is a working theme.
+    // A file someone edited by hand into nonsense is not a reason not to draw.
     return DEFAULT_THEME;
   }
 }

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -56,8 +56,9 @@ pub struct Engine {
 impl Engine {
     /// Spawns the engine and completes the handshake.
     ///
-    /// `elevated` asks the operating system to run it with the privileges a
-    /// raw device needs. The shell process itself is never elevated.
+    /// The child inherits this process' privileges, which are the ones a raw
+    /// device needs: `crate::elevate` established them before any window was
+    /// drawn. There is no unprivileged path to choose between.
     ///
     /// # Errors
     ///
@@ -65,15 +66,9 @@ impl Engine {
     /// be taken, or when the handshake does not agree on
     /// [`SCHEMA_VERSION`] — which is a hard stop, not a warning: two processes
     /// that disagree about the wire format cannot safely exchange anything.
-    pub fn connect(app: &AppHandle, elevated: bool) -> Result<Self, String> {
+    pub fn connect(app: &AppHandle) -> Result<Self, String> {
         let binary = locate()?;
-        let mut command = if elevated {
-            elevate::command(&binary)?
-        } else {
-            let mut command = Command::new(&binary);
-            command.arg("serve");
-            command
-        };
+        let mut command = elevate::engine(&binary);
 
         let mut child = command
             .stdin(Stdio::piped())

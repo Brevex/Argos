@@ -28,7 +28,7 @@ use std::thread;
 use argos_carve::reassemble::{self, Broken};
 use argos_carve::{Candidate, Detector, Scratch, Verdict};
 use argos_core::artifact::{Artifact, ArtifactSink, Digest};
-use argos_core::classify::{Classifier, TriageLabel};
+use argos_core::classify::Classifier;
 use argos_core::geometry::{ByteOffset, ByteRange};
 use argos_core::progress::{ProgressSink, ScanEvent, Unit};
 use argos_core::{Confidence, Format, Stage};
@@ -193,20 +193,19 @@ where
     }
 
     merge::consolidate(&mut findings, &report.unreadable);
-    // Screening happens inside the report stage or not at all: whether to
-    // write an artifact has to be settled before it is written. It borrows the
-    // classifier for the length of that stage and hands it back.
-    let mut classifier = classifier;
-    let screen = screen_for(config, classifier.as_deref_mut());
+    // The size floor is applied inside the report stage or not at all: whether
+    // to write an artifact has to be settled before it is written.
     let emitted = emit(
         control,
         &mut views,
         &findings,
         sink,
-        screen,
+        config.min_long_side(),
         progress,
         &mut report,
     )?;
+
+    report.cache_runs = same_size_runs(&emitted);
 
     // Annotation runs last, over artifacts already persisted and recorded:
     // previews and triage labels describe them and can no longer change what
@@ -230,6 +229,23 @@ where
         );
     }
     Ok(report)
+}
+
+/// What the medium's layout says about the artifacts just written.
+///
+/// A run of same-sized neighbours is a thumbnail cache, and naming it is what
+/// stops a report from presenting a preview of a lost photograph as the
+/// photograph.
+fn same_size_runs(emitted: &[crate::annotate::Emitted]) -> Vec<crate::cache_run::CacheRun> {
+    let entries: Vec<_> = emitted
+        .iter()
+        .map(|item| crate::cache_run::Entry {
+            offset: item.offset,
+            pixels: item.pixels,
+            sha256: item.sha256,
+        })
+        .collect();
+    crate::cache_run::runs(&entries)
 }
 
 /// The byte span a scan covers, and the medium it sits in.
@@ -363,7 +379,7 @@ where
     swept.candidates.sort_unstable();
     swept.candidates.dedup();
     swept.residue.normalize();
-    report.detection_truncated = swept.truncated;
+    report.ceilings.detection = swept.truncated;
     progress.emit(ScanEvent::StageFinished {
         stage: Stage::Carve,
         findings: swept.candidates.len() as u64,
@@ -850,6 +866,15 @@ const REASSEMBLY_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 /// Blocks the graph walk may consider at once.
 const MAX_REASSEMBLY_BLOCKS: usize = 1 << 16;
 
+/// Bytes the graph walk may classify before it stops looking.
+///
+/// This bounds the *work*, which [`MAX_REASSEMBLY_BLOCKS`] does not: that caps
+/// the blocks kept, and a medium whose windows hold almost nothing image-like
+/// fills it never, so without this the pass reads until the windows run out.
+/// Merged windows are read sequentially, so this is a bound in seconds on any
+/// medium rather than a bound in blocks that depends on what is on it.
+const MAX_CLASSIFY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Bytes read per request while classifying a window.
 const CLASSIFY_READ_BYTES: usize = 1024 * 1024;
 
@@ -872,10 +897,22 @@ fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
     progress: &P,
     report: &mut ScanReport,
 ) -> Vec<Finding> {
-    let counter = Counter::start(progress, Stage::Reassembly, broken.len() as u64);
     let Some(view) = views.first_mut() else {
         return Vec::new();
     };
+    // The stage's three phases are counted together, because they are one
+    // stage on screen. The total is an upper bound — the walk only sees what
+    // the gap search left — and `StageFinished` settles the bar at the end. A
+    // total that is too large costs a bar that stops short; no total at all
+    // costs a window that looks hung, which is what this stage did.
+    let runs = merged_windows(broken, medium_len);
+    let counter = Counter::start(
+        progress,
+        Stage::Reassembly,
+        (broken.len() as u64)
+            .saturating_add(runs.len() as u64)
+            .saturating_add(broken.len() as u64),
+    );
     let mut scratch = Scratch::new();
     let mut found = Vec::new();
     let mut spent = 0_u32;
@@ -892,7 +929,7 @@ fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
         }
         report.reassembly_attempted = report.reassembly_attempted.saturating_add(1);
         if spent >= crate::config::REASSEMBLY_BUDGET {
-            report.reassembly_budget_exhausted = true;
+            report.ceilings.reassembly_decodes = true;
             return found;
         }
         let limits = reassemble::Limits {
@@ -918,34 +955,56 @@ fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
     }
 
     if unresolved.is_empty() || spent >= crate::config::REASSEMBLY_BUDGET {
-        report.reassembly_budget_exhausted |= spent >= crate::config::REASSEMBLY_BUDGET;
+        report.ceilings.reassembly_decodes |= spent >= crate::config::REASSEMBLY_BUDGET;
         return found;
     }
 
-    let blocks = classify_windows(view, &unresolved, medium_len);
-    let limits = reassemble::Limits {
-        max_hypotheses: reassemble::MAX_HYPOTHESES.min(crate::config::REASSEMBLY_BUDGET - spent),
-        ..reassemble::Limits::default()
-    };
-    if let Ok(assembled) = reassemble::parallel_unique_path(
-        view,
-        &unresolved,
-        &blocks,
-        &spoken_for,
-        medium_len,
-        limits,
-        &mut scratch,
-    ) {
-        for (candidate, reassembly) in assembled {
-            report.reassembled = report.reassembled.saturating_add(1);
-            found.push(finding_from_reassembly(candidate, &reassembly));
+    let blocks = classify_windows(control, view, &runs, &counter, report);
+
+    // One header at a time, so the stage can say how far it has got and can be
+    // stopped. The extents a completed path claims are carried into the next
+    // header's call, which is what keeps two paths from reporting the same
+    // bytes as two files (A-PROVENANCE) — the property the walk would
+    // otherwise get from holding every header at once.
+    for &candidate in &unresolved {
+        if control.is_cancelled() {
+            return found;
         }
+        if spent >= crate::config::REASSEMBLY_BUDGET {
+            report.ceilings.reassembly_decodes = true;
+            return found;
+        }
+        let limits = reassemble::Limits {
+            max_hypotheses: reassemble::MAX_HYPOTHESES
+                .min(crate::config::REASSEMBLY_BUDGET - spent),
+            ..reassemble::Limits::default()
+        };
+        match reassemble::parallel_unique_path(
+            view,
+            std::slice::from_ref(&candidate),
+            &blocks,
+            &spoken_for,
+            medium_len,
+            limits,
+            &mut scratch,
+        ) {
+            Ok(assembled) if !assembled.is_empty() => {
+                for (header, reassembly) in assembled {
+                    spent = spent.saturating_add(reassembly.hypotheses);
+                    report.reassembled = report.reassembled.saturating_add(1);
+                    spoken_for.extend_from_slice(&reassembly.extents);
+                    found.push(finding_from_reassembly(header, &reassembly));
+                }
+            }
+            // Assembled nothing, or could not be read. The search happened
+            // either way, and charging the whole of it is what stops a medium
+            // of false headers from spending the budget as if nothing had been
+            // tried.
+            _ => spent = spent.saturating_add(limits.max_hypotheses),
+        }
+        counter.step();
     }
-    // The walk shares one budget across every header it was given, so the
-    // whole of it is charged here. Saying the run covered everything while a
-    // search was cut short would overstate what was looked at.
-    report.reassembly_budget_exhausted |=
-        spent.saturating_add(limits.max_hypotheses) >= crate::config::REASSEMBLY_BUDGET;
+    report.ceilings.reassembly_decodes |= spent >= crate::config::REASSEMBLY_BUDGET;
     found
 }
 
@@ -955,61 +1014,104 @@ fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
 /// the rest of the pipeline reads: a block-at-a-time seek and read would issue
 /// thousands of syscalls per candidate, which is the one thing that outweighs
 /// every other cost in a scan (`M-THROUGHPUT`).
-fn classify_windows<V: Read + Seek>(
+fn classify_windows<V: Read + Seek, P: ProgressSink + ?Sized>(
+    control: &Control,
     view: &mut V,
-    broken: &[Broken],
-    medium_len: u64,
+    runs: &[ByteRange],
+    counter: &Counter<'_, P>,
+    report: &mut ScanReport,
 ) -> Vec<reassemble::Candidate> {
     let block = argos_carve::classify::BLOCK_BYTES;
     let mut blocks: Vec<reassemble::Candidate> = Vec::new();
     let mut window = vec![0_u8; CLASSIFY_READ_BYTES];
-    let mut seen: HashSet<u64> = HashSet::new();
+    let mut budget = MAX_CLASSIFY_BYTES;
 
-    for candidate in broken {
-        let centre = candidate.header.get();
-        let from = centre.saturating_sub(REASSEMBLY_WINDOW_BYTES);
-        let from = from - (from % block as u64);
-        let to = centre
-            .saturating_add(REASSEMBLY_WINDOW_BYTES)
-            .min(medium_len);
-
-        let mut at = from;
+    for run in runs {
+        if control.is_cancelled() {
+            return blocks;
+        }
+        let to = run.end_saturating().get();
+        let mut at = run.start.get();
         while at + block as u64 <= to {
-            if blocks.len() >= MAX_REASSEMBLY_BLOCKS {
+            if blocks.len() >= MAX_REASSEMBLY_BLOCKS || budget == 0 {
+                report.ceilings.reassembly_search = true;
                 return blocks;
             }
-            let want = usize::try_from((to - at).min(CLASSIFY_READ_BYTES as u64))
+            if control.is_cancelled() {
+                return blocks;
+            }
+            let want = usize::try_from((to - at).min(CLASSIFY_READ_BYTES as u64).min(budget))
                 .unwrap_or(CLASSIFY_READ_BYTES);
             let whole = want - (want % block);
             if whole == 0 {
                 break;
             }
+            budget = budget.saturating_sub(whole as u64);
             if read_exact_at(view, at, &mut window[..whole]).is_err() {
-                // Unreadable here; skip the piece rather than the window.
+                // Unreadable here; skip the piece rather than the run.
                 at = at.saturating_add(whole as u64);
                 continue;
             }
             for (index, chunk) in window[..whole].chunks_exact(block).enumerate() {
-                let start = at.saturating_add((index * block) as u64);
-                if !seen.insert(start) {
-                    continue;
-                }
                 let profile = argos_carve::classify::classify(chunk);
                 if profile.class.can_hold_image_data() {
                     if blocks.len() >= MAX_REASSEMBLY_BLOCKS {
+                        report.ceilings.reassembly_search = true;
                         return blocks;
                     }
                     blocks.push(reassemble::Candidate {
-                        start: ByteOffset::new(start),
+                        start: ByteOffset::new(at.saturating_add((index * block) as u64)),
                         profile,
                     });
                 }
             }
             at = at.saturating_add(whole as u64);
         }
+        counter.step();
     }
-    blocks.sort_unstable_by_key(|entry| entry.start);
     blocks
+}
+
+/// The medium regions the graph walk will look at, merged and in order.
+///
+/// Fragmentation points cluster: in one scan of a mechanical disk, 203
+/// candidates fell inside eight megabytes of each other. Reading a window per
+/// candidate therefore reads the same bytes once per candidate — hundreds of
+/// gigabytes of seeking to classify a few, which is how this stage came to run
+/// for hours and report nothing.
+///
+/// Merging first makes each block read exactly once, in medium order, which is
+/// also what removes the need to remember which blocks have already been seen:
+/// the walk cannot revisit one.
+fn merged_windows(broken: &[Broken], medium_len: u64) -> Vec<ByteRange> {
+    let block = argos_carve::classify::BLOCK_BYTES as u64;
+    let mut spans: Vec<(u64, u64)> = broken
+        .iter()
+        .filter_map(|candidate| {
+            let centre = candidate.header.get();
+            let from = centre.saturating_sub(REASSEMBLY_WINDOW_BYTES);
+            let from = from - (from % block);
+            let to = centre
+                .saturating_add(REASSEMBLY_WINDOW_BYTES)
+                .min(medium_len);
+            (to > from + block).then_some((from, to))
+        })
+        .collect();
+    spans.sort_unstable();
+
+    let mut merged: Vec<ByteRange> = Vec::with_capacity(spans.len());
+    for (from, to) in spans {
+        match merged.last_mut() {
+            // Touching or overlapping the previous run: extend it rather than
+            // starting another, so the read stays one sequential pass.
+            Some(last) if from <= last.end_saturating().get() => {
+                let end = last.end_saturating().get().max(to);
+                *last = ByteRange::new(last.start, end - last.start.get());
+            }
+            _ => merged.push(ByteRange::new(ByteOffset::new(from), to - from)),
+        }
+    }
+    merged
 }
 
 /// Turns a confirmed reassembly into a finding.
@@ -1032,33 +1134,35 @@ fn finding_from_reassembly(broken: Broken, reassembly: &reassemble::Reassembly) 
     }
 }
 
-/// Decides, before an artifact is written, whether the run was asked to leave
-/// it out.
+/// Measures an artifact's picture before the run decides whether to write it.
 ///
-/// Only ever reached when a caller passed `--exclude-assets`; a scan that
-/// stores everything never constructs one. It reads the artifact back and
-/// decodes it, which is the same work the annotation pass does — so a run that
-/// screens pays for the decode once here instead of once there.
-pub(crate) struct Screen<'a, C> {
-    /// The classifier whose label decides. It labels; the decision to act on
-    /// the label is the caller's, and it is stated in the manifest.
-    pub classifier: &'a mut C,
-    /// Scratch for reading an artifact back.
-    pub buf: Vec<u8>,
+/// The dimensions are the only property of a recovered image that is both
+/// cheap to establish and impossible to argue with, and they are what
+/// separates a photograph from the thumbnail caches that dominate a used disk.
+/// The decode also feeds the manifest, so a reader can tell the two apart
+/// without opening a single file.
+///
+/// A triage label decided this once, and could not: measured against real
+/// media its rules call 4128x3096 camera frames ambiguous and 258x258 cache
+/// entries photographs. A label that unreliable must not choose what reaches
+/// the output directory (`A-TRIAGE-NOT-VERDICT`).
+pub(crate) struct Measure {
+    /// Scratch for reading an artifact back, reused across findings.
+    buf: Vec<u8>,
 }
 
-impl<C: Classifier> Screen<'_, C> {
-    /// The reason to omit an artifact, or `None` to store it.
+impl Measure {
+    /// The artifact's pixel dimensions, or `None` when it does not decode.
     ///
-    /// `None` for anything that cannot be decoded within bounds or that the
-    /// rules did not settle as an asset. An artifact this cannot judge is
-    /// stored: an unclear label must never cost evidence.
-    fn asset_label<V: Read + Seek>(
+    /// `None` is not a verdict: an artifact whose picture cannot be measured
+    /// is written, because a decoder that gave up is not evidence that the
+    /// bytes are worthless.
+    fn dimensions<V: Read + Seek>(
         &mut self,
         view: &mut V,
         finding: &Finding,
         sha256: Digest,
-    ) -> Option<argos_core::classify::TriageScore> {
+    ) -> Option<(u32, u32)> {
         let length = usize::try_from(finding.length()).ok()?;
         if length > argos_carve::decode::MAX_DECODE_BYTES {
             return None;
@@ -1074,27 +1178,16 @@ impl<C: Classifier> Screen<'_, C> {
             return None;
         }
         let image = argos_carve::decode::decode_rgba(finding.format, &self.buf)?;
-        let score = self.classifier.score(&image).ok().flatten()?;
-        (score.label == TriageLabel::SyntheticAsset).then_some(score)
+        Some((image.width(), image.height()))
     }
 }
 
-/// The asset screen for this run, when one was asked for and there is a
-/// classifier to answer with.
+/// Whether `dimensions` clear the floor this run was given.
 ///
-/// Both conditions, because either alone decides nothing: a run that did not
-/// ask keeps everything, and a run with no classifier has nothing to ask.
-fn screen_for<'a, C: Classifier>(
-    config: &ScanConfig,
-    classifier: Option<&'a mut C>,
-) -> Option<Screen<'a, C>> {
-    match (config.exclude_assets(), classifier) {
-        (true, Some(classifier)) => Some(Screen {
-            classifier,
-            buf: Vec::new(),
-        }),
-        _ => None,
-    }
+/// An artifact that could not be measured clears it: the floor exists to keep
+/// caches of small pictures out of the directory, not to punish a decoder.
+fn clears_floor(dimensions: Option<(u32, u32)>, floor: u32) -> bool {
+    dimensions.is_none_or(|(width, height)| width.max(height) >= floor)
 }
 
 /// Hashes every finding in medium order and hands the survivors to the sink.
@@ -1103,12 +1196,12 @@ fn screen_for<'a, C: Classifier>(
 /// appear in the manifest, and that order must not depend on how many workers
 /// the machine had. Returns what was actually persisted, which is what the
 /// triage stage is allowed to see.
-fn emit<V, S, P, C>(
+fn emit<V, S, P>(
     control: &Control,
     views: &mut [V],
     findings: &[Finding],
     sink: &mut S,
-    screen: Option<Screen<'_, C>>,
+    min_long_side: u32,
     progress: &P,
     report: &mut ScanReport,
 ) -> Result<Vec<crate::annotate::Emitted>, ScanError>
@@ -1116,7 +1209,6 @@ where
     V: Read + Seek,
     S: ArtifactSink,
     P: ProgressSink + ?Sized,
-    C: Classifier,
 {
     let mut emitted = Vec::new();
     let Some(view) = views.first_mut() else {
@@ -1141,7 +1233,8 @@ where
 
     let mut writer = Writing {
         sink,
-        screen,
+        measure: Measure { buf: Vec::new() },
+        min_long_side,
         seen: HashSet::with_capacity(findings.len()),
         buf: vec![0_u8; STREAM_CHUNK_BYTES],
         stored_bytes: 0,
@@ -1178,9 +1271,11 @@ where
 }
 
 /// What the writing stage carries from one finding to the next.
-struct Writing<'a, S, C> {
+struct Writing<'a, S> {
     sink: &'a mut S,
-    screen: Option<Screen<'a, C>>,
+    /// What measures each artifact's picture, and the floor it must clear.
+    measure: Measure,
+    min_long_side: u32,
     /// Digests already stored, so one file recovered twice is stored once.
     seen: HashSet<Digest>,
     /// Working memory for the hashing read, reused by every finding.
@@ -1189,7 +1284,7 @@ struct Writing<'a, S, C> {
     stored_bytes: u64,
 }
 
-impl<S: ArtifactSink, C: Classifier> Writing<'_, S, C> {
+impl<S: ArtifactSink> Writing<'_, S> {
     /// Settles one finding: stores it, records it unwritten, or drops it.
     ///
     /// `Ok(None)` means nothing was stored, and the counter in `report` says
@@ -1235,22 +1330,18 @@ impl<S: ArtifactSink, C: Classifier> Writing<'_, S, C> {
             recovered_name: finding.name.as_deref(),
             source_object: finding.source_object,
             parent: finding.parent,
+            // The picture is measured before anything is written, because that
+            // is the decision below: an image too small to be a photograph
+            // stays out of the directory. It is recorded either way, with its
+            // dimensions, so the manifest describes the medium whole even when
+            // the directory does not, and the extents locate the bytes exactly
+            // for a rerun with a lower floor.
+            pixels: self.measure.dimensions(view, finding, sha256),
         };
-
-        // A run may be asked to leave synthetic assets unwritten. The label is
-        // decided here rather than in the annotation pass because a decision
-        // about *whether to write* has to happen before the write — and the
-        // artifact is recorded either way, so the manifest describes the medium
-        // whole even when the directory does not.
-        if let Some(screen) = self.screen.as_mut()
-            && let Some(score) = screen.asset_label(view, finding, sha256)
-        {
+        let dimensions = artifact.pixels;
+        if !clears_floor(dimensions, self.min_long_side) {
             self.sink
-                .omit(
-                    &artifact,
-                    &score.label.to_string(),
-                    &score.decided_by.to_string(),
-                )
+                .omit(&artifact, "below-size-floor")
                 .map_err(ScanError::sink)?;
             report.omitted_assets = report.omitted_assets.saturating_add(1);
             return Ok(None);
@@ -1278,6 +1369,8 @@ impl<S: ArtifactSink, C: Classifier> Writing<'_, S, C> {
         Ok(Some(crate::annotate::Emitted {
             finding: index,
             sha256,
+            offset: finding.start().get(),
+            pixels: dimensions,
         }))
     }
 }
@@ -1456,5 +1549,88 @@ impl<V: Read + Seek> Seek for ExtentReader<'_, V> {
 
     fn stream_position(&mut self) -> std::io::Result<u64> {
         Ok(self.assembled_position())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use argos_core::Format;
+    use argos_core::geometry::ByteOffset;
+
+    use super::{Broken, REASSEMBLY_WINDOW_BYTES, merged_windows};
+
+    fn broken_at(offset: u64) -> Broken {
+        Broken {
+            header: ByteOffset::new(offset),
+            break_at: ByteOffset::new(offset + 4096),
+            format: Format::Jpeg,
+        }
+    }
+
+    #[test]
+    fn clustered_headers_are_read_once_instead_of_once_each() {
+        // The measured shape of a real medium: 203 fragmentation points inside
+        // eight megabytes. A window each would read the same bytes 203 times,
+        // which is what turned this stage into an overnight job.
+        let medium = 1 << 40;
+        let base = 100 * 1024 * 1024;
+        let broken: Vec<_> = (0..203)
+            .map(|index| broken_at(base + index * 40 * 1024))
+            .collect();
+
+        let runs = merged_windows(&broken, medium);
+
+        assert_eq!(
+            runs.len(),
+            1,
+            "one cluster is one sequential read: {runs:?}"
+        );
+        let read: u64 = runs.iter().map(|run| run.len).sum();
+        let separate = broken.len() as u64 * 2 * REASSEMBLY_WINDOW_BYTES;
+        assert!(
+            read * 5 < separate,
+            "merging must collapse the work, not restate it: {read} vs {separate}"
+        );
+    }
+
+    #[test]
+    fn headers_further_apart_than_a_window_stay_separate() {
+        let medium = 1 << 40;
+        let far = 8 * REASSEMBLY_WINDOW_BYTES;
+        let runs = merged_windows(&[broken_at(far), broken_at(far * 4)], medium);
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(
+            runs[0].end_saturating().get() <= runs[1].start.get(),
+            "merged runs come out in medium order and do not overlap: {runs:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_never_runs_past_the_medium() {
+        let medium = 32 * 1024 * 1024;
+        let runs = merged_windows(&[broken_at(medium - 4096)], medium);
+        for run in &runs {
+            assert!(
+                run.end_saturating().get() <= medium,
+                "a read past the end is a read that fails: {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_block_appears_in_exactly_one_run() {
+        // The property that lets the classification pass drop the set of blocks
+        // it has already seen: runs cannot overlap, so it cannot revisit one.
+        let medium = 1 << 40;
+        let broken: Vec<_> = (0..50)
+            .map(|index| broken_at(1_000_000 + index * 3 * 1024 * 1024))
+            .collect();
+        let runs = merged_windows(&broken, medium);
+        for pair in runs.windows(2) {
+            assert!(
+                pair[0].end_saturating().get() < pair[1].start.get(),
+                "overlapping runs would classify the same block twice: {pair:?}"
+            );
+        }
     }
 }

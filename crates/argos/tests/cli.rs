@@ -24,6 +24,10 @@ fn scan_recovers_all_images_bit_identical_end_to_end() {
         .arg(&image)
         .arg("--out")
         .arg(&out)
+        // The fixtures are a few dozen pixels across on purpose, so the size
+        // floor is turned off here: this test is about what is recovered, and
+        // the floor has a test of its own.
+        .args(["--min-long-side", "0"])
         .output()
         .expect("run argos scan");
     assert!(
@@ -155,6 +159,10 @@ fn the_manifest_carries_triage_labels_and_what_decided_them() {
         .arg(&image)
         .arg("--out")
         .arg(&out)
+        // The fixtures are a few dozen pixels across on purpose, so the size
+        // floor is turned off here: this test is about what is recovered, and
+        // the floor has a test of its own.
+        .args(["--min-long-side", "0"])
         .output()
         .expect("run argos scan");
     assert!(
@@ -365,6 +373,9 @@ fn the_recovery_is_identical_on_every_platform() {
         .arg("--out")
         .arg(&out)
         .args(["--jobs", "2"])
+        // The floor is off: this fixture's images are deliberately tiny, and
+        // what is being pinned here is the recovery, not the write policy.
+        .args(["--min-long-side", "0"])
         .output()
         .expect("run argos scan");
     assert!(
@@ -395,69 +406,80 @@ fn the_recovery_is_identical_on_every_platform() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the compiled binary")]
-fn excluding_assets_leaves_them_unwritten_and_still_recorded() {
-    // The one option that lets a label decide what reaches the output
-    // directory, and the condition that keeps it defensible: what it omits, it
-    // still accounts for. A record with `written: false` describes bytes that
-    // are on the medium at the extents beside it, so the manifest remains a
-    // complete statement of what the scan found (A-TRIAGE-NOT-VERDICT).
-    // Flat blocks of a few colours with hard edges between them: an icon, and
-    // the shape every asset rule was measured against. The generator's own
-    // `png` helper draws a dithered gradient, which is genuinely unclear and
-    // would prove nothing here.
-    let icon = argos_carve::fixture::icon_png(96, 0);
-    let disk = Disk::noisy(1024 * 1024, 0x5EED_0002)
-        .with(20_000, &icon)
+fn an_image_below_the_size_floor_is_recorded_and_not_written() {
+    // What a used disk is mostly made of: small derived images. The floor is
+    // the only thing about them that is not a matter of opinion, so it is what
+    // decides — and the decision costs no evidence, because the record stays.
+    let small = argos_carve::fixture::photo_jpeg(96, 72, 0x5EED_0003);
+    let large = argos_carve::fixture::photo_jpeg(640, 480, 0x5EED_0004);
+    let disk = Disk::noisy(4 * 1024 * 1024, 0x5EED_0002)
+        .with(20_000, &small)
+        .with(600_000, &large)
         .into_bytes();
 
     let dir = tempfile::tempdir().expect("temp dir");
     let image = dir.path().join("fixture.img");
     std::fs::write(&image, &disk).expect("write fixture disk");
 
-    let run = |out: &std::path::Path, exclude: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_argos"));
-        command.arg("scan").arg(&image).arg("--out").arg(out);
-        if exclude {
-            command.arg("--exclude-assets");
-        }
-        let output = command.output().expect("run argos scan");
+    let run = |out: &std::path::Path, floor: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+            .arg("scan")
+            .arg(&image)
+            .arg("--out")
+            .arg(out)
+            .args(["--min-long-side", floor])
+            .output()
+            .expect("run argos scan");
         assert!(
             output.status.success(),
             "scan failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
-                .expect("valid json");
-        manifest
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(out.join("manifest.json")).expect("manifest"),
+        )
+        .expect("valid json")
     };
 
     let kept = dir.path().join("kept");
-    let trimmed = dir.path().join("trimmed");
-    let all = run(&kept, false);
-    let some = run(&trimmed, true);
+    let floored = dir.path().join("floored");
+    let all = run(&kept, "0");
+    let some = run(&floored, "300");
 
     let all_records = all["artifacts"].as_array().expect("artifacts");
     let some_records = some["artifacts"].as_array().expect("artifacts");
     assert!(
-        !all_records.is_empty(),
-        "the fixture must recover something"
+        all_records.len() >= 2,
+        "the fixture must recover both images: {all_records:?}"
     );
     assert_eq!(
         all_records.len(),
         some_records.len(),
-        "excluding assets must not change how many artifacts are accounted for"
+        "a floor must not change how many artifacts are accounted for"
     );
 
-    // The flat PNG is an asset by every rule there is, so this run omitted it.
+    // Every record carries the picture's size, which is what lets a reader
+    // tell a photograph from a cache entry without opening a file.
+    for record in all_records {
+        assert!(
+            record["width"].as_u64().is_some() && record["height"].as_u64().is_some(),
+            "an artifact that decoded records its dimensions: {record}"
+        );
+    }
+
     let omitted: Vec<&serde_json::Value> = some_records
         .iter()
         .filter(|record| record["written"] == serde_json::json!(false))
         .collect();
-    assert_eq!(omitted.len(), 1, "the planted icon should be the omission");
+    assert_eq!(
+        omitted.len(),
+        1,
+        "only the image under the floor should be left unwritten: {omitted:?}"
+    );
     let record = omitted[0];
-    assert_eq!(record["triage_label"], "synthetic-asset");
-    assert!(record["omitted_because"].is_string());
+    assert_eq!(record["width"], 96);
+    assert_eq!(record["height"], 72);
+    assert_eq!(record["omitted_because"], "below-size-floor");
     assert!(
         record["name"].is_null(),
         "an unwritten artifact names no file"
@@ -472,8 +494,13 @@ fn excluding_assets_leaves_them_unwritten_and_still_recorded() {
     assert!(!record["extents"].as_array().expect("extents").is_empty());
     assert!(record["length"].as_u64().is_some_and(|length| length > 0));
 
-    // And the bytes really are absent from the directory while present in the
-    // other run's.
-    assert!(kept.join("000000.png").is_file());
-    assert!(!trimmed.join("000000.png").exists());
+    // The one above the floor was written in both runs.
+    let written: Vec<&serde_json::Value> = some_records
+        .iter()
+        .filter(|record| record["written"] == serde_json::json!(true))
+        .collect();
+    assert!(
+        written.iter().any(|record| record["width"] == 640),
+        "the 640x480 image belongs in the directory: {written:?}"
+    );
 }

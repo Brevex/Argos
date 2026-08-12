@@ -127,6 +127,40 @@ impl fmt::Debug for Finding {
     }
 }
 
+/// The bounds a run reached, each meaning it looked at less than it set out to.
+///
+/// Every one of these is a deliberate limit on how long a stage may take, and
+/// every one of them is reported rather than applied quietly: a scan that
+/// stopped early and said nothing would be telling its reader the medium held
+/// no more, which is a different claim entirely (A-CONFIDENCE-HONEST).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ceilings {
+    /// Reassembly ran out of its decode budget, so candidates were left
+    /// untried.
+    pub reassembly_decodes: bool,
+    /// The block search stopped at its byte ceiling before it had looked at
+    /// every region around a fragmentation point. About how much was *read*,
+    /// where the decode budget is about how much was tried.
+    pub reassembly_search: bool,
+    /// A detector hit its cap and stopped collecting, so the sweep covered the
+    /// surface but did not report everything it saw. A medium that does this
+    /// is patterned, deliberately or otherwise.
+    pub detection: bool,
+}
+
+impl Ceilings {
+    /// Each ceiling reached, named for a reader.
+    pub fn reached(self) -> impl Iterator<Item = &'static str> {
+        [
+            (self.reassembly_decodes, "reassembly decode budget"),
+            (self.reassembly_search, "reassembly search ceiling"),
+            (self.detection, "detection cap"),
+        ]
+        .into_iter()
+        .filter_map(|(hit, name)| hit.then_some(name))
+    }
+}
+
 /// What a completed — or cancelled — scan found.
 ///
 /// Everything here is countable evidence about the run itself; recovered
@@ -160,13 +194,8 @@ pub struct ScanReport {
     pub reassembled: u64,
     /// Broken candidates reassembly was offered.
     pub reassembly_attempted: u64,
-    /// Whether the stage ran out of its decode budget, so candidates were left
-    /// untried. The medium may hold more than was reported.
-    pub reassembly_budget_exhausted: bool,
-    /// Whether a detector hit its cap and stopped collecting, so the scan
-    /// covered the surface but did not report everything it saw. A medium that
-    /// does this is patterned, deliberately or otherwise.
-    pub detection_truncated: bool,
+    /// Which of the run's ceilings were reached, if any.
+    pub ceilings: Ceilings,
     /// Residual `FILE`-record regions that could not be attributed to an NTFS
     /// volume, so their extents could not be resolved. They are counted, not
     /// guessed at.
@@ -186,6 +215,13 @@ pub struct ScanReport {
     /// Whether the classifier failed mid-run, leaving artifacts unscored that
     /// a healthy one would have scored.
     pub triage_degraded: bool,
+    /// Artifacts found among same-sized neighbours, with how many there were.
+    ///
+    /// The signature of a thumbnail cache, which a used medium holds far more
+    /// of than photographs. It is a count of neighbours and nothing more: no
+    /// artifact is removed, reclassified or ranked by it
+    /// (A-CONFIDENCE-HONEST).
+    pub cache_runs: Vec<crate::cache_run::CacheRun>,
     /// Preview images rendered. Zero when previews were not requested.
     pub previews_written: u64,
     /// Artifacts whose preview could not be written. Each one is a thumbnail
@@ -200,7 +236,6 @@ impl ScanReport {
     pub fn is_complete(&self) -> bool {
         self.state == RunState::Finished
             && self.unreadable.is_empty()
-            && !self.detection_truncated
-            && !self.reassembly_budget_exhausted
+            && self.ceilings.reached().next().is_none()
     }
 }

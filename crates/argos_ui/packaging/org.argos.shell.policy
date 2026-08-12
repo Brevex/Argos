@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<!--
+  Installed to /usr/share/polkit-1/actions/ by the .deb and .rpm, which name
+  it under bundle.linux.{deb,rpm}.files in tauri.conf.json (A-SUPPORT-DECLARED).
+
+  It is what `pkexec` shows when Argos restarts itself with the privileges
+  reading a device needs. Without it the request reads "Authentication is
+  required to run /usr/bin/argos-shell", which tells the person authenticating
+  nothing about what they are authorising. The authorisation itself is
+  unchanged: auth_admin is what pkexec applies by default.
+-->
+<policyconfig>
+  <vendor>Argos</vendor>
+
+  <action id="org.argos.shell.run">
+    <description>Run Argos</description>
+    <description xml:lang="pt_BR">Executar o Argos</description>
+    <message>Argos needs administrator privileges to read storage devices. It opens them read-only and never writes to them.</message>
+    <message xml:lang="pt_BR">O Argos precisa de privilégios de administrador para ler dispositivos de armazenamento. Ele os abre somente para leitura e nunca escreve neles.</message>
+    <icon_name>argos-shell</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <!--
+      There is deliberately no `allow_gui` annotation. It retains DISPLAY and
+      XAUTHORITY when set to any nonempty value — including the string "false"
+      — and Argos does not want it: it carries the session it needs through
+      arguments it checks against a closed list, and inheriting an environment
+      it did not choose is what pkexec exists to prevent.
+    -->
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/argos-shell</annotate>
+  </action>
+</policyconfig>

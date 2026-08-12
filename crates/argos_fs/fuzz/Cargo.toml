@@ -1,3 +1,8 @@
+# Run by the `fuzz` lane in .github/workflows/ci.yml; proves every parser here
+# returns errors on hostile input rather than panicking (A-FUZZ-EVERY-PARSER).
+# `corpus/` holds the authored seeds `cargo run -p argos_fs --example
+# gen_fuzz_corpus` writes, one per case, and nothing else (A-SUPPORT-DECLARED).
+
 [package]
 name = "argos_fs-fuzz"
 version = "0.0.0"

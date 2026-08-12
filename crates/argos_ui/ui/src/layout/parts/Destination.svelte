@@ -10,6 +10,8 @@
    */
   import { open } from '@tauri-apps/plugin-dialog';
 
+  import * as ipc from '../../lib/ipc';
+
   let {
     value,
     disabled,
@@ -17,7 +19,16 @@
   }: { value: string; disabled: boolean; onChange: (path: string) => void } = $props();
 
   async function browse(): Promise<void> {
-    const picked = await open({ directory: true, multiple: false, title: 'Destination folder' });
+    // The window runs as an administrator, so a picker left to its own devices
+    // opens in the administrator's home rather than in the home of the person
+    // looking at it.
+    const start = value !== '' ? value : await ipc.invokerHome().catch(() => '');
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: 'Destination folder',
+      defaultPath: start === '' ? undefined : start,
+    });
     if (typeof picked === 'string') onChange(picked);
   }
 </script>

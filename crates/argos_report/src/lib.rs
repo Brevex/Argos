@@ -22,7 +22,10 @@ use argos_core::classify::PixelImage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod handback;
 mod preview;
+
+pub use handback::{Handback, Owner};
 
 /// Name of the manifest file inside the output directory.
 const MANIFEST_FILE: &str = "manifest.json";
@@ -164,6 +167,19 @@ pub struct ArtifactRecord {
     pub source_offset: u64,
     /// Artifact length in bytes: what was actually recovered and stored.
     pub length: u64,
+    /// Width of the decoded picture, in pixels, when it decoded.
+    ///
+    /// The property that separates a photograph from the derived images a
+    /// used medium is full of, and the one a byte count cannot stand in for.
+    /// Absent means the artifact did not decode here — a statement about the
+    /// decoder, not about the bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Height of the decoded picture, on the same terms as [`width`].
+    ///
+    /// [`width`]: ArtifactRecord::width
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
     /// Length the source metadata claimed, when it said one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_length: Option<u64>,
@@ -206,14 +222,29 @@ pub struct ArtifactRecord {
     pub triage_decided_by: Option<String>,
     /// Whether the artifact's bytes were stored in the output directory.
     ///
-    /// False only when the run was asked to leave synthetic assets unwritten.
-    /// The record still describes the artifact completely, so the account of
-    /// what the medium held stays whole either way.
+    /// False when the artifact did not clear the run's size floor. The record
+    /// still describes it completely — extents, digest, dimensions — so the
+    /// account of what the medium held stays whole either way, and the extents
+    /// locate the bytes exactly for a rerun with a lower floor.
+    ///
+    /// `argos export` reads the session directory, so it cannot produce these:
+    /// they have no file there. Getting them is a rerun of the scan.
     #[serde(default = "stored_by_default")]
     pub written: bool,
     /// Why the bytes were not stored, when they were not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted_because: Option<String>,
+    /// How many artifacts of identical dimensions this one was found among,
+    /// consecutively, when it was found among any.
+    ///
+    /// The signature of a thumbnail cache: a cache writes one size and writes
+    /// it in one place, so its entries share dimensions to the pixel. A large
+    /// number here says the artifact is a preview of a picture, which may or
+    /// may not itself have survived — and saying that is what stops a report
+    /// presenting the preview as the picture (A-CONFIDENCE-HONEST). It is a
+    /// count of neighbours, never a verdict about this artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_size_neighbours: Option<u32>,
     /// Perceptual hash of the decoded image, 16 hex digits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perceptual_hash: Option<String>,
@@ -234,6 +265,12 @@ pub struct ArtifactRecord {
 pub struct Store {
     dir: PathBuf,
     records: Vec<ArtifactRecord>,
+    /// Who every file written here is given to, once it is written. `None`
+    /// when nobody was named or the directory could not be handed over.
+    owner: Option<Owner>,
+    /// What happened when the directory itself was handed over, for the caller
+    /// to report.
+    handback: Handback,
     /// Reused streaming buffer so saving many artifacts does not allocate per
     /// artifact.
     copy_buf: Vec<u8>,
@@ -242,15 +279,25 @@ pub struct Store {
 impl Store {
     /// Creates `dir` (and parents) and an empty store over it.
     ///
+    /// `owner` is the account the recovered files belong to. A scan of a raw
+    /// device runs elevated, so without it every file would be created by the
+    /// administrator and the person who asked for the recovery could not use
+    /// what came back. Whether that worked is [`Store::handback`], and a
+    /// refusal is a warning rather than a failure: the bytes are recovered
+    /// either way.
+    ///
     /// # Errors
     ///
     /// Fails when the directory cannot be created.
-    pub fn create(dir: impl AsRef<Path>) -> Result<Self, ReportError> {
+    pub fn create(dir: impl AsRef<Path>, owner: Option<Owner>) -> Result<Self, ReportError> {
         let dir = dir.as_ref();
         fs::create_dir_all(dir).map_err(|source| ReportError::new(dir, source))?;
+        let handback = Handback::attempt(dir, owner);
         Ok(Self {
             dir: dir.to_path_buf(),
             records: Vec::new(),
+            owner: handback.owner(owner),
+            handback,
             copy_buf: Vec::new(),
         })
     }
@@ -259,6 +306,24 @@ impl Store {
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Whether the output directory could be given to the account that asked.
+    #[must_use]
+    pub fn handback(&self) -> &Handback {
+        &self.handback
+    }
+
+    /// Gives one file this store just created to the account that asked.
+    ///
+    /// Failures are dropped on purpose: the directory was handed over a moment
+    /// ago on the same filesystem, so a file that refuses is a surprise with
+    /// nowhere useful to be reported — and losing a recovered artifact over
+    /// its ownership would be the wrong trade in a recovery tool.
+    fn give(&self, path: &Path) {
+        if let Some(owner) = self.owner {
+            let _ = owner.give(path);
+        }
     }
 
     /// Records saved so far, in save order.
@@ -325,6 +390,9 @@ impl Store {
             ))));
         }
 
+        drop(out);
+        self.give(&path);
+
         self.records.push(ArtifactRecord {
             name: Some(name),
             stage: artifact.stage.to_string(),
@@ -334,6 +402,8 @@ impl Store {
                 .first()
                 .map_or(0, |first| first.start.get()),
             length: written,
+            width: artifact.pixels.map(|(width, _)| width),
+            height: artifact.pixels.map(|(_, height)| height),
             expected_length: artifact.expected_length,
             missing_bytes: artifact
                 .expected_length
@@ -354,6 +424,7 @@ impl Store {
             source_object: artifact.source_object,
             parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
             sha256,
+            same_size_neighbours: None,
             triage_label: None,
             triage_decided_by: None,
             written: true,
@@ -409,9 +480,9 @@ impl Store {
     /// digest, format, confidence, provenance — except that it names no file
     /// and says so. That is what keeps the manifest a complete account of the
     /// medium while the directory holds only what the caller asked for: the
-    /// bytes are still at the extents recorded here, and `argos export` can
-    /// fetch them from the source without a second scan.
-    pub fn record_only(&mut self, artifact: &Artifact<'_>, label: &str, decided_by: &str) {
+    /// bytes are still at the extents recorded here, which locate them on the
+    /// source exactly.
+    pub fn record_only(&mut self, artifact: &Artifact<'_>, reason: &str) {
         self.records.push(ArtifactRecord {
             name: None,
             stage: artifact.stage.to_string(),
@@ -421,6 +492,8 @@ impl Store {
                 .first()
                 .map_or(0, |first| first.start.get()),
             length: artifact.length,
+            width: artifact.pixels.map(|(width, _)| width),
+            height: artifact.pixels.map(|(_, height)| height),
             expected_length: artifact.expected_length,
             missing_bytes: artifact
                 .expected_length
@@ -442,16 +515,31 @@ impl Store {
             parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
             sha256: artifact.sha256.to_string(),
             written: false,
-            triage_label: Some(label.to_owned()),
-            triage_decided_by: Some(decided_by.to_owned()),
+            triage_label: None,
+            triage_decided_by: None,
+            same_size_neighbours: None,
             perceptual_hash: None,
             near_duplicate_of: None,
             preview: None,
-            omitted_because: Some(format!(
-                "the run was asked to leave synthetic assets unwritten; this one was settled by \
-                 {decided_by}"
-            )),
+            omitted_because: Some(reason.to_owned()),
         });
+    }
+
+    /// Records how many same-sized neighbours each named artifact was found
+    /// among.
+    ///
+    /// Annotation only, like the triage labels: it adds a fact about the
+    /// medium's layout to records already written and can remove nothing.
+    pub fn annotate_same_size_runs(&mut self, runs: &[(String, u32)]) {
+        for (sha256, neighbours) in runs {
+            if let Some(record) = self
+                .records
+                .iter_mut()
+                .find(|record| record.sha256 == *sha256)
+            {
+                record.same_size_neighbours = Some(*neighbours);
+            }
+        }
     }
 
     /// Writes a preview of an artifact already saved, named by its hash.
@@ -491,6 +579,8 @@ impl Store {
         let name = format!("{hash}.jpg");
         let path = dir.join(&name);
         fs::write(&path, encoded).map_err(|source| ReportError::new(&path, source))?;
+        self.give(&dir);
+        self.give(&path);
 
         if let Some(record) = self.records.get_mut(index) {
             record.preview = Some(format!("{PREVIEW_DIR}/{name}"));
@@ -503,7 +593,7 @@ impl Store {
     /// # Errors
     ///
     /// Fails when the manifest cannot be serialized or written.
-    pub fn finish(self, summary: Summary<'_>) -> Result<PathBuf, ReportError> {
+    pub fn finish(mut self, summary: Summary<'_>) -> Result<PathBuf, ReportError> {
         let manifest = Manifest {
             tool_version: summary.tool_version.to_owned(),
             source: summary.source.to_owned(),
@@ -511,12 +601,22 @@ impl Store {
             rejected_candidates: summary.rejected_candidates,
             unreadable: summary.unreadable.to_vec(),
             triage: summary.triage.cloned(),
-            artifacts: self.records,
+            artifacts: std::mem::take(&mut self.records),
         };
         let path = self.dir.join(MANIFEST_FILE);
-        let json = serde_json::to_vec_pretty(&manifest)
+        // Streamed rather than built in memory first. A scan of a large medium
+        // produces hundreds of thousands of records — one real run wrote a
+        // manifest of 194 MB — and serializing that to a `Vec` doubles it,
+        // on top of the records themselves, at the very end of a run that has
+        // already been holding them all (A-BOUNDED-ALLOC).
+        let file = File::create(&path).map_err(|source| ReportError::new(&path, source))?;
+        let mut out = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut out, &manifest)
             .map_err(|source| ReportError::new(&path, io::Error::other(source)))?;
-        fs::write(&path, json).map_err(|source| ReportError::new(&path, source))?;
+        out.flush()
+            .map_err(|source| ReportError::new(&path, source))?;
+        drop(out);
+        self.give(&path);
         Ok(path)
     }
 }
@@ -532,13 +632,8 @@ impl ArtifactSink for Store {
         Self::save(self, artifact, bytes).map(|_| ())
     }
 
-    fn omit(
-        &mut self,
-        artifact: &Artifact<'_>,
-        label: &str,
-        decided_by: &str,
-    ) -> Result<(), Self::Error> {
-        Self::record_only(self, artifact, label, decided_by);
+    fn omit(&mut self, artifact: &Artifact<'_>, reason: &str) -> Result<(), Self::Error> {
+        Self::record_only(self, artifact, reason);
         Ok(())
     }
 

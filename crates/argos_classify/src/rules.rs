@@ -90,15 +90,27 @@ pub const FLAT_RUN_ASSET_FRACTION: f32 = 0.40;
 /// Fraction of textured pixels a photograph verdict requires.
 ///
 /// The positive evidence, and the only rule here that points at *photograph*.
-/// Over the validation range the least textured photograph of any slice
-/// measures 0.651; drawn art sits at 0.002 to 0.09 except for dithered
+/// Over the generated validation corpus the least textured photograph of any
+/// slice measures 0.651; drawn art sits at 0.002 to 0.09 except for dithered
 /// sprites, which reach 0.94 — and those are settled as assets by their flat
 /// runs before this is consulted.
 ///
-/// Set below the lowest photograph rather than between the classes: an image
-/// that fails it is not called an asset, only left [`TriageLabel::Ambiguous`],
-/// so the cost of the threshold being generous is an unclear label rather than
-/// a wrong one.
+/// **This threshold is not calibrated against real media, and against real
+/// media it is on the wrong side.** Measured over images recovered from a 1 TB
+/// disk of ten years' use: a 1920x2560 camera frame scores 0.442, a 768x576
+/// one 0.411, a 256x192 cache entry 0.292 — so the rule calls camera
+/// originals `Ambiguous`, and in the same run 611 of 3,000 sampled images of
+/// 300 pixels or less were called `Photograph`. The corpus in
+/// `crate::fixture` draws its photographs; drawn noise is not sensor noise,
+/// and the gap the generated numbers describe does not exist in the world
+/// (`A-EVAL-GATED`).
+///
+/// Until it is recalibrated against a labelled corpus of real recoveries, no
+/// decision may rest on the label this produces — see
+/// `docs/defects/03-triage-miscalibrated.md`. Nothing in the engine does: what
+/// is written is decided by
+/// [`DEFAULT_MIN_LONG_SIDE`](../../argos_engine/config/constant.DEFAULT_MIN_LONG_SIDE.html),
+/// and this only orders and labels (`A-TRIAGE-NOT-VERDICT`).
 pub const PHOTOGRAPH_MIN_TEXTURE: f32 = 0.60;
 
 /// Fraction of byte-identical neighbours a photograph verdict tolerates.
