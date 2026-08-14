@@ -58,7 +58,7 @@ export default theme({
     '--form-pane': 'transparent',
     '--form-pane-border': '#3ca84c',
     '--form-pane-shadow': 'none',
-    '--scrim': '#030b05',
+    '--scrim': 'rgba(3, 11, 5, 0.66)',
 
     '--row': 'transparent',
     '--row-hover': '#0b2211',

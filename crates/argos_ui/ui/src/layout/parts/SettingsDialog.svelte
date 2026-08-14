@@ -21,6 +21,9 @@
    * (`A-SHELL-NO-DOMAIN`).
    */
   import { session } from '../../lib/session.svelte';
+  // Aliased: `active` is already the id of the chosen theme, a prop of this
+  // component. This is the theme itself, for its artwork.
+  import { active as inForce } from '../../themes/active.svelte';
   import { MEASURED_COST, settings } from '../../lib/settings.svelte';
   import { loadTheme, themeIds } from '../../themes';
   import type { ThemeModule } from '../../themes/contract';
@@ -92,11 +95,20 @@
   onclick={(event) => event.target === event.currentTarget && onClose()}
 >
   <div class="dialog" role="dialog" aria-modal="true" aria-label="Settings">
+    <!--
+      A window of the same system, not a card that happens to float: the frame,
+      the title strip and the way out are the ones the main window uses, drawn
+      from the same tokens and with the theme's own close glyph. A panel with
+      its own idea of a border and its own X would be a second visual language
+      inside one application.
+    -->
     <header>
       <h2>Settings</h2>
-      <button class="close" onclick={onClose} aria-label="Close">
-        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" /></svg>
-      </button>
+      <div class="group">
+        <button class="window close" onclick={onClose} aria-label="Close">
+          <svg viewBox="0 0 12 12" aria-hidden="true">{@html inForce.icon('close')}</svg>
+        </button>
+      </div>
     </header>
 
     <div class="body">
@@ -322,50 +334,65 @@
     background: var(--pane);
     backdrop-filter: var(--pane-blur);
     -webkit-backdrop-filter: var(--pane-blur);
-    border: 1px solid var(--pane-border);
-    border-radius: var(--pane-radius);
-    box-shadow: var(--pane-shadow);
-    padding: 1.1rem 1.25rem 1.25rem;
+    border: 1px solid var(--window-border);
+    border-radius: var(--window-radius);
+    box-shadow: var(--window-shadow);
+    padding: 0;
+    overflow: hidden;
   }
 
+  /* The title strip, on the terms the main window's is on. */
   header {
     display: flex;
     align-items: center;
     flex: none;
-    margin-bottom: 0.9rem;
+    padding: 0.42rem 0.42rem 0.42rem 1.25rem;
+    border-bottom: 1px solid var(--titlebar-border);
+    background: var(--titlebar);
   }
 
   h2 {
     margin: 0;
     font-size: 0.9rem;
     font-weight: 500;
-    color: var(--text);
+    color: var(--titlebar-text);
   }
 
-  .close {
+  /* The same strip the window buttons sit in, holding the one button a panel
+     needs. */
+  .group {
+    display: flex;
+    align-items: stretch;
     margin-left: auto;
+    background: var(--winbtn-group);
+    border: 1px solid var(--winbtn-group-border);
+    border-radius: var(--winbtn-group-radius);
+    overflow: hidden;
+  }
+
+  .window {
     display: grid;
     place-items: center;
-    width: 1.625rem;
-    height: 1.625rem;
-    border: 0;
-    border-radius: var(--radius);
+    width: 3.4rem;
+    height: 1.7rem;
+    padding: 0;
     background: none;
-    color: var(--text-dim);
+    border: 0;
+    color: var(--winbtn-text);
     cursor: pointer;
   }
 
-  .close:hover {
-    background: var(--row-hover);
-    color: var(--text);
-  }
-
-  .close svg {
-    width: 0.69rem;
-    height: 0.69rem;
+  .window svg {
+    width: 0.86rem;
+    height: 0.86rem;
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.2;
+    stroke-width: var(--winbtn-stroke);
+  }
+
+  .window.close:hover {
+    background: var(--winbtn-close-hover);
+    color: var(--winbtn-close-hover-text);
   }
 
   .body {
@@ -374,6 +401,7 @@
     min-height: 0;
     gap: 1.4rem;
     align-items: stretch;
+    padding: 1.1rem 1.25rem 1.25rem;
   }
 
   /* The rail names three places and should do nothing else. A hairline carries

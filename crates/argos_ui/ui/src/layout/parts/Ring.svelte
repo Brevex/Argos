@@ -245,7 +245,7 @@
   }
 
   .value {
-    font-size: 2.2rem;
+    font-size: 1.9rem;
     text-shadow: var(--text-glow);
     font-weight: 300;
     letter-spacing: -0.02em;
@@ -253,7 +253,7 @@
   }
 
   .unit {
-    font-size: 1.2rem;
+    font-size: 1.05rem;
     color: var(--text-dim);
     margin-left: 0.125rem;
   }
