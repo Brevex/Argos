@@ -135,6 +135,17 @@ dto! {
         pub min_long_side: Option<u32>,
         /// Render a preview of every artifact that decodes.
         pub previews: bool,
+        /// How long reassembly may search, in seconds. Absent takes the
+        /// engine's own budget; zero searches every candidate however long it
+        /// takes.
+        ///
+        /// Reassembly is the one stage that reaches a ceiling and stops without
+        /// finishing, and the report says so rather than implying the medium
+        /// held nothing more. A client that cannot set this cannot ask for the
+        /// longer search that ceiling exists to bound.
+        #[serde(default)]
+        #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
+        pub reassembly_budget_seconds: Option<u64>,
     }
 }
 
@@ -151,6 +162,7 @@ impl Default for ScanRequest {
             triage: true,
             min_long_side: None,
             previews: false,
+            reassembly_budget_seconds: None,
         }
     }
 }

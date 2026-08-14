@@ -333,7 +333,18 @@ minLongSide: number | null,
 /**
  * Render a preview of every artifact that decodes.
  */
-previews: boolean, };
+previews: boolean, 
+/**
+ * How long reassembly may search, in seconds. Absent takes the
+ * engine's own budget; zero searches every candidate however long it
+ * takes.
+ *
+ * Reassembly is the one stage that reaches a ceiling and stops without
+ * finishing, and the report says so rather than implying the medium
+ * held nothing more. A client that cannot set this cannot ask for the
+ * longer search that ceiling exists to bound.
+ */
+reassemblyBudgetSeconds: number | null, };
 
 /**
  * What a started scan tells its client before it produces anything.

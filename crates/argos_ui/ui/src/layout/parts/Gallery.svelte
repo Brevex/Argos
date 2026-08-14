@@ -15,6 +15,7 @@
    * window is granted.
    */
   import { convertFileSrc } from '@tauri-apps/api/core';
+  import { open } from '@tauri-apps/plugin-dialog';
 
   import * as ipc from '../../lib/ipc';
   import type { Artifact } from '../../lib/dto';
@@ -77,6 +78,53 @@
     void load(true);
   }
 
+  /** What the last export produced, until another one replaces it. */
+  let exported = $state('');
+  let exporting = $state(false);
+
+  /**
+   * Copies out exactly the set this view is showing.
+   *
+   * The filter is the selection. A person who has narrowed the list to the
+   * pictures naming a camera has already said which ones they want, and asking
+   * them again in a second dialog is how the two come to disagree.
+   *
+   * Every copy is verified against the digest the scan recorded; one that no
+   * longer reproduces it is reported and not written, which is the whole point
+   * of exporting through the engine rather than dragging a folder.
+   */
+  async function exportShown(): Promise<void> {
+    const start = await ipc.invokerHome().catch(() => '');
+    const to = await open({
+      directory: true,
+      multiple: false,
+      title: 'Copy the recovered pictures into',
+      defaultPath: start === '' ? undefined : start,
+    });
+    if (typeof to !== 'string') return;
+
+    exporting = true;
+    exported = '';
+    problem = '';
+    try {
+      const result = await ipc.exportCopy(session, to, chosen);
+      const parts = [`Copied ${result.copied} ${result.copied === 1 ? 'picture' : 'pictures'}`];
+      // Reported, never folded into the count: an artifact that failed its
+      // digest is the one thing an examiner has to be told about by name.
+      if (result.tampered.length > 0) {
+        parts.push(`${result.tampered.length} refused — the bytes no longer match the manifest`);
+      }
+      if (result.missing.length > 0) {
+        parts.push(`${result.missing.length} missing from the session folder`);
+      }
+      exported = parts.join(' · ');
+    } catch (err) {
+      problem = String(err);
+    } finally {
+      exporting = false;
+    }
+  }
+
   /** The thumbnail for an artifact, or empty when it has none. */
   function thumbnail(artifact: Artifact): string {
     if (!artifact.preview || previewDir === '') return '';
@@ -111,10 +159,21 @@
         {total.toLocaleString()} of {recorded.toLocaleString()} recorded
       {/if}
     </p>
+    <button
+      class="export"
+      type="button"
+      disabled={exporting || loading || total === 0}
+      onclick={() => void exportShown()}
+    >
+      {exporting ? 'Copying…' : 'Copy these out…'}
+    </button>
   </header>
 
   {#if problem !== ''}
     <p class="problem">{problem}</p>
+  {/if}
+  {#if exported !== ''}
+    <p class="exported">{exported}</p>
   {/if}
 
   <div class="grid">
@@ -218,6 +277,35 @@
     color: var(--text-dim);
     font-size: 0.85em;
     text-shadow: var(--text-glow);
+  }
+
+  /* What the last export produced, kept until another one replaces it: a copy
+     that refused an artifact has to stay on screen long enough to be read. */
+  .exported {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 0.85em;
+    text-shadow: var(--text-glow);
+  }
+
+  .export {
+    padding: 0.3rem 0.7rem;
+    font: inherit;
+    font-size: 0.78rem;
+    color: var(--text);
+    background: var(--inset);
+    border: 1px solid var(--inset-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  .export:hover:not(:disabled) {
+    background: var(--row-hover);
+  }
+
+  .export:disabled {
+    color: var(--text-faint);
+    cursor: default;
   }
 
   .problem {

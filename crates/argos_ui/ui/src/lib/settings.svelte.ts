@@ -68,6 +68,16 @@ class Settings {
   /** Worker threads; `null` takes the machine's available parallelism. */
   jobs = $state<number | null>(null);
 
+  /**
+   * Minutes reassembly may search, `0` for no limit, `null` for the engine's
+   * own budget of two hours.
+   *
+   * Kept in minutes because that is the unit the choice is made in; the wire
+   * carries seconds. This is the one stage that reaches its ceiling and stops
+   * without finishing, so it is the one worth being able to lengthen.
+   */
+  reassemblyBudget = $state<number | null>(null);
+
   /** Whether anything has been changed away from the engine's defaults. */
   get customized(): boolean {
     return (
@@ -77,7 +87,8 @@ class Settings {
       !this.triage ||
       !this.previews ||
       this.minLongSide !== null ||
-      this.jobs !== null
+      this.jobs !== null ||
+      this.reassemblyBudget !== null
     );
   }
 
@@ -105,7 +116,7 @@ class Settings {
   }
 
   /** Sets a numeric limit, treating anything unusable as "take the default". */
-  setNumber(field: 'minLongSide' | 'jobs', value: number | null): void {
+  setNumber(field: 'minLongSide' | 'jobs' | 'reassemblyBudget', value: number | null): void {
     this[field] = value !== null && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
     this.remember();
   }
@@ -119,6 +130,7 @@ class Settings {
     this.previews = true;
     this.minLongSide = null;
     this.jobs = null;
+    this.reassemblyBudget = null;
     this.remember();
   }
 
@@ -139,6 +151,9 @@ class Settings {
       triage: this.triage,
       minLongSide: this.minLongSide,
       previews: this.previews,
+      // Minutes on screen, seconds on the wire.
+      reassemblyBudgetSeconds:
+        this.reassemblyBudget === null ? null : this.reassemblyBudget * 60,
     };
   }
 
@@ -161,6 +176,7 @@ class Settings {
     this.previews = flag('previews', true);
     this.minLongSide = count('minLongSide');
     this.jobs = count('jobs');
+    this.reassemblyBudget = count('reassemblyBudget');
   }
 
   private remember(): void {
@@ -173,6 +189,7 @@ class Settings {
         previews: this.previews,
         minLongSide: this.minLongSide,
         jobs: this.jobs,
+        reassemblyBudget: this.reassemblyBudget,
       },
     });
   }

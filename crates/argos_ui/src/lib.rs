@@ -112,6 +112,7 @@ pub fn run() {
             commands::scan_resume,
             commands::scan_cancel,
             commands::scan_gallery,
+            commands::export_copy,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|err| panic!("the shell could not start: {err}"));

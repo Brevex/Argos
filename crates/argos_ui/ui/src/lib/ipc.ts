@@ -13,7 +13,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-import type { Gallery, Inventory, ScanRequest, ScanStarted, Summary } from './dto';
+import type { Exported, Gallery, Inventory, ScanRequest, ScanStarted, Summary } from './dto';
 
 /** The Tauri event every engine notification arrives on. */
 const ENGINE_EVENT = 'argos://engine';
@@ -107,6 +107,21 @@ export function scanGallery(
   standing: string | null,
 ): Promise<Gallery> {
   return invoke('scan_gallery', { session, offset, limit, standing });
+}
+
+/**
+ * Copies a session's artifacts into `to`, verifying every hash on the way.
+ *
+ * `standing` is the filter the gallery is showing, passed through as the name
+ * the engine gave it. An artifact whose bytes no longer reproduce the digest
+ * the scan recorded comes back in `tampered` and is not copied.
+ */
+export function exportCopy(
+  session: string,
+  to: string,
+  standing: string | null,
+): Promise<Exported> {
+  return invoke('export_copy', { session, to, standing });
 }
 
 /** Stops the running scan, keeping everything recovered so far. */

@@ -1,16 +1,24 @@
 <script lang="ts">
   /**
-   * Settings, behind the gear: what the next scan runs, and what it looks like.
+   * Settings, behind the gear.
    *
-   * The recovery switches are the same options `argos scan` takes as flags, and
-   * they open on the same defaults, so the button runs what the command line
-   * runs until someone decides otherwise (`A-CLI-FIRST`). Nothing here judges a
-   * recovery — a switch chooses what to ask the engine for, and the engine
-   * decides everything about what that means (`A-SHELL-NO-DOMAIN`).
+   * One section at a time, chosen from the rail. The window itself is one
+   * screen with one button, and a settings panel that unrolled every option at
+   * once would be the busiest thing in the application — so each section holds
+   * a few controls and the others stay out of the way until asked for.
    *
-   * Choosing a theme rewrites custom properties on the document root. Nothing
-   * is remounted and no state is lost, so this can be opened and used in the
-   * middle of a running scan without interrupting it.
+   * Appearance is a section of its own rather than a block at the end of the
+   * list: a theme is not a thing a scan does, and putting it beside the stages
+   * would invite it to be read as one.
+   *
+   * These are preferences — what the *next* scan is asked for. Anything that
+   * runs now and produces files (acquiring a disk, exporting artifacts,
+   * searching a session again) belongs beside the thing it acts on, not here.
+   *
+   * Nothing in this file judges a recovery. A switch chooses what to ask the
+   * engine for; what a stage does and what it finds are the engine's, and it
+   * refuses a combination it cannot run rather than being pre-judged here
+   * (`A-SHELL-NO-DOMAIN`).
    */
   import { session } from '../../lib/session.svelte';
   import { MEASURED_COST, settings } from '../../lib/settings.svelte';
@@ -23,6 +31,16 @@
     onClose,
   }: { active: string; onChoose: (id: string) => void; onClose: () => void } = $props();
 
+  /** The sections, in the order the rail lists them. */
+  const SECTIONS = [
+    { id: 'recovery', name: 'Recovery' },
+    { id: 'output', name: 'Output' },
+    { id: 'appearance', name: 'Appearance' },
+  ] as const;
+
+  type SectionId = (typeof SECTIONS)[number]['id'];
+
+  let open = $state<SectionId>('recovery');
   let choices = $state<ThemeModule[]>([]);
 
   $effect(() => {
@@ -32,27 +50,26 @@
   });
 
   /**
-   * The stages, in the order a scan runs them.
+   * The stages, in the order a scan runs them, each said in one line.
    *
-   * `needs` is what a stage has nothing to work from without — reassembly works
-   * on the candidates carving could not complete. The store keeps the pair
-   * consistent; this only says so on screen.
+   * The line describes what turning it *on* does, because that is the choice
+   * being made. The tag beside it is what that cost on the measured disk.
    */
-  const stages = [
+  const STAGES = [
     {
       key: 'filesystem' as const,
       name: 'Filesystem records',
-      about: 'Recovers files whose metadata survived, with their names and dates.',
+      about: 'Recovers files whose records survived, with their original names and dates.',
     },
     {
       key: 'carving' as const,
       name: 'Surface carving',
-      about: 'Reads the whole medium looking for images whose metadata is gone.',
+      about: 'Reads the whole disk, finding images whose records are gone.',
     },
     {
       key: 'reassembly' as const,
       name: 'Fragment reassembly',
-      about: 'Rebuilds images the medium stored in pieces. Needs surface carving.',
+      about: 'Rebuilds images the disk stored in pieces. Needs surface carving.',
     },
   ];
 
@@ -82,146 +99,204 @@
       </button>
     </header>
 
-    <section>
-      <div class="legend">
-        <h3>Recovery</h3>
-        {#if settings.customized}
-          <button class="reset" onclick={() => settings.reset()} disabled={locked}>
-            Restore defaults
+    <div class="body">
+      <nav aria-label="Settings sections">
+        {#each SECTIONS as entry (entry.id)}
+          <button
+            class:current={open === entry.id}
+            aria-current={open === entry.id}
+            onclick={() => (open = entry.id)}
+          >
+            {entry.name}
           </button>
+        {/each}
+      </nav>
+
+      <div class="panel">
+        {#if open === 'recovery'}
+          <div class="lead">
+            <p>What the scan looks for. Each one costs time; turning it off saves that time.</p>
+            {#if settings.customized}
+              <button class="reset" onclick={() => settings.reset()} disabled={locked}>
+                Restore defaults
+              </button>
+            {/if}
+          </div>
+
+          {#if locked}
+            <!-- Said rather than hidden: a control that silently did nothing is
+                 worse than one that explains when it will take effect. -->
+            <p class="note">A scan is running. Changes apply to the next one.</p>
+          {/if}
+
+          <ul>
+            {#each STAGES as stage (stage.key)}
+              <li>
+                <label class:off={!settings[stage.key]}>
+                  <input
+                    type="checkbox"
+                    checked={settings[stage.key]}
+                    disabled={locked}
+                    onchange={(event) => settings.setStage(stage.key, event.currentTarget.checked)}
+                  />
+                  <span class="text">
+                    <span class="name">{stage.name}</span>
+                    <span class="about">{stage.about}</span>
+                  </span>
+                  <span class="cost">{MEASURED_COST[stage.key]}</span>
+                </label>
+
+                <!-- Only while the stage it bounds is on: a limit on something
+                     that will not run is a control with nothing to do. -->
+                {#if stage.key === 'reassembly' && settings.reassembly}
+                  <div class="nested">
+                    <label class="inline">
+                      <span class="name">Give up after</span>
+                      <input
+                        class="number"
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="120"
+                        disabled={locked}
+                        value={settings.reassemblyBudget ?? ''}
+                        onchange={(event) =>
+                          settings.setNumber('reassemblyBudget', entered(event.currentTarget.value))}
+                      />
+                      <span class="unit">minutes</span>
+                    </label>
+                    <p class="about">
+                      This is the one stage that stops at a ceiling rather than at the end. Empty
+                      keeps the two-hour limit; 0 searches every candidate however long it takes.
+                    </p>
+                  </div>
+                {/if}
+              </li>
+            {/each}
+
+            <li>
+              <label class:off={!settings.triage}>
+                <input
+                  type="checkbox"
+                  checked={settings.triage}
+                  disabled={locked}
+                  onchange={(event) => settings.setFlag('triage', event.currentTarget.checked)}
+                />
+                <span class="text">
+                  <span class="name">Labelling</span>
+                  <span class="about">
+                    Marks each image a photograph or an app asset. Never changes what is recovered.
+                  </span>
+                </span>
+                <span class="cost">{MEASURED_COST.triage}</span>
+              </label>
+            </li>
+          </ul>
+        {:else if open === 'output'}
+          <div class="lead">
+            <p>What reaches the folder. Nothing here changes what the scan finds.</p>
+          </div>
+
+          {#if locked}
+            <p class="note">A scan is running. Changes apply to the next one.</p>
+          {/if}
+
+          <ul>
+            <li>
+              <label class:off={!settings.previews}>
+                <input
+                  type="checkbox"
+                  checked={settings.previews}
+                  disabled={locked}
+                  onchange={(event) => settings.setFlag('previews', event.currentTarget.checked)}
+                />
+                <span class="text">
+                  <span class="name">Thumbnails</span>
+                  <span class="about">
+                    Renders the small pictures the results gallery shows. Without them the gallery
+                    has nothing to draw.
+                  </span>
+                </span>
+              </label>
+            </li>
+
+            <li>
+              <div class="field">
+                <label class="inline">
+                  <span class="name">Keep pictures at least</span>
+                  <input
+                    class="number"
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="300"
+                    disabled={locked}
+                    value={settings.minLongSide ?? ''}
+                    onchange={(event) =>
+                      settings.setNumber('minLongSide', entered(event.currentTarget.value))}
+                  />
+                  <span class="unit">px on the long side</span>
+                </label>
+                <p class="about">
+                  A used disk holds far more icons and cache entries than photographs, and they are
+                  small. Anything under this is still examined, hashed and recorded — it just does
+                  not fill the folder. 0 writes everything.
+                </p>
+              </div>
+            </li>
+
+            <li>
+              <div class="field">
+                <label class="inline">
+                  <span class="name">Use</span>
+                  <input
+                    class="number"
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="auto"
+                    disabled={locked}
+                    value={settings.jobs ?? ''}
+                    onchange={(event) =>
+                      settings.setNumber('jobs', entered(event.currentTarget.value))}
+                  />
+                  <span class="unit">worker threads</span>
+                </label>
+                <p class="about">
+                  Left empty, the scan uses what the machine has. Fewer leaves the machine usable
+                  for something else while it runs.
+                </p>
+              </div>
+            </li>
+          </ul>
+        {:else}
+          <div class="lead">
+            <p>How the window looks. Changing this mid-scan interrupts nothing.</p>
+          </div>
+
+          <ul class="themes">
+            {#each choices as choice (choice.id)}
+              <li>
+                <button
+                  class="theme"
+                  class:current={choice.id === active}
+                  aria-pressed={choice.id === active}
+                  onclick={() => onChoose(choice.id)}
+                >
+                  <span class="swatch" style:background={choice.tokens['--accent']}></span>
+                  <span class="name">{choice.name}</span>
+                  {#if choice.id === active}
+                    <svg class="tick" viewBox="0 0 14 14" aria-hidden="true">
+                      <path d="M2.5 7.4l3 3 6-6.4" />
+                    </svg>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
         {/if}
       </div>
-
-      {#if locked}
-        <!-- Said rather than hidden: a control that silently did nothing is
-             worse than one that explains when it will. -->
-        <p class="note">A scan is running. Changes apply to the next one.</p>
-      {/if}
-
-      <ul class="switches">
-        {#each stages as stage (stage.key)}
-          <li>
-            <label class:off={!settings[stage.key]}>
-              <input
-                type="checkbox"
-                checked={settings[stage.key]}
-                disabled={locked}
-                onchange={(event) => settings.setStage(stage.key, event.currentTarget.checked)}
-              />
-              <span class="body">
-                <span class="name">
-                  {stage.name}
-                  <span class="cost">{MEASURED_COST[stage.key]}</span>
-                </span>
-                <span class="about">{stage.about}</span>
-              </span>
-            </label>
-          </li>
-        {/each}
-
-        <li>
-          <label class:off={!settings.triage}>
-            <input
-              type="checkbox"
-              checked={settings.triage}
-              disabled={locked}
-              onchange={(event) => settings.setFlag('triage', event.currentTarget.checked)}
-            />
-            <span class="body">
-              <span class="name">
-                Labelling
-                <span class="cost">{MEASURED_COST.triage}</span>
-              </span>
-              <span class="about">
-                Marks each image photograph or synthetic asset. Never changes what is recovered.
-              </span>
-            </span>
-          </label>
-        </li>
-
-        <li>
-          <label class:off={!settings.previews}>
-            <input
-              type="checkbox"
-              checked={settings.previews}
-              disabled={locked}
-              onchange={(event) => settings.setFlag('previews', event.currentTarget.checked)}
-            />
-            <span class="body">
-              <span class="name">Thumbnails</span>
-              <span class="about">
-                {settings.previews
-                  ? 'Renders the pictures the results gallery draws.'
-                  : 'Off: the results gallery will have no pictures to show.'}
-              </span>
-            </span>
-          </label>
-        </li>
-      </ul>
-
-      <div class="numbers">
-        <label>
-          <span class="name">Smallest picture kept</span>
-          <span class="field">
-            <input
-              type="number"
-              min="0"
-              step="1"
-              placeholder="300"
-              disabled={locked}
-              value={settings.minLongSide ?? ''}
-              onchange={(event) =>
-                settings.setNumber('minLongSide', entered(event.currentTarget.value))}
-            />
-            <span class="unit">px</span>
-          </span>
-          <span class="about">
-            Long side, in pixels. Anything smaller is still examined, hashed and recorded — it just
-            does not fill the folder. 0 writes everything.
-          </span>
-        </label>
-
-        <label>
-          <span class="name">Worker threads</span>
-          <span class="field">
-            <input
-              type="number"
-              min="1"
-              step="1"
-              placeholder="auto"
-              disabled={locked}
-              value={settings.jobs ?? ''}
-              onchange={(event) => settings.setNumber('jobs', entered(event.currentTarget.value))}
-            />
-          </span>
-          <span class="about">Left empty, the scan uses what the machine has.</span>
-        </label>
-      </div>
-    </section>
-
-    <section>
-      <div class="legend"><h3>Appearance</h3></div>
-      <ul>
-        {#each choices as choice (choice.id)}
-          <li>
-            <button
-              class="theme"
-              class:current={choice.id === active}
-              aria-pressed={choice.id === active}
-              onclick={() => onChoose(choice.id)}
-            >
-              <span class="swatch" style:background={choice.tokens['--accent']}></span>
-              <span class="name">{choice.name}</span>
-              {#if choice.id === active}
-                <svg class="tick" viewBox="0 0 14 14" aria-hidden="true">
-                  <path d="M2.5 7.4l3 3 6-6.4" />
-                </svg>
-              {/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
-    </section>
+    </div>
   </div>
 </div>
 
@@ -238,11 +313,7 @@
   }
 
   .dialog {
-    width: min(30rem, calc(100vw - 3rem));
-    /* The panel grew a section; on a short window it scrolls rather than
-       running off the bottom where the close button cannot be reached. */
-    max-height: calc(100vh - 4rem);
-    overflow-y: auto;
+    width: min(34rem, calc(100vw - 3rem));
     background: var(--pane);
     backdrop-filter: var(--pane-blur);
     -webkit-backdrop-filter: var(--pane-blur);
@@ -263,47 +334,6 @@
     font-size: 0.875rem;
     font-weight: 500;
     color: var(--text);
-  }
-
-  section + section {
-    margin-top: 1.15rem;
-  }
-
-  .legend {
-    display: flex;
-    align-items: baseline;
-    margin-bottom: 0.5rem;
-  }
-
-  h3 {
-    margin: 0;
-    font-size: 0.72rem;
-    font-weight: 500;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-  }
-
-  .reset {
-    margin-left: auto;
-    padding: 0;
-    border: 0;
-    background: none;
-    color: var(--accent-strong);
-    font: inherit;
-    font-size: 0.72rem;
-    cursor: pointer;
-  }
-
-  .reset:disabled {
-    color: var(--text-faint);
-    cursor: default;
-  }
-
-  .note {
-    margin: 0 0 0.5rem;
-    font-size: 0.72rem;
-    color: var(--text-dim);
   }
 
   .close {
@@ -332,6 +362,93 @@
     stroke-width: 1.2;
   }
 
+  .body {
+    display: flex;
+    gap: 0.9rem;
+    align-items: flex-start;
+  }
+
+  /* The rail. Narrow and quiet: it names three places, and the panel beside it
+     is what the eye should land on. */
+  nav {
+    display: flex;
+    flex: none;
+    width: 7.2rem;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  nav button {
+    padding: 0.44rem 0.6rem;
+    text-align: left;
+    font: inherit;
+    font-size: 0.79rem;
+    color: var(--text-dim);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  nav button:hover {
+    background: var(--row-hover);
+    color: var(--text);
+  }
+
+  nav button.current {
+    color: var(--text);
+    background: var(--row-selected);
+    border-color: var(--row-selected-border);
+  }
+
+  /* One section's height should not make the next one jump, and a long section
+     scrolls inside itself rather than growing the dialog past the screen. */
+  .panel {
+    flex: 1;
+    min-width: 0;
+    min-height: 17rem;
+    max-height: min(26rem, calc(100vh - 12rem));
+    overflow-y: auto;
+  }
+
+  .lead {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    margin-bottom: 0.6rem;
+  }
+
+  .lead p {
+    margin: 0;
+    font-size: 0.73rem;
+    line-height: 1.4;
+    color: var(--text-dim);
+  }
+
+  .reset {
+    margin-left: auto;
+    flex: none;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-strong);
+    font: inherit;
+    font-size: 0.72rem;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .reset:disabled {
+    color: var(--text-faint);
+    cursor: default;
+  }
+
+  .note {
+    margin: 0 0 0.5rem;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+
   ul {
     list-style: none;
     margin: 0;
@@ -341,109 +458,114 @@
     gap: 0.375rem;
   }
 
-  .switches label {
+  li > label,
+  .field {
     display: flex;
     align-items: flex-start;
-    gap: 0.65rem;
-    padding: 0.6rem 0.81rem;
+    gap: 0.6rem;
+    padding: 0.6rem 0.7rem;
     background: var(--inset);
     border: 1px solid transparent;
     border-radius: var(--radius);
     color: var(--text);
+  }
+
+  li > label {
     cursor: pointer;
   }
 
-  .switches label:hover {
+  li > label:hover {
     background: var(--row-hover);
+  }
+
+  .field {
+    flex-direction: column;
+    gap: 0.3rem;
   }
 
   /* A stage that will not run is dimmed rather than removed: what a scan is
      not going to do is as much a part of the account as what it will. */
-  .switches label.off .body {
-    opacity: 0.55;
+  li > label.off .text {
+    opacity: 0.5;
   }
 
-  .switches input,
-  .numbers input {
+  input[type='checkbox'] {
+    margin: 0.12rem 0 0;
+    flex: none;
     accent-color: var(--accent-strong);
   }
 
-  .switches input {
-    margin: 0.15rem 0 0;
-    flex: none;
-  }
-
-  .body {
+  .text {
     display: flex;
     flex-direction: column;
-    gap: 0.12rem;
+    gap: 0.1rem;
     min-width: 0;
   }
 
   .name {
-    font-size: 0.84rem;
-  }
-
-  .cost {
-    margin-left: 0.45rem;
-    font-size: 0.7rem;
-    color: var(--text-faint);
+    font-size: 0.82rem;
   }
 
   .about {
+    margin: 0;
     font-size: 0.71rem;
-    line-height: 1.35;
+    line-height: 1.38;
     color: var(--text-dim);
   }
 
-  .numbers {
-    display: flex;
-    gap: 0.6rem;
-    margin-top: 0.5rem;
+  .cost {
+    margin-left: auto;
+    flex: none;
+    padding-top: 0.05rem;
+    font-size: 0.69rem;
+    white-space: nowrap;
+    color: var(--text-faint);
   }
 
-  .numbers label {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    flex-direction: column;
-    gap: 0.2rem;
-    padding: 0.6rem 0.81rem;
-    background: var(--inset);
-    border: 1px solid transparent;
-    border-radius: var(--radius);
-    color: var(--text);
+  /* Indented under the stage it belongs to, and hung off it by a rule, so it
+     reads as part of that choice rather than as a fourth one. */
+  .nested {
+    margin: 0.25rem 0 0 1.6rem;
+    padding-left: 0.7rem;
+    border-left: 1px solid var(--inset-border);
   }
 
-  .field {
+  .inline {
     display: flex;
     align-items: baseline;
-    gap: 0.3rem;
+    gap: 0.4rem;
+    padding: 0;
+    background: none;
+    border: 0;
   }
 
-  .numbers input {
-    width: 100%;
-    min-width: 0;
-    padding: 0.25rem 0.4rem;
+  .unit {
+    font-size: 0.73rem;
+    color: var(--text-faint);
+  }
+
+  .number {
+    width: 4.4rem;
+    padding: 0.2rem 0.4rem;
     background: var(--pane);
     border: 1px solid var(--inset-border);
     border-radius: var(--radius);
     color: var(--text);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: 0.78rem;
+    accent-color: var(--accent-strong);
   }
 
-  .unit {
-    font-size: 0.72rem;
-    color: var(--text-faint);
+  .nested .about {
+    margin-top: 0.25rem;
   }
 
-  li button.theme {
+  .themes li button.theme {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.7rem;
     width: 100%;
-    padding: 0.69rem 0.81rem;
+    padding: 0.62rem 0.7rem;
     text-align: left;
     background: var(--inset);
     border: 1px solid transparent;
@@ -453,18 +575,18 @@
     cursor: pointer;
   }
 
-  li button.theme:hover {
+  .themes li button.theme:hover {
     background: var(--row-hover);
   }
 
-  li button.theme.current {
+  .themes li button.theme.current {
     background: var(--row-selected);
     border-color: var(--row-selected-border);
   }
 
   .swatch {
-    width: 1.375rem;
-    height: 1.375rem;
+    width: 1.31rem;
+    height: 1.31rem;
     flex: none;
     border-radius: 50%;
     border: 1px solid var(--pane-border);

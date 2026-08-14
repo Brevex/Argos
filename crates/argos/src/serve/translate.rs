@@ -293,10 +293,9 @@ pub fn options(request: &dto::ScanRequest) -> crate::scan::Options {
         },
         triage: request.triage,
         min_long_side: request.min_long_side,
-        // Not on the wire: a client gets the engine's own budget. Putting it
-        // there is a schema change (`A-DTO-VERSIONED`), and no client asks for
-        // it yet.
-        reassembly_budget: None,
+        reassembly_budget: request
+            .reassembly_budget_seconds
+            .map(std::time::Duration::from_secs),
         previews: request.previews,
         // The wire carries no range: a client that could scan part of a medium
         // and report it as the medium is a client that can mislead, and adding

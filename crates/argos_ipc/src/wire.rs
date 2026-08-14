@@ -114,9 +114,18 @@ pub enum Call {
         session: String,
         /// Directory to copy into.
         to: String,
-        /// Artifact hashes to export; everything when empty.
+        /// Artifact hashes to export; everything the other criteria admit when
+        /// empty.
         #[serde(default)]
         hashes: Vec<String>,
+        /// Weakest standing to export, by its canonical name. Absent exports
+        /// whatever the other criteria admit.
+        ///
+        /// The same vocabulary [`Call::ScanGallery`] filters by, so a client
+        /// can export exactly the set it is showing rather than asking the
+        /// person to describe it a second time.
+        #[serde(default)]
+        standing: Option<String>,
     },
 }
 

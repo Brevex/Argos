@@ -166,18 +166,7 @@ impl Engine {
                 standing,
                 include_unwritten,
             } => {
-                let floor = standing
-                    .as_deref()
-                    .map(str::parse::<argos_classify::rank::Standing>)
-                    .transpose()
-                    .map_err(|_unknown| {
-                        (
-                            ErrorCode::InvalidParams,
-                            "not a standing: expected one of cache-neighbour, unremarkable, \
-                             photograph-sized, dated, camera-named"
-                                .to_owned(),
-                        )
-                    })?;
+                let floor = Self::parse_standing(standing.as_deref())?;
                 Manifest::read(&session)
                     .map(|manifest| {
                         Reply::Page(Box::new(translate::gallery(
@@ -194,19 +183,50 @@ impl Engine {
                 session,
                 to,
                 hashes,
-            } => crate::export::run(
-                session.as_ref(),
-                to.as_ref(),
-                // The wire carries hash selection only; the photograph
-                // criteria are a schema change (`A-DTO-VERSIONED`).
-                &crate::export::Filter {
-                    hashes,
-                    ..crate::export::Filter::default()
-                },
-            )
-            .map(|exported| Reply::Exported(translate::exported(&exported)))
-            .map_err(|err| (ErrorCode::InvalidParams, format!("{err:#}"))),
+                standing,
+            } => {
+                let standing = Self::parse_standing(standing.as_deref())?;
+                crate::export::run(
+                    session.as_ref(),
+                    to.as_ref(),
+                    // The remaining criteria — a pixel floor, a camera, a date
+                    // range — stay on the command line: they are queries a
+                    // person writes, and no client asks for them yet.
+                    &crate::export::Filter {
+                        hashes,
+                        standing,
+                        ..crate::export::Filter::default()
+                    },
+                )
+                .map(|exported| Reply::Exported(translate::exported(&exported)))
+                .map_err(|err| (ErrorCode::InvalidParams, format!("{err:#}")))
+            }
         }
+    }
+
+    /// One standing name from the wire, or `None` when the client sent none.
+    ///
+    /// One parser for both the gallery and the export, so the set a client is
+    /// shown and the set it exports cannot be admitted on different terms.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the name is not one the engine knows, naming the ones it does
+    /// — a client one version ahead must be told, not silently given everything.
+    fn parse_standing(
+        standing: Option<&str>,
+    ) -> Result<Option<argos_classify::rank::Standing>, (ErrorCode, String)> {
+        standing
+            .map(str::parse::<argos_classify::rank::Standing>)
+            .transpose()
+            .map_err(|_unknown| {
+                (
+                    ErrorCode::InvalidParams,
+                    "not a standing: expected one of cache-neighbour, unremarkable, \
+                     photograph-sized, dated, camera-named"
+                        .to_owned(),
+                )
+            })
     }
 
     /// Agrees on the wire format, or refuses to speak.

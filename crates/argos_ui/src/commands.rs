@@ -142,6 +142,36 @@ pub async fn scan_resume(shell: State<'_, Shell>) -> Result<(), String> {
     shell.call(Call::ScanResume, engine::done).await
 }
 
+/// Copies a session's artifacts out, verifying each hash on the way.
+///
+/// `standing` is the same filter the gallery is showing, passed straight
+/// through: the set a person is looking at is the set they mean to export, and
+/// asking them to describe it a second time is how the two come to disagree.
+/// Nothing here reads it — the engine decides what each name admits
+/// (`A-SHELL-NO-DOMAIN`).
+///
+/// An artifact whose stored bytes no longer reproduce the digest the scan
+/// recorded is reported and not copied.
+#[tauri::command]
+pub async fn export_copy(
+    shell: State<'_, Shell>,
+    session: String,
+    to: String,
+    standing: Option<String>,
+) -> Result<dto::Exported, String> {
+    shell
+        .call(
+            Call::ExportCopy {
+                session,
+                to,
+                hashes: Vec::new(),
+                standing,
+            },
+            engine::exported,
+        )
+        .await
+}
+
 /// The view preferences this account last stored, as JSON text.
 ///
 /// Empty when there are none. The window parses it; nothing here looks inside

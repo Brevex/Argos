@@ -54,7 +54,7 @@ is one sample: the ordering between stages is dependable, the absolute figures a
 | C17 | Skip the filesystem stage (`--carve-only`) | CLI, GUI | saves 32 m |
 | C18 | Skip carving (`--metadata-only`) | CLI, GUI | saves 2 h 01 m |
 | C19 | Skip reassembly (`--no-reassemble`) | CLI, GUI | saves up to 2 h |
-| C20 | Bound reassembly by wall clock (`--reassembly-budget`), or let it search every candidate | CLI | sets the ceiling |
+| C20 | Bound reassembly by wall clock (`--reassembly-budget`), or let it search every candidate | CLI, GUI | sets the ceiling |
 | C21 | Scan one byte range of the medium rather than all of it (`--range`) | CLI | hours → minutes |
 | C22 | Search a previous session's fragmentation points again without re-reading the medium (`reassemble --from`) | CLI | saves the whole sweep |
 | C23 | Choose the worker count (`--jobs`) | CLI, GUI | — |
@@ -91,10 +91,10 @@ not judge.
 | C33 | Refuse an output directory that would contain the source | CLI, GUI | — |
 | C34 | Print what a finished session recovered, read back from its manifest (`report`, `--all`) | CLI | instant |
 | C35 | Read one page of a session's artifacts, ordered strongest evidence first, filtered by standing | CLI, GUI | instant |
-| C36 | Copy artifacts out of a session, verifying each hash and refusing any whose bytes no longer reproduce it | CLI, wire | I/O bound |
+| C36 | Copy artifacts out of a session, verifying each hash and refusing any whose bytes no longer reproduce it | CLI, GUI | I/O bound |
 | C37 | Select what to export by SHA-256 or an unambiguous prefix | CLI, wire | — |
 | C38 | Select what to export by smallest long side | CLI | — |
-| C39 | Select what to export by standing | CLI | — |
+| C39 | Select what to export by standing | CLI, GUI | — |
 | C40 | Select what to export by recorded camera make or model | CLI | — |
 | C41 | Select what to export by capture date range | CLI | — |
 
@@ -125,9 +125,9 @@ and what was only recorded are counted apart.
 | | Count |
 | --- | --- |
 | Reachable from the command line | **47** — every one except C48 and C49, which are the window itself |
-| Reachable from the window | **36** |
-| Reachable from the command line but not the window | **13** — C07, C08, C20, C21, C22, C34, C36–C41, C47 |
-| Expressible on the wire but called by no client | **2** — C36, C37 |
+| Reachable from the window | **39** |
+| Reachable from the command line but not the window | **10** — C07, C08, C21, C22, C34, C37, C38, C40, C41, C47 |
+| Expressible on the wire but called by no client | **1** — C37 |
 
 The command line reaches every capability the tool has, headless, before any interface exposes it
 (`A-CLI-FIRST`). Where the window reaches fewer, the difference is a surface that has not been

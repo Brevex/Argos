@@ -285,6 +285,15 @@ pub fn page(reply: Reply) -> Option<dto::Gallery> {
     }
 }
 
+/// Narrows a reply to what an export produced.
+#[must_use]
+pub fn exported(reply: Reply) -> Option<dto::Exported> {
+    match reply {
+        Reply::Exported(exported) => Some(exported),
+        _ => None,
+    }
+}
+
 /// Narrows a reply to a bare acknowledgement.
 #[must_use]
 #[expect(
