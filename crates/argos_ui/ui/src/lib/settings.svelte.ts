@@ -19,21 +19,6 @@ import { load, save, section } from './preferences';
 /** The key this section is stored under in the preference document. */
 const STORAGE_KEY = 'recovery';
 
-/**
- * What each stage cost on the measured run: a 1 TB mechanical disk, 12
- * workers, 5 h 31 m in all. Shown beside each switch so the choice is made
- * against a number rather than a guess.
- *
- * One disk is one sample. The order between the stages is dependable; the
- * absolute figures are not, which is why they are shown as approximations.
- */
-export const MEASURED_COST: Record<string, string> = {
-  filesystem: '≈ 32 min',
-  carving: '≈ 2 h',
-  reassembly: 'up to 2 h',
-  triage: '≈ 3 min',
-};
-
 class Settings {
   /** Recover from filesystem metadata. */
   filesystem = $state(true);

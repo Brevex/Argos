@@ -24,7 +24,7 @@
   // Aliased: `active` is already the id of the chosen theme, a prop of this
   // component. This is the theme itself, for its artwork.
   import { active as inForce } from '../../themes/active.svelte';
-  import { MEASURED_COST, settings } from '../../lib/settings.svelte';
+  import { settings } from '../../lib/settings.svelte';
   import { loadTheme, themeIds } from '../../themes';
   import type { ThemeModule } from '../../themes/contract';
 
@@ -56,7 +56,7 @@
    * The stages, in the order a scan runs them, each said in one line.
    *
    * The line describes what turning it *on* does, because that is the choice
-   * being made. The tag beside it is what that cost on the measured disk.
+   * being made.
    */
   const STAGES = [
     {
@@ -127,7 +127,7 @@
       <div class="panel">
         {#if open === 'recovery'}
           <div class="lead">
-            <p>What the scan looks for. Each one costs time; turning it off saves that time.</p>
+            <p>What the scan looks for. Each one takes time; turning it off saves that time.</p>
             {#if settings.customized}
               <button class="reset" onclick={() => settings.reset()} disabled={locked}>
                 Restore defaults
@@ -155,7 +155,6 @@
                     <span class="name">{stage.name}</span>
                     <span class="about">{stage.about}</span>
                   </span>
-                  <span class="cost">{MEASURED_COST[stage.key]}</span>
                 </label>
 
                 <!-- Only while the stage it bounds is on: a limit on something
@@ -200,7 +199,6 @@
                     Marks each image a photograph or an app asset. Never changes what is recovered.
                   </span>
                 </span>
-                <span class="cost">{MEASURED_COST.triage}</span>
               </label>
             </li>
           </ul>
@@ -600,15 +598,6 @@
     font-size: 0.75rem;
     line-height: 1.45;
     color: var(--text-dim);
-  }
-
-  .cost {
-    margin-left: auto;
-    flex: none;
-    padding-top: 0.15rem;
-    font-size: 0.73rem;
-    white-space: nowrap;
-    color: var(--text-faint);
   }
 
   /* Indented under the stage it bounds, carried by space alone — a rule here
