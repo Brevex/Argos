@@ -13,6 +13,7 @@ use miniz_oxide::deflate::compress_to_vec_zlib;
 pub struct Jpeg {
     restart_interval: Option<u16>,
     thumbnail: Option<Vec<u8>>,
+    capture: Option<Vec<u8>>,
     entropy_bytes: usize,
 }
 
@@ -23,6 +24,7 @@ impl Jpeg {
         Self {
             restart_interval: None,
             thumbnail: None,
+            capture: None,
             entropy_bytes: 2048,
         }
     }
@@ -38,6 +40,19 @@ impl Jpeg {
     #[must_use]
     pub fn with_exif_thumbnail(mut self, thumbnail: Vec<u8>) -> Self {
         self.thumbnail = Some(thumbnail);
+        self
+    }
+
+    /// Embeds an EXIF `APP1` segment describing the camera and the moment.
+    #[must_use]
+    pub fn with_capture(
+        mut self,
+        make: &str,
+        model: &str,
+        taken: &str,
+        pixels: (u32, u32),
+    ) -> Self {
+        self.capture = Some(exif_capture(make, model, taken, pixels));
         self
     }
 
@@ -62,6 +77,9 @@ impl Jpeg {
 
         if let Some(thumb) = &self.thumbnail {
             segment(&mut out, 0xE1, &exif_app1_payload(thumb));
+        }
+        if let Some(capture) = &self.capture {
+            segment(&mut out, 0xE1, capture);
         }
 
         // DQT: table 0, 64 unit coefficients.
@@ -433,6 +451,86 @@ fn exif_app1_payload(thumbnail: &[u8]) -> Vec<u8> {
     payload
 }
 
+/// An EXIF `APP1` payload describing the camera and the moment.
+///
+/// The shape a camera writes: `Make` and `Model` in IFD0, a pointer to the Exif
+/// private IFD, and `DateTimeOriginal` and the pixel dimensions inside it. Text
+/// values are longer than four bytes, so they are stored out of line and
+/// reached through an offset — the case a walker has to get right and the one a
+/// crafted file abuses.
+#[must_use]
+pub fn exif_capture(make: &str, model: &str, taken: &str, pixels: (u32, u32)) -> Vec<u8> {
+    const HEADER_BYTES: u32 = 8;
+    const ENTRY_BYTES: usize = 12;
+    const TAG_MAKE: u16 = 0x010F;
+    const TAG_MODEL: u16 = 0x0110;
+    const TAG_EXIF_IFD: u16 = 0x8769;
+    const TAG_DATETIME_ORIGINAL: u16 = 0x9003;
+    const TAG_PIXEL_WIDTH: u16 = 0xA002;
+    const TAG_PIXEL_HEIGHT: u16 = 0xA003;
+    const TYPE_ASCII: u16 = 2;
+    const TYPE_LONG: u16 = 4;
+
+    // Text values, `NUL`-terminated as the format requires, laid out after both
+    // IFDs so their offsets are known before either is written.
+    let make_bytes = format!("{make}\0").into_bytes();
+    let model_bytes = format!("{model}\0").into_bytes();
+    let taken_bytes = format!("{taken}\0").into_bytes();
+    let ifd0_bytes = 2 + 3 * ENTRY_BYTES + 4;
+    let exif_ifd = usize::try_from(HEADER_BYTES).unwrap_or(8) + ifd0_bytes;
+    let exif_ifd_bytes = 2 + 3 * ENTRY_BYTES + 4;
+    let text_at = exif_ifd + exif_ifd_bytes;
+    let make_at = u32::try_from(text_at).unwrap_or(0);
+    let model_at = make_at + u32::try_from(make_bytes.len()).unwrap_or(0);
+    let taken_at = model_at + u32::try_from(model_bytes.len()).unwrap_or(0);
+
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II");
+    tiff.extend_from_slice(&42_u16.to_le_bytes());
+    tiff.extend_from_slice(&HEADER_BYTES.to_le_bytes());
+
+    tiff.extend_from_slice(&3_u16.to_le_bytes());
+    ifd_text_entry(&mut tiff, TAG_MAKE, make_bytes.len(), make_at);
+    ifd_text_entry(&mut tiff, TAG_MODEL, model_bytes.len(), model_at);
+    ifd_entry(
+        &mut tiff,
+        TAG_EXIF_IFD,
+        TYPE_LONG,
+        u32::try_from(exif_ifd).unwrap_or(0),
+    );
+    tiff.extend_from_slice(&0_u32.to_le_bytes()); // no IFD1
+
+    debug_assert_eq!(tiff.len(), exif_ifd);
+    tiff.extend_from_slice(&3_u16.to_le_bytes());
+    ifd_text_entry(
+        &mut tiff,
+        TAG_DATETIME_ORIGINAL,
+        taken_bytes.len(),
+        taken_at,
+    );
+    ifd_entry(&mut tiff, TAG_PIXEL_WIDTH, TYPE_LONG, pixels.0);
+    ifd_entry(&mut tiff, TAG_PIXEL_HEIGHT, TYPE_LONG, pixels.1);
+    tiff.extend_from_slice(&0_u32.to_le_bytes());
+
+    debug_assert_eq!(tiff.len(), text_at);
+    tiff.extend_from_slice(&make_bytes);
+    tiff.extend_from_slice(&model_bytes);
+    tiff.extend_from_slice(&taken_bytes);
+    let _ = TYPE_ASCII;
+
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&tiff);
+    payload
+}
+
+/// Appends one 12-byte IFD entry whose `ASCII` value sits out of line.
+fn ifd_text_entry(tiff: &mut Vec<u8>, tag: u16, len: usize, at: u32) {
+    tiff.extend_from_slice(&tag.to_le_bytes());
+    tiff.extend_from_slice(&2_u16.to_le_bytes());
+    tiff.extend_from_slice(&u32::try_from(len).unwrap_or(0).to_le_bytes());
+    tiff.extend_from_slice(&at.to_le_bytes());
+}
+
 /// Appends one 12-byte IFD entry with an inline value.
 fn ifd_entry(tiff: &mut Vec<u8>, tag: u16, kind: u16, value: u32) {
     tiff.extend_from_slice(&tag.to_le_bytes());
@@ -689,6 +787,297 @@ pub fn icon_png(size: u32, seed: u32) -> Vec<u8> {
         }
     }
     png_from_raw(size, size, &raw)
+}
+
+// --- large media -----------------------------------------------------------
+
+/// Filler byte at `at`, from a position-keyed generator.
+///
+/// [`Noise`] is a stream: reaching byte *n* costs *n* steps, so it cannot fill
+/// a medium a search reads out of order. This is `splitmix64` over the offset
+/// instead, which makes any byte reachable in constant time and keeps the
+/// medium identical however it is read.
+fn filler_word(seed: u64, index: u64) -> u64 {
+    let mut z = (seed ^ index).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Bytes one [`filler_word`] supplies.
+const FILLER_WORD_BYTES: u64 = 8;
+
+/// The raw filler byte at `at`, before signatures are scrubbed.
+fn filler_raw(seed: u64, at: u64) -> u8 {
+    let lane = usize::try_from(at % FILLER_WORD_BYTES).unwrap_or(0);
+    filler_word(seed, at / FILLER_WORD_BYTES).to_le_bytes()[lane]
+}
+
+/// Removes an accidental file signature from the filler.
+///
+/// Only placed images may produce header hits, or a fixture would be measuring
+/// the medium's luck. `0xFF` itself is kept: filler that breaks a JPEG entropy
+/// scan the way unrelated data does is what makes a fragmented fixture
+/// fragmented.
+fn scrub_signature(previous: u8, byte: u8) -> u8 {
+    match (previous, byte) {
+        (0xFF, 0xD8) => 0x55,
+        (0x89, b'P') => 0x51,
+        _ => byte,
+    }
+}
+
+/// A large synthetic medium that is never materialized.
+///
+/// Reassembly is bounded by how far it searches, so a fixture that measures it
+/// has to be bigger than the search. Holding one in a `Vec` costs its length
+/// per sample; generating it per byte read costs the placed images only, which
+/// is what lets a suite plant fragments hundreds of megabytes apart.
+///
+/// Reads outside a placement yield filler, and reads past the end yield
+/// nothing, so a search that runs off the medium fails rather than wrapping.
+#[derive(Clone, Debug)]
+pub struct SparseDisk {
+    len: u64,
+    seed: u64,
+    /// Placements in ascending offset order, non-overlapping.
+    placed: Vec<(u64, Vec<u8>)>,
+    pos: u64,
+}
+
+impl SparseDisk {
+    /// A medium of `len` filler bytes.
+    #[must_use]
+    pub fn noisy(len: u64, seed: u64) -> Self {
+        Self {
+            len,
+            seed: if seed == 0 { 1 } else { seed },
+            placed: Vec::new(),
+            pos: 0,
+        }
+    }
+
+    /// Places `bytes` at `offset`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the placement runs past the end of the medium or overlaps an
+    /// earlier one, with the values — both are fixture bugs.
+    #[must_use]
+    pub fn with(mut self, offset: u64, bytes: &[u8]) -> Self {
+        let end = offset
+            .checked_add(bytes.len() as u64)
+            .expect("placement offset and length must not overflow");
+        assert!(
+            end <= self.len,
+            "placement at {offset}+{} runs past the {}-byte medium",
+            bytes.len(),
+            self.len
+        );
+        let at = self.placed.partition_point(|(start, _)| *start < offset);
+        if let Some((start, earlier)) = at.checked_sub(1).and_then(|i| self.placed.get(i)) {
+            assert!(
+                start + earlier.len() as u64 <= offset,
+                "placement at {offset} overlaps the one at {start}"
+            );
+        }
+        if let Some((start, _)) = self.placed.get(at) {
+            assert!(
+                end <= *start,
+                "placement at {offset}+{} overlaps the one at {start}",
+                bytes.len()
+            );
+        }
+        self.placed.insert(at, (offset, bytes.to_vec()));
+        self
+    }
+
+    /// Length of the medium in bytes.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the medium holds no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Concatenates the bytes `extents` name, in the order given.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an extent runs past the end of the medium — a fixture bug.
+    #[must_use]
+    pub fn read_extents(&self, extents: &[argos_core::geometry::ByteRange]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for extent in extents {
+            let len = usize::try_from(extent.len).expect("fixture extent lengths fit usize");
+            let at = out.len();
+            out.resize(at + len, 0);
+            self.fill(extent.start.get(), &mut out[at..]);
+        }
+        out
+    }
+
+    /// Writes the medium's bytes from `start` into `buf`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the span runs past the end of the medium.
+    fn fill(&self, start: u64, buf: &mut [u8]) {
+        assert!(
+            start.saturating_add(buf.len() as u64) <= self.len,
+            "read of {} bytes at {start} runs past the {}-byte medium",
+            buf.len(),
+            self.len
+        );
+        let mut lane = usize::try_from(start % FILLER_WORD_BYTES).unwrap_or(0);
+        let mut word = filler_word(self.seed, start / FILLER_WORD_BYTES).to_le_bytes();
+        // The scrub looks at the byte before the one being written, so a span
+        // starting mid-pattern has to fetch it rather than assume it.
+        let mut previous = if start == 0 {
+            0
+        } else {
+            filler_raw(self.seed, start - 1)
+        };
+        for (at, slot) in (start..).zip(buf.iter_mut()) {
+            if lane == word.len() {
+                lane = 0;
+                word = filler_word(self.seed, at / FILLER_WORD_BYTES).to_le_bytes();
+            }
+            let raw = word[lane];
+            *slot = scrub_signature(previous, raw);
+            previous = raw;
+            lane += 1;
+        }
+
+        // Placements overwrite the filler under them.
+        let end = start + buf.len() as u64;
+        let first = self
+            .placed
+            .partition_point(|(offset, bytes)| offset + bytes.len() as u64 <= start);
+        for (offset, bytes) in self.placed.iter().skip(first) {
+            if *offset >= end {
+                break;
+            }
+            let from = offset.max(&start);
+            let to = (offset + bytes.len() as u64).min(end);
+            let into = usize::try_from(from - start).unwrap_or(0);
+            let taken = usize::try_from(to - from).unwrap_or(0);
+            let cut = usize::try_from(from - offset).unwrap_or(0);
+            buf[into..into + taken].copy_from_slice(&bytes[cut..cut + taken]);
+        }
+    }
+}
+
+impl std::io::Read for SparseDisk {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.len.saturating_sub(self.pos);
+        let want = (buf.len() as u64).min(remaining);
+        let want = usize::try_from(want).unwrap_or(0);
+        if want == 0 {
+            return Ok(0);
+        }
+        self.fill(self.pos, &mut buf[..want]);
+        self.pos += want as u64;
+        Ok(want)
+    }
+}
+
+impl std::io::Seek for SparseDisk {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let target = match pos {
+            SeekFrom::Start(at) => Some(at),
+            SeekFrom::End(delta) => self.len.checked_add_signed(delta),
+            SeekFrom::Current(delta) => self.pos.checked_add_signed(delta),
+        };
+        let Some(target) = target else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start of the medium",
+            ));
+        };
+        self.pos = target;
+        Ok(target)
+    }
+}
+
+/// A fragmented image planted on a [`SparseDisk`], with the ground truth.
+#[derive(Clone, Debug)]
+pub struct Planted {
+    /// The whole image, as it was before being split.
+    pub image: Vec<u8>,
+    /// Where each fragment landed, in file order — the answer a reassembly has
+    /// to arrive at.
+    pub extents: Vec<argos_core::geometry::ByteRange>,
+    /// The composed medium.
+    pub disk: SparseDisk,
+}
+
+impl Planted {
+    /// The medium as a seekable source.
+    #[must_use]
+    pub fn source(&self) -> SparseDisk {
+        self.disk.clone()
+    }
+
+    /// Concatenates the planted fragments, so a test can assert that its
+    /// recovered extents describe these exact bytes.
+    #[must_use]
+    pub fn planted_bytes(&self) -> Vec<u8> {
+        self.disk.read_extents(&self.extents)
+    }
+}
+
+/// Splits `image` into fragments starting at `starts` and plants them on a
+/// medium of `len` bytes.
+///
+/// The [`fragmented`] layout at a scale no `Vec` would hold. `starts` is in
+/// **file order**, so a test can place a later fragment at a lower offset.
+///
+/// # Panics
+///
+/// Panics if the fragments do not fit, overlap, or if `starts` is empty.
+#[must_use]
+pub fn planted(len: u64, image: &[u8], starts: &[u64], block: u64) -> Planted {
+    use argos_core::geometry::{ByteOffset, ByteRange};
+
+    assert!(!starts.is_empty(), "a planted layout needs a start");
+    assert!(block > 0, "the block size must be positive");
+    for &start in starts {
+        assert!(
+            start % block == 0,
+            "fragment start {start} is not a multiple of the {block}-byte block"
+        );
+    }
+
+    let pieces = starts.len();
+    let block_len = usize::try_from(block).expect("fixture block sizes fit usize");
+    let per_piece = (image.len() / pieces / block_len).max(1) * block_len;
+    let mut extents = Vec::with_capacity(pieces);
+    let mut disk = SparseDisk::noisy(len, 0x5DEE_CE66_D000_0001);
+    let mut at = 0_usize;
+    for (index, &start) in starts.iter().enumerate() {
+        let take = if index + 1 == pieces {
+            image.len() - at
+        } else {
+            per_piece.min(image.len() - at)
+        };
+        assert!(take > 0, "fragment {index} would be empty");
+        disk = disk.with(start, &image[at..at + take]);
+        extents.push(ByteRange::new(ByteOffset::new(start), take as u64));
+        at += take;
+    }
+    assert_eq!(at, image.len(), "the fragments must cover the whole image");
+
+    Planted {
+        image: image.to_vec(),
+        extents,
+        disk,
+    }
 }
 
 /// Absolute offset of the first `IDAT` chunk's payload in a PNG.

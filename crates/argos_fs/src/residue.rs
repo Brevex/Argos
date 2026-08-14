@@ -55,6 +55,9 @@ pub struct Sweep {
     /// Hand these to [`crate::ntfs::orphan_scan`] with the geometry of the
     /// volume they belong to.
     pub ntfs_records: Vec<ByteRange>,
+    /// Regions holding NTFS `INDX` directory index buffers, whose slack names
+    /// files a directory no longer lists.
+    pub ntfs_indexes: Vec<ByteRange>,
 }
 
 impl Sweep {
@@ -65,6 +68,7 @@ impl Sweep {
     pub fn merge(&mut self, other: Self) {
         self.volumes.extend(other.volumes);
         self.ntfs_records.extend(other.ntfs_records);
+        self.ntfs_indexes.extend(other.ntfs_indexes);
     }
 
     /// Orders both result lists, drops the duplicates that window overlap
@@ -169,7 +173,10 @@ pub fn scan_window(window: &[u8], start: ByteOffset, medium_len: u64, out: &mut 
     let step = usize::try_from(STEP_BYTES).unwrap_or(512);
     let mut at = 0_usize;
     while at + 512 <= window.len() {
-        if out.volumes.len() >= MAX_VOLUMES || out.ntfs_records.len() >= MAX_RECORD_REGIONS {
+        if out.volumes.len() >= MAX_VOLUMES
+            || out.ntfs_records.len() >= MAX_RECORD_REGIONS
+            || out.ntfs_indexes.len() >= MAX_RECORD_REGIONS
+        {
             return false;
         }
         let absolute = start.get().saturating_add(at as u64);
@@ -180,12 +187,22 @@ pub fn scan_window(window: &[u8], start: ByteOffset, medium_len: u64, out: &mut 
                 }
             }
             Some(Anchor::NtfsRecord) => push_record_region(&mut out.ntfs_records, absolute),
+            Some(Anchor::NtfsIndex) => out.ntfs_indexes.push(ByteRange::new(
+                ByteOffset::new(absolute),
+                INDEX_BUFFER_BYTES,
+            )),
             None => {}
         }
         at += step;
     }
     true
 }
+
+/// Bytes of one `INDX` buffer read for its slack.
+///
+/// The default index-allocation unit; a larger one simply yields the first
+/// part of it, which is where the entries are.
+const INDEX_BUFFER_BYTES: u64 = 4096;
 
 /// Extends the last record region when adjacent, so a run of orphaned
 /// records becomes one range instead of thousands.
@@ -214,11 +231,20 @@ pub fn anchor_at(window: &[u8], at: u64, medium_len: u64) -> Option<Anchor> {
     if window.get(..4) == Some(NTFS_RECORD_MAGIC) && crate::ntfs::is_plausible_record(window) {
         return Some(Anchor::NtfsRecord);
     }
+    // A directory index buffer. Its slack keeps the names of entries the
+    // directory has removed, which is how a deleted file can still be named
+    // when nothing else about it survived.
+    if window.get(..4) == Some(NTFS_INDEX_MAGIC) {
+        return Some(Anchor::NtfsIndex);
+    }
     None
 }
 
 /// `FILE` record signature. Source: NTFS file-record layout.
 const NTFS_RECORD_MAGIC: &[u8; 4] = b"FILE";
+
+/// `INDX` buffer signature. Source: NTFS index-buffer layout.
+const NTFS_INDEX_MAGIC: &[u8; 4] = b"INDX";
 
 /// Tests one sector-aligned position for a volume anchor.
 ///
@@ -233,6 +259,7 @@ pub fn volume_at(window: &[u8], at: u64, medium_len: u64) -> Option<Volume> {
             kind: FsKind::Ntfs,
             range: ByteRange::new(ByteOffset::new(at), ntfs.volume_bytes.min(remaining)),
             origin: Origin::Residual,
+            allocation_bytes: ntfs.cluster_bytes,
         });
     }
     if let Some(fat) = Fat::from_boot_sector(window, ByteOffset::new(at)) {
@@ -242,6 +269,7 @@ pub fn volume_at(window: &[u8], at: u64, medium_len: u64) -> Option<Volume> {
             // default of "the rest of the disk" would fabricate its size.
             range: ByteRange::new(ByteOffset::new(at), fat.volume_bytes.min(remaining)),
             origin: Origin::Residual,
+            allocation_bytes: fat.cluster_bytes,
         });
     }
     // An ext superblock sits 1024 bytes into its volume, so a hit here means
@@ -259,6 +287,7 @@ pub fn volume_at(window: &[u8], at: u64, medium_len: u64) -> Option<Volume> {
                 bytes.min(medium_len.saturating_sub(volume_start)),
             ),
             origin: Origin::Residual,
+            allocation_bytes: ext.block_bytes,
         });
     }
     // The magic test comes first: the full container parse stages a block and
@@ -271,6 +300,7 @@ pub fn volume_at(window: &[u8], at: u64, medium_len: u64) -> Option<Volume> {
             kind: FsKind::Apfs,
             range: ByteRange::new(ByteOffset::new(at), container.min(remaining)),
             origin: Origin::Residual,
+            allocation_bytes: apfs_block_bytes(window).unwrap_or(0),
         });
     }
     None
@@ -280,6 +310,12 @@ pub fn volume_at(window: &[u8], at: u64, medium_len: u64) -> Option<Volume> {
 ///
 /// Validation (magic, Fletcher-64, block-size sanity) lives in the container
 /// parser; the sweep reuses it rather than duplicating the checks.
+fn apfs_block_bytes(window: &[u8]) -> Option<u64> {
+    let mut cursor = std::io::Cursor::new(window);
+    let container = Apfs::open(&mut cursor, ByteOffset::new(0)).ok()??;
+    Some(container.block_bytes)
+}
+
 fn apfs_container_bytes(window: &[u8]) -> Option<u64> {
     let mut cursor = std::io::Cursor::new(window);
     let container = Apfs::open(&mut cursor, ByteOffset::new(0)).ok()??;

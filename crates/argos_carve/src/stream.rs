@@ -6,9 +6,20 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
-/// Bytes the cursor buffers per refill. 64 KiB covers the largest JPEG marker
-/// segment (u16 length) in at most two refills while staying cache-friendly.
+/// Bytes the cursor buffers per refill once it has grown. 64 KiB covers the
+/// largest JPEG marker segment (u16 length) in at most two refills while
+/// staying cache-friendly.
 const REFILL_BYTES: usize = 64 * 1024;
+
+/// Bytes the first refill reads.
+///
+/// A reassembly hypothesis reads a few bytes of a proposed fragment and stops,
+/// because unrelated data fails on the first Huffman code outside the table.
+/// Reading 64 KiB to look at 30 of them is what the search would spend its
+/// time on, so the cursor starts small and doubles: a validator walking a real
+/// image reaches the full size within a few refills, while a rejected
+/// hypothesis never pays for it.
+const FIRST_REFILL_BYTES: usize = 1024;
 
 /// Forward-only bounded cursor; positions are absolute source offsets.
 pub(crate) struct Bytes<'a, R> {
@@ -23,6 +34,8 @@ pub(crate) struct Bytes<'a, R> {
     end: u64,
     /// Reused refill buffer, owned by the caller's `Scratch`.
     buf: &'a mut Vec<u8>,
+    /// Bytes the next refill reads, doubling up to [`REFILL_BYTES`].
+    step: usize,
 }
 
 impl<'a, R: Read + Seek> Bytes<'a, R> {
@@ -36,6 +49,7 @@ impl<'a, R: Read + Seek> Bytes<'a, R> {
             idx: 0,
             end,
             buf,
+            step: FIRST_REFILL_BYTES,
         }
     }
 
@@ -103,8 +117,8 @@ impl<'a, R: Read + Seek> Bytes<'a, R> {
         if pos >= self.end {
             return Ok(false);
         }
-        let want =
-            usize::try_from((self.end - pos).min(REFILL_BYTES as u64)).unwrap_or(REFILL_BYTES);
+        let want = usize::try_from((self.end - pos).min(self.step as u64)).unwrap_or(self.step);
+        self.step = self.step.saturating_mul(2).min(REFILL_BYTES);
         self.buf.resize(want, 0);
         self.src.seek(SeekFrom::Start(pos))?;
         let mut filled = 0;

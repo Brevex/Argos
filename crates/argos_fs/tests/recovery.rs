@@ -770,3 +770,117 @@ fn an_absurd_gpt_entry_size_is_rejected_before_any_allocation() {
         "an entry size beyond one sector must fail the parse"
     );
 }
+
+#[test]
+fn fat32_recovers_a_deleted_file_from_inside_a_folder() {
+    // The shape a person's own files have: the root holds folders, and the
+    // photographs are inside one of them. Reading only the root directory —
+    // which is all this did — makes a whole library invisible on a FAT volume.
+    let file = FilePlan::new("childhood-birthday.jpg", 256 * FAT_CLUSTER, 5000);
+    let image =
+        argos_fs::fixture::fat32_volume_with_subdirectory(1024 * FAT_CLUSTER, "photos", &file);
+
+    let mut src = Cursor::new(&image);
+    let volume = fat::Fat::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the boot sector must validate");
+    let found = volume.recover_deleted(&mut src).expect("in-memory read");
+
+    let recovered = found
+        .iter()
+        .find(|entry| entry.name.as_deref() == Some("childhood-birthday.jpg"))
+        .expect("a deleted file one folder below the root must still be found");
+    assert_eq!(recovered.size, file.content.len() as u64);
+    assert_recovers_the_planted_bytes(&image, &file, &recovered.extents);
+}
+
+#[test]
+fn a_fat_directory_chain_that_loops_terminates() {
+    // Every cluster number in a chain comes from the medium. One that points
+    // back at itself must stop the walk rather than drive it for as long as
+    // the ceiling allows (A-UNTRUSTED-ONDISK).
+    let file = FilePlan::new("looped.jpg", 256 * FAT_CLUSTER, 4000);
+    let mut image =
+        argos_fs::fixture::fat32_volume_with_subdirectory(1024 * FAT_CLUSTER, "photos", &file);
+    // Point the root's allocation-table entry back at the root.
+    let fat_at = 32 * 512;
+    image[fat_at + 8..fat_at + 12].copy_from_slice(&2_u32.to_le_bytes());
+
+    let mut src = Cursor::new(&image);
+    let volume = fat::Fat::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the boot sector must validate");
+
+    let found = volume.recover_deleted(&mut src).expect("in-memory read");
+    assert!(
+        found.iter().any(|entry| entry.name.is_some()),
+        "the walk terminates and still reports what it legitimately read"
+    );
+}
+
+#[test]
+fn ext4_recovers_a_file_whose_extents_outgrew_its_inode() {
+    // ext4 keeps a file's extents in the inode until there are too many, then
+    // pushes them into index blocks. A file with a deep tree is a heavily
+    // fragmented one — which is exactly the file worth recovering, and which
+    // this dropped silently.
+    let file = FilePlan::fragmented(
+        "scattered.jpg",
+        &[
+            (64 * EXT4_BLOCK, 3 * EXT4_BLOCK),
+            (128 * EXT4_BLOCK, 2 * EXT4_BLOCK),
+        ],
+    );
+    let image = argos_fs::fixture::ext4_volume_deep_extents(512 * EXT4_BLOCK, &file);
+
+    let mut src = Cursor::new(&image);
+    let volume = ext4::Ext4::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    let found = volume
+        .recover_from_journal(&mut src)
+        .expect("in-memory read");
+
+    let [recovered] = found.as_slice() else {
+        panic!("expected the one deleted file, got {}", found.len());
+    };
+    assert_eq!(recovered.size, file.content.len() as u64);
+    assert_eq!(recovered.extents.len(), 2, "both runs are reported");
+    assert_recovers_the_planted_bytes(&image, &file, &recovered.extents);
+    assert_eq!(recovered.confidence, Confidence::JournalResidue);
+}
+
+#[test]
+fn ntfs_recovers_a_file_whose_runs_outgrew_its_record() {
+    // NTFS keeps a file's run list in its MFT record until it no longer fits,
+    // then moves the rest into extension records and names them in an
+    // $ATTRIBUTE_LIST. That happens to the most heavily fragmented files on a
+    // volume — and reading only the base record reports them truncated at
+    // whatever fitted, which looks like a successful recovery.
+    let cluster = argos_fs::fixture::NTFS_CLUSTER;
+    let file = argos_fs::fixture::FilePlan::fragmented(
+        "scattered.jpg",
+        &[(64 * cluster, cluster), (96 * cluster, 2 * cluster)],
+    );
+    let image =
+        argos_fs::fixture::ntfs_volume_with_attribute_list(512 * cluster, 4 * cluster, &file);
+
+    let mut src = Cursor::new(&image);
+    let volume = ntfs::Ntfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the boot sector must validate");
+    let found = volume.recover_deleted(&mut src).expect("in-memory read");
+
+    let recovered = found
+        .iter()
+        .find(|entry| entry.name.as_deref() == Some("scattered.jpg"))
+        .expect("the deleted file must be recovered");
+    assert_eq!(
+        recovered.extents.len(),
+        2,
+        "both the base record's run and the extension record's must be \
+         reported, got {:?}",
+        recovered.extents
+    );
+    assert_recovers_the_planted_bytes(&image, &file, &recovered.extents);
+}

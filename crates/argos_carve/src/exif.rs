@@ -7,6 +7,8 @@
 //! before use; the walk visits at most two IFDs, so a crafted chain cannot
 //! loop.
 
+use argos_core::artifact::Capture;
+
 /// TIFF byte-order marks. Source: TIFF 6.0 §2.
 const BYTE_ORDER_LE: [u8; 2] = *b"II";
 const BYTE_ORDER_BE: [u8; 2] = *b"MM";
@@ -22,8 +24,49 @@ const TAG_THUMBNAIL_OFFSET: u16 = 0x0201;
 /// Source: EXIF 2.32, Table 17 (`JPEGInterchangeFormatLength`).
 const TAG_THUMBNAIL_LENGTH: u16 = 0x0202;
 
+/// IFD0 tags naming the equipment. Source: EXIF 2.32, Table 4.
+const TAG_MAKE: u16 = 0x010F;
+const TAG_MODEL: u16 = 0x0110;
+
+/// IFD0 tag holding the file's own timestamp. Source: EXIF 2.32, Table 4.
+const TAG_DATETIME: u16 = 0x0132;
+
+/// IFD0 tag pointing at the Exif private IFD. Source: EXIF 2.32, Table 4.
+const TAG_EXIF_IFD: u16 = 0x8769;
+
+/// Exif-IFD tag holding when the picture was taken.
+/// Source: EXIF 2.32, Table 8 (`DateTimeOriginal`).
+const TAG_DATETIME_ORIGINAL: u16 = 0x9003;
+
+/// Exif-IFD tags holding the frame's pixel dimensions.
+/// Source: EXIF 2.32, Table 8 (`PixelXDimension`/`PixelYDimension`).
+const TAG_PIXEL_WIDTH: u16 = 0xA002;
+const TAG_PIXEL_HEIGHT: u16 = 0xA003;
+
+/// TIFF field types this walker reads. Source: TIFF 6.0 §2, Table 2.
+const TYPE_SHORT: u16 = 3;
+const TYPE_LONG: u16 = 4;
+const TYPE_ASCII: u16 = 2;
+
 /// Bytes per IFD entry: tag, type, count, value/offset. Source: TIFF 6.0 §2.
 const IFD_ENTRY_BYTES: usize = 12;
+
+/// Bytes of an IFD entry's value that are stored inline. Source: TIFF 6.0 §2 —
+/// a value of four bytes or fewer sits in the entry, longer ones are pointed at.
+const INLINE_VALUE_BYTES: usize = 4;
+
+/// Longest text field kept from a record.
+///
+/// `Make` and `Model` are short by convention and `DateTimeOriginal` is exactly
+/// twenty bytes; this bounds what a length read from the medium can allocate
+/// (`A-BOUNDED-ALLOC`) at far more than any real value needs.
+const MAX_TEXT_BYTES: usize = 128;
+
+/// IFDs one walk may visit.
+///
+/// IFD0, IFD1 and the Exif private IFD. A fixed count is what stops a crafted
+/// chain from looping, whatever its pointers say.
+const MAX_IFDS: usize = 3;
 
 /// An embedded thumbnail located inside a TIFF payload.
 ///
@@ -87,6 +130,123 @@ pub fn thumbnail(tiff: &[u8]) -> Option<TiffThumbnail> {
         return None;
     }
     Some(TiffThumbnail { offset, length })
+}
+
+/// Reads what `tiff` records about the picture and the camera.
+///
+/// Returns an empty [`Capture`] for anything malformed, out of range or
+/// absent — a corrupt EXIF block is expected input, never an error or a panic.
+#[must_use]
+pub fn metadata(tiff: &[u8]) -> Capture {
+    let mut found = Capture::default();
+    let Some(le) = byte_order(tiff) else {
+        return found;
+    };
+    let Some(ifd0) = read_u32(tiff, 4, le).and_then(|at| usize::try_from(at).ok()) else {
+        return found;
+    };
+
+    // IFD0, then the Exif private IFD it points at. Bounded by a count rather
+    // than by where the pointers lead.
+    let mut visit = [Some(ifd0), None, None];
+    for index in 0..MAX_IFDS {
+        let Some(Some(ifd)) = visit.get(index).copied() else {
+            continue;
+        };
+        let Some(count) = read_u16(tiff, ifd, le).map(usize::from) else {
+            continue;
+        };
+        for entry in 0..count {
+            let Some(at) = ifd
+                .checked_add(2)
+                .and_then(|base| entry.checked_mul(IFD_ENTRY_BYTES)?.checked_add(base))
+            else {
+                break;
+            };
+            let (Some(tag), Some(kind)) = (read_u16(tiff, at, le), read_u16(tiff, at + 2, le))
+            else {
+                break;
+            };
+            match tag {
+                TAG_MAKE => found.make = text(tiff, at, le),
+                TAG_MODEL => found.model = text(tiff, at, le),
+                TAG_DATETIME => found.modified = text(tiff, at, le),
+                TAG_DATETIME_ORIGINAL => found.taken = text(tiff, at, le),
+                TAG_PIXEL_WIDTH | TAG_PIXEL_HEIGHT => {
+                    let value = number(tiff, at, kind, le);
+                    let (width, height) = found.pixels.unwrap_or_default();
+                    found.pixels = match (tag, value) {
+                        (TAG_PIXEL_WIDTH, Some(value)) => Some((value, height)),
+                        (_, Some(value)) => Some((width, value)),
+                        (_, None) => found.pixels,
+                    };
+                }
+                TAG_EXIF_IFD => {
+                    if let Some(slot) = visit.get_mut(index + 1) {
+                        *slot = read_u32(tiff, at + 8, le)
+                            .and_then(|offset| usize::try_from(offset).ok());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // A dimension pair is only meaningful whole.
+    if found
+        .pixels
+        .is_some_and(|(width, height)| width == 0 || height == 0)
+    {
+        found.pixels = None;
+    }
+    found
+}
+
+/// The byte order `tiff` declares, when it declares a TIFF at all.
+fn byte_order(tiff: &[u8]) -> Option<bool> {
+    let le = match tiff.get(..2)? {
+        b if *b == BYTE_ORDER_LE => true,
+        b if *b == BYTE_ORDER_BE => false,
+        _ => return None,
+    };
+    (read_u16(tiff, 2, le)? == TIFF_MAGIC).then_some(le)
+}
+
+/// Reads an entry's `ASCII` value, inline or pointed at.
+///
+/// Trailing `NUL`s are dropped and anything that is not printable ASCII makes
+/// the value nothing: this text reaches a manifest, and a field of control
+/// bytes read off a used disk is not a camera's name.
+fn text(tiff: &[u8], entry: usize, le: bool) -> Option<String> {
+    if read_u16(tiff, entry + 2, le)? != TYPE_ASCII {
+        return None;
+    }
+    let count = usize::try_from(read_u32(tiff, entry + 4, le)?).ok()?;
+    if count == 0 || count > MAX_TEXT_BYTES {
+        return None;
+    }
+    let raw = if count <= INLINE_VALUE_BYTES {
+        tiff.get(entry + 8..entry + 8 + count)?
+    } else {
+        let at = usize::try_from(read_u32(tiff, entry + 8, le)?).ok()?;
+        tiff.get(at..at.checked_add(count)?)?
+    };
+    let trimmed = raw.split(|byte| *byte == 0).next().unwrap_or_default();
+    if trimmed.is_empty() || !trimmed.iter().all(|byte| (0x20..0x7F).contains(byte)) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(trimmed).into_owned())
+}
+
+/// Reads an entry's single `SHORT` or `LONG` value.
+fn number(tiff: &[u8], entry: usize, kind: u16, le: bool) -> Option<u32> {
+    if read_u32(tiff, entry + 4, le)? != 1 {
+        return None;
+    }
+    match kind {
+        TYPE_SHORT => read_u16(tiff, entry + 8, le).map(u32::from),
+        TYPE_LONG => read_u32(tiff, entry + 8, le),
+        _ => None,
+    }
 }
 
 fn read_u16(buf: &[u8], at: usize, le: bool) -> Option<u16> {

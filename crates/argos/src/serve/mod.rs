@@ -163,9 +163,18 @@ impl Engine {
                 session,
                 to,
                 hashes,
-            } => crate::export::run(session.as_ref(), to.as_ref(), &hashes)
-                .map(|exported| Reply::Exported(translate::exported(&exported)))
-                .map_err(|err| (ErrorCode::InvalidParams, format!("{err:#}"))),
+            } => crate::export::run(
+                session.as_ref(),
+                to.as_ref(),
+                // The wire carries hash selection only; the photograph
+                // criteria are a schema change (`A-DTO-VERSIONED`).
+                &crate::export::Filter {
+                    hashes,
+                    ..crate::export::Filter::default()
+                },
+            )
+            .map(|exported| Reply::Exported(translate::exported(&exported)))
+            .map_err(|err| (ErrorCode::InvalidParams, format!("{err:#}"))),
         }
     }
 
@@ -222,7 +231,7 @@ impl Engine {
                 pacer: Arc::clone(&pacer),
                 description: Mutex::new(String::new()),
             };
-            let outcome = scan::run(&source, &out, options, &events, &notice, |session| {
+            let outcome = scan::run(&source, &out, &options, &events, &notice, |session| {
                 *slot
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session.clone());

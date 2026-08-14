@@ -291,6 +291,100 @@ pub fn ntfs_volume(len: usize, mft_offset: usize, file: &FilePlan) -> Vec<u8> {
     .into_bytes()
 }
 
+/// An NTFS volume whose deleted file keeps half its runs in an extension
+/// record, named by an `$ATTRIBUTE_LIST`.
+///
+/// The shape NTFS gives a file whose run list outgrew one MFT record, which
+/// happens to the most heavily fragmented files on a volume. A recovery that
+/// reads only the base record reports the file truncated at whatever fitted.
+///
+/// # Panics
+///
+/// Panics if the volume cannot hold the layout, or if the plan has fewer than
+/// two parts — there would be nothing to split across records.
+#[must_use]
+pub fn ntfs_volume_with_attribute_list(len: usize, mft_offset: usize, file: &FilePlan) -> Vec<u8> {
+    assert!(
+        mft_offset + 4 * NTFS_RECORD <= len,
+        "the $MFT at {mft_offset} does not fit a {len}-byte volume"
+    );
+    assert!(
+        file.parts.len() >= 2,
+        "an attribute-list fixture needs at least two content runs"
+    );
+    let boot = ntfs_boot_sector(len, mft_offset);
+    let mft_run = run_list(&[(mft_offset as u64 / NTFS_CLUSTER as u64, 1)]);
+    let mft_record = ntfs_record(true, None, 0, Some(&mft_run), NTFS_CLUSTER as u64);
+
+    let runs: Vec<(u64, u64)> = file
+        .parts
+        .iter()
+        .map(|&(offset, len)| {
+            (
+                offset as u64 / NTFS_CLUSTER as u64,
+                (len as u64).div_ceil(NTFS_CLUSTER as u64),
+            )
+        })
+        .collect();
+    let (first, rest) = runs.split_at(1);
+
+    // Record 1 is the base: the first run, plus a list naming record 2.
+    let base = ntfs_record_with_attribute_list(
+        &file.name,
+        &run_list(first),
+        file.content.len() as u64,
+        &[2],
+    );
+    // Record 2 carries the rest of the run list and nothing else.
+    let extension = ntfs_record(false, None, 0, Some(&run_list(rest)), 0);
+
+    file.place(
+        Image::new(len)
+            .with(0, &boot)
+            .with(mft_offset, &mft_record)
+            .with(mft_offset + NTFS_RECORD, &base)
+            .with(mft_offset + 2 * NTFS_RECORD, &extension),
+    )
+    .into_bytes()
+}
+
+/// A deleted-file record whose `$ATTRIBUTE_LIST` names `extensions` as holding
+/// the rest of its unnamed `$DATA`.
+#[must_use]
+pub fn ntfs_record_with_attribute_list(
+    name: &str,
+    runs: &[u8],
+    size: u64,
+    extensions: &[u64],
+) -> Vec<u8> {
+    let mut record = ntfs_record(false, Some(name), 0, Some(runs), size);
+    // Rebuild with the list spliced in: the attribute walk stops at the end
+    // marker, so the list has to sit before it.
+    let usa_at = 48_usize;
+    let usa_count = NTFS_RECORD / SECTOR + 1;
+    unapply_fixups(&mut record, usa_at, usa_count);
+    let end = u32::from_le_bytes([record[24], record[25], record[26], record[27]]) as usize - 8;
+
+    let mut list = Vec::new();
+    // One entry per extension: type $DATA, starting VCN 1, base reference the
+    // extension record. Source: NTFS on-disk $ATTRIBUTE_LIST layout.
+    for &record_number in extensions {
+        let mut entry = vec![0_u8; 32];
+        entry[0..4].copy_from_slice(&0x80_u32.to_le_bytes());
+        entry[4..6].copy_from_slice(&32_u16.to_le_bytes());
+        entry[6] = 0; // no attribute name
+        entry[7] = 26; // name offset
+        entry[8..16].copy_from_slice(&1_u64.to_le_bytes()); // starting VCN
+        entry[16..24].copy_from_slice(&record_number.to_le_bytes());
+        list.extend_from_slice(&entry);
+    }
+    let at = push_resident_attr(&mut record, end, 0x20, &list);
+    record[at..at + 4].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+    record[24..28].copy_from_slice(&((at + 8) as u32).to_le_bytes());
+    apply_fixups(&mut record, usa_at, usa_count);
+    record
+}
+
 /// An NTFS boot sector for a volume of `len` bytes with its `$MFT` at
 /// `mft_offset` (a multiple of the cluster size).
 #[must_use]
@@ -495,6 +589,16 @@ fn apply_fixups(record: &mut [u8], usa_at: usize, usa_count: usize) {
     }
 }
 
+/// Puts back the bytes an update sequence array replaced, so a finished record
+/// can be edited and fixed up again.
+fn unapply_fixups(record: &mut [u8], usa_at: usize, usa_count: usize) {
+    for index in 1..usa_count {
+        let tail = index * SECTOR - 2;
+        let saved = [record[usa_at + index * 2], record[usa_at + index * 2 + 1]];
+        record[tail..tail + 2].copy_from_slice(&saved);
+    }
+}
+
 /// An `INDX` index buffer holding one entry per (name, MFT record) pair.
 #[must_use]
 pub fn ntfs_indx(entries: &[(&str, u64)]) -> Vec<u8> {
@@ -637,6 +741,75 @@ pub fn ext4_volume(len: usize, file: &FilePlan) -> Vec<u8> {
     file.place(image).into_bytes()
 }
 
+/// An ext4 volume whose deleted file's extent tree is one index level deep.
+///
+/// The same journal-mined recovery as [`ext4_volume`], but with the inode's
+/// extents pushed out into a leaf block — the shape ext4 gives a file with more
+/// extents than fit in the inode, which is a heavily fragmented one.
+///
+/// # Panics
+///
+/// Panics if the volume is too small to hold the layout.
+#[must_use]
+pub fn ext4_volume_deep_extents(len: usize, file: &FilePlan) -> Vec<u8> {
+    const INODE_TABLE_BLOCK: u64 = 3;
+    const JOURNAL_DESC_BLOCK: u64 = 8;
+    const JOURNAL_DATA_BLOCK: u64 = 9;
+    const LEAF_BLOCK: u64 = 10;
+    assert!(
+        len >= 16 * EXT4_BLOCK,
+        "ext4 fixture needs at least {} bytes, got {len}",
+        16 * EXT4_BLOCK
+    );
+
+    let sb = ext4_superblock(len / EXT4_BLOCK);
+    let mut gdt = vec![0_u8; EXT4_BLOCK];
+    gdt[8..12].copy_from_slice(&u32::try_from(INODE_TABLE_BLOCK).unwrap_or(0).to_le_bytes());
+
+    let mut inode_table = vec![0_u8; EXT4_BLOCK];
+    let journal_inode = ext4_inode_with_extents(
+        0x8000,
+        1,
+        0,
+        u64::try_from(EXT4_BLOCK * 4).unwrap_or(0),
+        &[(JOURNAL_DESC_BLOCK, 4)],
+    );
+    let slot = (8 - 1) as usize * usize::from(EXT4_INODE_BYTES);
+    inode_table[slot..slot + journal_inode.len()].copy_from_slice(&journal_inode);
+
+    let descriptor = jbd2_descriptor(&[INODE_TABLE_BLOCK]);
+    let extents: Vec<(u64, u16)> = file
+        .parts
+        .iter()
+        .map(|&(offset, len)| {
+            (
+                (offset / EXT4_BLOCK) as u64,
+                len.div_ceil(EXT4_BLOCK) as u16,
+            )
+        })
+        .collect();
+    let leaf = ext4_extent_leaf(0, &extents);
+    let deleted = ext4_inode_with_index(
+        0x8000,
+        0,
+        1_700_000_000,
+        file.content.len() as u64,
+        &[LEAF_BLOCK],
+    );
+    let mut stale = vec![0_u8; EXT4_BLOCK];
+    let deleted_slot = 5 * usize::from(EXT4_INODE_BYTES);
+    stale[deleted_slot..deleted_slot + deleted.len()].copy_from_slice(&deleted);
+
+    let image = Image::new(len)
+        .with(EXT4_BLOCK, &sb)
+        .with(2 * EXT4_BLOCK, &gdt)
+        .with(INODE_TABLE_BLOCK as usize * EXT4_BLOCK, &inode_table)
+        .with(JOURNAL_DESC_BLOCK as usize * EXT4_BLOCK, &descriptor)
+        .with(JOURNAL_DATA_BLOCK as usize * EXT4_BLOCK, &stale)
+        .with(LEAF_BLOCK as usize * EXT4_BLOCK, &leaf);
+    file.place(image).into_bytes()
+}
+
 /// An ext4 superblock describing a `blocks`-block filesystem.
 #[must_use]
 pub fn ext4_superblock(blocks: usize) -> Vec<u8> {
@@ -686,6 +859,71 @@ pub fn ext4_inode_with_extents(
         );
     }
     inode
+}
+
+/// An inode whose extent tree is one index level deep.
+///
+/// The shape ext4 gives a file with more extents than fit in its inode — a
+/// heavily fragmented one, which is exactly what a recovery is looking for.
+/// The index entries point at `leaf_blocks`, and [`ext4_extent_leaf`] builds
+/// what has to be written at each.
+#[must_use]
+pub fn ext4_inode_with_index(
+    mode: u16,
+    links: u16,
+    dtime: u32,
+    size: u64,
+    leaf_blocks: &[u64],
+) -> Vec<u8> {
+    let mut inode = vec![0_u8; usize::from(EXT4_INODE_BYTES)];
+    inode[0..2].copy_from_slice(&mode.to_le_bytes());
+    inode[4..8].copy_from_slice(&u32::try_from(size & 0xFFFF_FFFF).unwrap_or(0).to_le_bytes());
+    inode[12..16].copy_from_slice(&1_600_000_000_u32.to_le_bytes());
+    inode[16..20].copy_from_slice(&1_650_000_000_u32.to_le_bytes());
+    inode[20..24].copy_from_slice(&dtime.to_le_bytes());
+    inode[26..28].copy_from_slice(&links.to_le_bytes());
+
+    inode[40..42].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    inode[42..44].copy_from_slice(&u16::try_from(leaf_blocks.len()).unwrap_or(0).to_le_bytes());
+    inode[44..46].copy_from_slice(&4_u16.to_le_bytes());
+    inode[46..48].copy_from_slice(&1_u16.to_le_bytes()); // one index level
+    for (index, &block) in leaf_blocks.iter().enumerate() {
+        let at = 40 + 12 + index * 12;
+        inode[at..at + 4].copy_from_slice(&u32::try_from(index).unwrap_or(0).to_le_bytes());
+        inode[at + 4..at + 8].copy_from_slice(
+            &u32::try_from(block & 0xFFFF_FFFF)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        inode[at + 8..at + 10]
+            .copy_from_slice(&u16::try_from(block >> 32).unwrap_or(0).to_le_bytes());
+    }
+    inode
+}
+
+/// A depth-0 extent node as it appears in its own block.
+#[must_use]
+pub fn ext4_extent_leaf(first_file_block: u32, extents: &[(u64, u16)]) -> Vec<u8> {
+    let mut block = vec![0_u8; EXT4_BLOCK];
+    block[0..2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    block[2..4].copy_from_slice(&u16::try_from(extents.len()).unwrap_or(0).to_le_bytes());
+    block[4..6].copy_from_slice(&340_u16.to_le_bytes()); // max entries in a block
+    block[6..8].copy_from_slice(&0_u16.to_le_bytes()); // depth
+    let mut file_block = first_file_block;
+    for (index, &(start, count)) in extents.iter().enumerate() {
+        let at = 12 + index * 12;
+        block[at..at + 4].copy_from_slice(&file_block.to_le_bytes());
+        block[at + 4..at + 6].copy_from_slice(&count.to_le_bytes());
+        block[at + 6..at + 8]
+            .copy_from_slice(&u16::try_from(start >> 32).unwrap_or(0).to_le_bytes());
+        block[at + 8..at + 12].copy_from_slice(
+            &u32::try_from(start & 0xFFFF_FFFF)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        file_block += u32::from(count);
+    }
+    block
 }
 
 /// A jbd2 descriptor block tagging `targets` in order.
@@ -750,6 +988,66 @@ pub fn fat32_volume(len: usize, file: &FilePlan) -> Vec<u8> {
 
     file.place(Image::new(len).with(0, &boot).with(data_start, &root))
         .into_bytes()
+}
+
+/// A FAT32 volume whose deleted file sits in a subdirectory of the root.
+///
+/// The shape a person's own files actually have: the root holds folders, and
+/// the photographs are inside one of them. A recovery that reads only the root
+/// finds nothing here.
+///
+/// # Panics
+///
+/// Panics if the volume is too small to hold the layout.
+#[must_use]
+pub fn fat32_volume_with_subdirectory(len: usize, folder: &str, file: &FilePlan) -> Vec<u8> {
+    const RESERVED_SECTORS: usize = 32;
+    const FAT_SECTORS: usize = 64;
+    let data_start = (RESERVED_SECTORS + FAT_SECTORS) * SECTOR;
+    assert!(
+        data_start + 4 * FAT_CLUSTER <= len,
+        "fat32 fixture needs more than {len} bytes"
+    );
+    let boot = fat32_boot_sector(len);
+    // Cluster 2 is the root, cluster 3 the subdirectory; the file's content
+    // sits wherever the plan put it.
+    let child_cluster = 3_u32;
+    let child_at = data_start + (child_cluster as usize - 2) * FAT_CLUSTER;
+    let root = fat_dir_subdirectory(folder, child_cluster);
+    let cluster = ((file.offset() - data_start) / FAT_CLUSTER + 2) as u32;
+    let child = fat_dir_deleted(&file.name, cluster, file.content.len() as u32);
+
+    // The root's chain ends at cluster 2; the subdirectory's at cluster 3.
+    let fat_at = RESERVED_SECTORS * SECTOR;
+    let mut fat = vec![0_u8; 4 * 8];
+    fat[8..12].copy_from_slice(&0x0FFF_FFFF_u32.to_le_bytes());
+    fat[12..16].copy_from_slice(&0x0FFF_FFFF_u32.to_le_bytes());
+
+    file.place(
+        Image::new(len)
+            .with(0, &boot)
+            .with(fat_at, &fat)
+            .with(data_start, &root)
+            .with(child_at, &child),
+    )
+    .into_bytes()
+}
+
+/// A root-directory region naming one live subdirectory.
+#[must_use]
+pub fn fat_dir_subdirectory(name: &str, cluster: u32) -> Vec<u8> {
+    let mut dir = vec![0_u8; FAT_CLUSTER];
+    let short = name.to_ascii_uppercase();
+    for (index, byte) in short.bytes().take(8).enumerate() {
+        dir[index] = byte;
+    }
+    for slot in &mut dir[short.len().min(8)..11] {
+        *slot = b' ';
+    }
+    dir[11] = 0x10; // directory
+    dir[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+    dir[26..28].copy_from_slice(&(cluster as u16).to_le_bytes());
+    dir
 }
 
 /// A FAT32 boot sector for a volume of `len` bytes.

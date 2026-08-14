@@ -102,6 +102,69 @@ pub struct Artifact<'a> {
     /// artifact did not decode, which is a statement about the decoder and not
     /// about the bytes.
     pub pixels: Option<(u32, u32)>,
+    /// What the picture records about itself and the camera that made it.
+    pub capture: &'a Capture,
+}
+
+/// What a recovered picture records about itself and the camera that made it.
+///
+/// Every field is optional because every one is absent from some real file, and
+/// nothing read from a medium is trusted to be there.
+///
+/// This is how a person finds their own photographs among a used disk's
+/// hundreds of thousands of recovered images: a byte count and an offset
+/// separate nothing, while a camera model and a date separate one afternoon
+/// from ten years of everything else. It survives a frame that does not —
+/// the metadata sits ahead of the picture data, so a photograph whose picture
+/// is half overwritten still says when it was taken.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Capture {
+    /// Camera manufacturer.
+    pub make: Option<String>,
+    /// Camera model.
+    pub model: Option<String>,
+    /// When the picture was taken, as stored: `YYYY:MM:DD HH:MM:SS`. Kept
+    /// verbatim rather than parsed — it carries no zone, so turning it into an
+    /// instant would be inventing one.
+    pub taken: Option<String>,
+    /// When the file was last changed, in the same form.
+    pub modified: Option<String>,
+    /// Pixel dimensions the metadata records, which the picture's own header
+    /// may contradict and which survive when that header does not.
+    pub pixels: Option<(u32, u32)>,
+}
+
+impl Capture {
+    /// Whether anything at all was recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// `Debug` reports which fields were recorded, never what they say.
+///
+/// A camera model and the moment a picture was taken are read off the medium
+/// and describe a person, so they belong in a manifest the user asked for and
+/// nowhere else — not in a log, a panic message or a test failure
+/// (A-NO-CONTENT-IN-LOGS).
+impl fmt::Debug for Capture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let held = |value: &Option<String>| {
+            if value.is_some() {
+                "<recorded>"
+            } else {
+                "<absent>"
+            }
+        };
+        f.debug_struct("Capture")
+            .field("make", &held(&self.make))
+            .field("model", &held(&self.model))
+            .field("taken", &held(&self.taken))
+            .field("modified", &held(&self.modified))
+            .field("pixels", &self.pixels)
+            .finish()
+    }
 }
 
 impl fmt::Debug for Artifact<'_> {
@@ -118,6 +181,7 @@ impl fmt::Debug for Artifact<'_> {
             .field("recovered_name", &self.recovered_name.map(|_| "<redacted>"))
             .field("source_object", &self.source_object)
             .field("parent", &self.parent)
+            .field("capture", &self.capture)
             .finish()
     }
 }

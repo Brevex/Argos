@@ -21,7 +21,7 @@ use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession, Stages};
 use crate::{destination, source};
 
 /// What the caller asked of one scan, beyond where to read and write.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Worker threads; the machine's available parallelism when absent.
     pub jobs: Option<NonZeroUsize>,
@@ -33,8 +33,18 @@ pub struct Options {
     /// takes the engine's default; zero writes everything. Whatever is not
     /// written is recorded either way (`A-TRIAGE-NOT-VERDICT`).
     pub min_long_side: Option<u32>,
+    /// How long fragment reassembly may search. `None` takes the engine's
+    /// default; a zero duration searches every candidate without a deadline.
+    pub reassembly_budget: Option<std::time::Duration>,
     /// Whether to render a preview of every artifact that decodes.
     pub previews: bool,
+    /// Fragmentation points a previous run located, to search again without
+    /// sweeping the medium.
+    ///
+    /// When present the sweep, the filesystem pass and the validation pass are
+    /// all skipped: those are what a scan of a large medium spends its hours
+    /// on, and they establish these same points every time.
+    pub resume_from: Option<Vec<argos_engine::Broken>>,
 }
 
 /// What a scan said about itself, other than progress.
@@ -80,7 +90,7 @@ pub struct Finished {
 pub fn run<P, N>(
     source: &Path,
     out: &Path,
-    options: Options,
+    options: &Options,
     progress: &P,
     notice: &N,
     on_session: impl FnOnce(&ScanSession),
@@ -98,6 +108,13 @@ where
                 .min_long_side
                 .unwrap_or(argos_engine::DEFAULT_MIN_LONG_SIDE),
         )
+        .reassembly_budget(match options.reassembly_budget {
+            // An explicit zero is "no deadline", which is the only way to ask
+            // for a search that stops when it runs out of candidates.
+            Some(budget) if budget.is_zero() => None,
+            Some(budget) => Some(budget),
+            None => Some(argos_engine::DEFAULT_REASSEMBLY_BUDGET),
+        })
         .previews(options.previews);
     if let Some(jobs) = options.jobs {
         config = config.workers(jobs);
@@ -147,9 +164,12 @@ where
 
     let session = ScanSession::new(config);
     on_session(&session);
-    let outcome = match triage.as_mut() {
-        Some(classifier) => session.start_with_classifier(medium, &mut store, progress, classifier),
-        None => session.start(medium, &mut store, progress),
+    let outcome = match (&options.resume_from, triage.as_mut()) {
+        (Some(broken), _) => session.reassemble(medium, broken, &mut store, progress),
+        (None, Some(classifier)) => {
+            session.start_with_classifier(medium, &mut store, progress, classifier)
+        }
+        (None, None) => session.start(medium, &mut store, progress),
     };
 
     // The manifest is written whatever happened. Artifacts already on disk
@@ -181,6 +201,7 @@ where
         store.annotate_same_size_runs(&runs);
     }
     let triage_record = report.map(|report| triage_record(report, triage_disabled.as_deref()));
+    let fragmentation = report.map(fragmentation).unwrap_or_default();
     let manifest = store
         .finish(argos_report::Summary {
             tool_version: env!("CARGO_PKG_VERSION"),
@@ -189,6 +210,7 @@ where
             rejected_candidates: report.map_or(0, |report| report.rejected_candidates),
             unreadable: &unreadable,
             triage: triage_record.as_ref(),
+            fragmentation: &fragmentation,
         })
         .context("cannot write manifest")?;
     match report {
@@ -200,6 +222,55 @@ where
         report: outcome.ok(),
         manifest,
     })
+}
+
+/// Reads a manifest's fragmentation points back into what the search takes.
+///
+/// A record whose format this tool does not recover, or whose break point does
+/// not lie past its header, is skipped rather than guessed at: the search would
+/// have nothing to start from either way.
+///
+#[must_use]
+pub fn fragmentation_points(manifest: &argos_report::Manifest) -> Vec<argos_engine::Broken> {
+    use argos_core::geometry::ByteOffset;
+    manifest
+        .fragmentation
+        .iter()
+        .filter_map(|record| {
+            let format = record.format.parse().ok()?;
+            (record.break_at > record.offset).then_some(argos_engine::Broken {
+                header: ByteOffset::new(record.offset),
+                break_at: ByteOffset::new(record.break_at),
+                format,
+                declared: record.declared_width.zip(record.declared_height),
+                decoded: record.decoded,
+                required: record.required,
+                decoded_end: ByteOffset::new(record.decoded_end.max(record.offset)),
+            })
+        })
+        .collect()
+}
+
+/// Turns the engine's fragmentation points into manifest records.
+///
+/// They are what a later `argos reassemble` starts from, so they are written
+/// whether or not the search that follows them found anything: a point the
+/// budget never reached is exactly the one worth trying again.
+fn fragmentation(report: &argos_engine::ScanReport) -> Vec<argos_report::FragmentRecord> {
+    report
+        .fragmentation
+        .iter()
+        .map(|broken| argos_report::FragmentRecord {
+            offset: broken.header.get(),
+            break_at: broken.break_at.get(),
+            decoded_end: broken.decoded_end.get(),
+            format: broken.format.to_string(),
+            declared_width: broken.declared.map(|(width, _)| width),
+            declared_height: broken.declared.map(|(_, height)| height),
+            decoded: broken.decoded,
+            required: broken.required,
+        })
+        .collect()
 }
 
 /// Turns the engine's triage outcomes into manifest annotations.

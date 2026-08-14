@@ -46,19 +46,103 @@ pub struct Exported {
     pub omitted: Vec<String>,
 }
 
+/// Which of a session's artifacts to export.
+///
+/// A scan of a used disk produces hundreds of thousands of artifacts, so
+/// naming one by its hash only helps a person who already knows which one they
+/// want. These are the questions someone looking for their own photographs
+/// actually asks: which camera, what year, how big.
+#[derive(Clone, Debug, Default)]
+pub struct Filter {
+    /// Artifact hashes, or unambiguous prefixes of them. Empty means every
+    /// artifact the other criteria admit.
+    pub hashes: Vec<String>,
+    /// Smallest long side, in pixels, an artifact is exported for.
+    pub min_long_side: Option<u32>,
+    /// Substring the recorded camera make or model must contain, matched
+    /// without regard to case.
+    pub camera: Option<String>,
+    /// Earliest and latest capture date to export, each compared as the text
+    /// EXIF stores — `YYYY:MM:DD HH:MM:SS` sorts chronologically as it is, so
+    /// a prefix like `2009` is a whole year and needs no date arithmetic.
+    pub taken_from: Option<String>,
+    pub taken_until: Option<String>,
+}
+
+impl Filter {
+    /// Whether the filter names any criterion at all.
+    fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+            && self.min_long_side.is_none()
+            && self.camera.is_none()
+            && self.taken_from.is_none()
+            && self.taken_until.is_none()
+    }
+
+    /// Whether `record` satisfies every criterion but the hashes.
+    ///
+    /// An artifact that recorded nothing about its camera or its date is kept
+    /// unless a criterion asks about exactly that: absent is not a match, but
+    /// it is also not evidence of anything, and silently dropping every
+    /// undescribed picture would hide most of a carved disk.
+    fn admits(&self, record: &ArtifactRecord) -> bool {
+        if let Some(floor) = self.min_long_side {
+            let long_side = record
+                .width
+                .unwrap_or(0)
+                .max(record.height.unwrap_or(0))
+                .max(record.declared_width.unwrap_or(0))
+                .max(record.declared_height.unwrap_or(0));
+            // Nothing measured clears the floor, as it does during a scan: a
+            // decoder that gave up is not evidence the bytes are worthless.
+            if long_side > 0 && long_side < floor {
+                return false;
+            }
+        }
+        if let Some(camera) = &self.camera {
+            let wanted = camera.to_lowercase();
+            let named = |value: &Option<String>| {
+                value
+                    .as_ref()
+                    .is_some_and(|value| value.to_lowercase().contains(&wanted))
+            };
+            if !named(&record.camera_make) && !named(&record.camera_model) {
+                return false;
+            }
+        }
+        if self.taken_from.is_some() || self.taken_until.is_some() {
+            let Some(taken) = &record.taken else {
+                return false;
+            };
+            if self.taken_from.as_ref().is_some_and(|from| taken < from) {
+                return false;
+            }
+            if self
+                .taken_until
+                .as_ref()
+                .is_some_and(|until| taken.as_str() > until.as_str() && !taken.starts_with(until))
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Copies the selected artifacts from session directory `from` into `to`.
 ///
-/// An empty `wanted` exports everything the manifest records.
+/// An empty `filter` exports everything the manifest records.
 ///
 /// # Errors
 ///
-/// Fails when the manifest cannot be read, when a selection matches no record
-/// or more than one, when the destination cannot be created, or when a copy
-/// fails for a reason other than the artifact itself being absent or altered.
-pub fn run(from: &Path, to: &Path, wanted: &[String]) -> anyhow::Result<Exported> {
+/// Fails when the manifest cannot be read, when a hash selection matches no
+/// record or more than one, when the destination cannot be created, or when a
+/// copy fails for a reason other than the artifact itself being absent or
+/// altered.
+pub fn run(from: &Path, to: &Path, filter: &Filter) -> anyhow::Result<Exported> {
     let manifest = Manifest::read(from)
         .with_context(|| format!("cannot read the session manifest in {}", from.display()))?;
-    let chosen = select(&manifest, wanted)?;
+    let chosen = select(&manifest, filter)?;
 
     fs::create_dir_all(to)
         .with_context(|| format!("cannot create destination {}", to.display()))?;
@@ -108,6 +192,10 @@ pub fn run(from: &Path, to: &Path, wanted: &[String]) -> anyhow::Result<Exported
         rejected_candidates: manifest.rejected_candidates,
         unreadable: manifest.unreadable.clone(),
         triage: manifest.triage.clone(),
+        // An export describes the files it carried, and a fragmentation point
+        // is a place on the source medium rather than a file. It stays with
+        // the session that can still reach that medium.
+        fragmentation: Vec::new(),
         artifacts: kept,
     };
     subset
@@ -123,14 +211,19 @@ pub fn run(from: &Path, to: &Path, wanted: &[String]) -> anyhow::Result<Exported
 /// [`MIN_PREFIX_LEN`] hex digits. A prefix matching several artifacts is an
 /// error naming them: guessing which one was meant would export the wrong
 /// evidence.
-fn select<'a>(
-    manifest: &'a Manifest,
-    wanted: &[String],
-) -> anyhow::Result<Vec<&'a ArtifactRecord>> {
-    if wanted.is_empty() {
+fn select<'a>(manifest: &'a Manifest, filter: &Filter) -> anyhow::Result<Vec<&'a ArtifactRecord>> {
+    if filter.is_empty() {
         return Ok(manifest.artifacts.iter().collect());
     }
+    if filter.hashes.is_empty() {
+        return Ok(manifest
+            .artifacts
+            .iter()
+            .filter(|record| filter.admits(record))
+            .collect());
+    }
 
+    let wanted = &filter.hashes;
     let mut chosen: Vec<&ArtifactRecord> = Vec::with_capacity(wanted.len());
     for hash in wanted {
         let hash = hash.to_ascii_lowercase();
@@ -163,6 +256,7 @@ fn select<'a>(
         .artifacts
         .iter()
         .filter(|record| chosen.iter().any(|picked| picked.sha256 == record.sha256))
+        .filter(|record| filter.admits(record))
         .collect();
     ordered.dedup_by(|left, right| left.sha256 == right.sha256);
     Ok(ordered)

@@ -194,6 +194,51 @@ pub fn validate_thumbnail<R: Read + Seek>(
     }
 }
 
+/// Reads what a recovered image records about itself and its camera.
+///
+/// Walks `bytes` as a JPEG far enough to reach its `APP1` segment; anything
+/// else — a PNG, a truncated header, unrelated data — records nothing. A
+/// corrupt segment is expected input, so this never fails and never panics.
+///
+/// It is deliberately taken from the artifact's own bytes rather than from the
+/// medium: every recovery goes through it the same way, whether it was carved
+/// whole, reassembled, or reported as the part of itself that decoded.
+#[must_use]
+pub fn metadata(bytes: &[u8]) -> argos_core::artifact::Capture {
+    let empty = argos_core::artifact::Capture::default;
+    let Some(rest) = bytes.strip_prefix(&[0xFF, jpeg::MARKER_SOI]) else {
+        return empty();
+    };
+    let mut at = 0_usize;
+    // Marker segments only: the scan data is where lengths stop meaning
+    // lengths, and `APP1` is always ahead of it.
+    while let Some(&[0xFF, code]) = rest.get(at..at + 2) {
+        if code == jpeg::MARKER_SOS || code == jpeg::MARKER_EOI {
+            break;
+        }
+        let Some(len) = rest
+            .get(at + 2..at + 4)
+            .map(|raw| usize::from(u16::from_be_bytes([raw[0], raw[1]])))
+            .filter(|len| *len >= 2)
+        else {
+            break;
+        };
+        let Some(payload) = rest.get(at + 4..at + 2 + len) else {
+            break;
+        };
+        if code == jpeg::MARKER_APP1
+            && let Some(tiff) = payload.strip_prefix(jpeg::EXIF_HEADER.as_slice())
+        {
+            let found = exif::metadata(tiff);
+            if !found.is_empty() {
+                return found;
+            }
+        }
+        at += 2 + len;
+    }
+    empty()
+}
+
 /// Validates the candidate at `start` as `format`.
 ///
 /// Consumes at most `limit - start` bytes of `src`; callers cap `limit` at the

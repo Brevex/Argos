@@ -10,7 +10,10 @@
 //!
 //! **The recovery rate is measured, not assumed.** It is printed per pattern
 //! and held to a documented floor, so a regression in the search shows up as a
-//! failure rather than as quietly worse output.
+//! failure rather than as quietly worse output. The floors are also what fixes
+//! how wide the search may go: widening it past three fragments raised the
+//! rates here and fabricated an answer, which is how the bound on it was
+//! chosen.
 
 use std::fmt::Write as _;
 
@@ -55,6 +58,7 @@ impl Case {
             &mut scratch,
         )
         .expect("in-memory read")
+        .reassembly
         .or_else(|| {
             let blocks = self.candidate_blocks();
             reassemble::parallel_unique_path(
@@ -67,6 +71,7 @@ impl Case {
                 &mut scratch,
             )
             .expect("in-memory read")
+            .assembled
             .into_iter()
             .next()
             .map(|(_, reassembly)| reassembly)
@@ -162,7 +167,21 @@ fn measure(pattern: &'static str, layout_of: impl Fn(&[u8], usize) -> Fragmented
             Some(bytes) if bytes == case.layout.planted_bytes() => recovered += 1,
             // Reported something that is not what was planted. This is the
             // outcome the whole design exists to make impossible.
-            Some(_) => fabricated += 1,
+            Some(bytes) => {
+                let planted = case.layout.planted_bytes();
+                let common = bytes
+                    .iter()
+                    .zip(&planted)
+                    .take_while(|(got, want)| got == want)
+                    .count();
+                println!(
+                    "  FABRICATED {pattern} sample {sample}: got {} bytes, planted {}, \
+                     agree for {common}",
+                    bytes.len(),
+                    planted.len()
+                );
+                fabricated += 1;
+            }
         }
     }
     Rate {
@@ -271,14 +290,17 @@ fn recovery_rates_per_fragmentation_pattern() {
     // The measured floors, recorded so a regression in the search fails here
     // rather than quietly shipping worse output.
     //
-    // Two fragments is the dominant real-world pattern and is fully covered,
-    // forwards or backwards. Deeper fragmentation is where the Parallel Unique
-    // Path walk's greediness shows: it commits one fragment per step and never
-    // reconsiders, so a step whose best candidate is not the true continuation
-    // loses the path for good. It gives up rather than guess — which is why
-    // the fabrication count above stays at zero — but it gives up often.
-    // Backtracking over the committed steps is what would raise these, and is
-    // not implemented.
+    // Two and three fragments are covered, forwards or backwards: the walk
+    // reconsiders its steps up to `MAX_BRANCHING_FRAGMENTS`, so a step whose
+    // best candidate is not the true continuation no longer loses the path.
+    //
+    // Past that depth it commits and does not look back, and the reason is the
+    // oracle rather than the budget. Branching at four fragments recovered more
+    // and produced an assembly of the right length, decoding end to end, whose
+    // three seams all passed, and which was not the planted bytes. No seam
+    // threshold separated that case without refusing a third of the true
+    // recoveries with it, so the search stops where it can still tell the
+    // difference.
     let floor_for = |pattern: &str| match pattern {
         // The seam gate refuses an assembly it cannot judge as readily as one
         // it judges badly, so a little recall is traded for the zero above.
@@ -287,11 +309,12 @@ fn recovery_rates_per_fragmentation_pattern() {
         "2 fragments, small gap"
         | "2 fragments, large gap"
         | "2 fragments, stored backwards"
-        | "2 fragments, competing photo" => 85,
-        "3 fragments" => 25,
-        // Not yet recovered at all; held at zero so the fabrication guarantee
-        // above still runs over this pattern.
-        _ => 0,
+        | "2 fragments, competing photo"
+        | "3 fragments" => 85,
+        // Reached only by the greedy tail of the walk, so it is the pattern
+        // this suite covers least — held at what it measures so a regression
+        // shows, not at zero.
+        _ => 20,
     };
     for rate in &rates {
         assert!(

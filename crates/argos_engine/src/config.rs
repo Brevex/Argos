@@ -6,6 +6,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::ops::{Bound, RangeBounds};
 use std::thread;
+use std::time::Duration;
 
 use argos_core::geometry::{ByteOffset, ByteRange};
 
@@ -55,20 +56,20 @@ const MAX_INFLIGHT_BYTES: usize = 16 * 1024 * 1024;
 /// a worker can always run at the same time.
 const MIN_QUEUE_DEPTH: usize = 2;
 
-/// Decode attempts reassembly may spend across a whole scan.
+/// How long reassembly may search before it stops looking.
 ///
-/// The per-candidate budget bounds one search; this bounds the stage, which
-/// runs by default. A medium carrying thousands of false signature hits would
-/// otherwise turn a scan that reads at gigabytes a second into one that
-/// decodes for hours.
+/// The per-candidate ceiling bounds one search; this bounds the stage, which
+/// runs by default and would otherwise have no end on a medium carrying
+/// thousands of fragmentation points.
 ///
-/// Measured: a hypothesis the entropy decoder rejects costs about 5 us, since
-/// unrelated bytes fail on the first Huffman code outside the table, so this
-/// budget caps the stage at roughly a second and a half of decoding whatever
-/// the medium holds. When it runs out the report says so, so a user knows
-/// there was more to try rather than being told the medium held nothing else
-/// (`M-DOCUMENTED-MAGIC`).
-pub const REASSEMBLY_BUDGET: u32 = 250_000;
+/// It is wall-clock rather than a decode count because a decode's cost is not
+/// a constant: measured over planted photographs, a hypothesis the entropy
+/// decoder rejects costs 58 us against a 6 KB first fragment and 78 us against
+/// a 315 KB one. A count that bounded the small case to seconds bounded the
+/// large one to hours, and the stage cannot tell which it is in until it is
+/// there. A duration bounds both, and the report says when it ran out so a
+/// user knows there was more to try (`M-DOCUMENTED-MAGIC`).
+pub const DEFAULT_REASSEMBLY_BUDGET: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Smallest long side, in pixels, an artifact is written to disk for.
 ///
@@ -125,6 +126,7 @@ pub struct ScanConfig {
     stages: Stages,
     previews: bool,
     min_long_side: u32,
+    reassembly_budget: Option<Duration>,
 }
 
 impl Default for ScanConfig {
@@ -148,6 +150,7 @@ impl ScanConfig {
             stages: Stages::default(),
             previews: false,
             min_long_side: DEFAULT_MIN_LONG_SIDE,
+            reassembly_budget: Some(DEFAULT_REASSEMBLY_BUDGET),
         }
     }
 
@@ -167,6 +170,17 @@ impl ScanConfig {
     #[must_use]
     pub fn min_long_side(&self) -> u32 {
         self.min_long_side
+    }
+
+    /// How long reassembly may search, or `None` to search every candidate
+    /// however long it takes.
+    ///
+    /// When it runs out the stage stops between candidates and the report
+    /// records the ceiling, so what was not tried is stated rather than
+    /// presented as a medium holding nothing more (`A-CONFIDENCE-HONEST`).
+    #[must_use]
+    pub fn reassembly_budget(&self) -> Option<Duration> {
+        self.reassembly_budget
     }
 
     /// Bytes read per chunk.
@@ -224,6 +238,7 @@ pub struct ScanConfigBuilder {
     stages: Stages,
     previews: bool,
     min_long_side: u32,
+    reassembly_budget: Option<Duration>,
 }
 
 impl ScanConfigBuilder {
@@ -251,6 +266,13 @@ impl ScanConfigBuilder {
     #[must_use]
     pub fn min_long_side(mut self, min_long_side: u32) -> Self {
         self.min_long_side = min_long_side;
+        self
+    }
+
+    /// How long reassembly may search; `None` searches every candidate.
+    #[must_use]
+    pub fn reassembly_budget(mut self, budget: Option<Duration>) -> Self {
+        self.reassembly_budget = budget;
         self
     }
 
@@ -320,6 +342,7 @@ impl ScanConfigBuilder {
             stages: self.stages,
             previews: self.previews,
             min_long_side: self.min_long_side,
+            reassembly_budget: self.reassembly_budget,
         })
     }
 }

@@ -20,18 +20,18 @@ use crate::{CarveError, Scratch, Thumbnail, Verdict};
 
 /// Marker codes from ITU-T T.81, Table B.1. Only the codes the state machine
 /// branches on are named; `SOF` variants are matched as a range.
-const MARKER_SOI: u8 = 0xD8;
-const MARKER_EOI: u8 = 0xD9;
-const MARKER_SOS: u8 = 0xDA;
+pub(crate) const MARKER_SOI: u8 = 0xD8;
+pub(crate) const MARKER_EOI: u8 = 0xD9;
+pub(crate) const MARKER_SOS: u8 = 0xDA;
 const MARKER_DRI: u8 = 0xDD;
-const MARKER_APP1: u8 = 0xE1;
+pub(crate) const MARKER_APP1: u8 = 0xE1;
 /// First and last restart markers `RST0`..`RST7`.
 const MARKER_RST0: u8 = 0xD0;
 const MARKER_RST7: u8 = 0xD7;
 
 /// `APP1` payloads start with this prefix when they carry EXIF metadata.
 /// Source: EXIF 2.32 §4.7.2.
-const EXIF_HEADER: [u8; 6] = *b"Exif\0\0";
+pub(crate) const EXIF_HEADER: [u8; 6] = *b"Exif\0\0";
 
 /// Validates the JPEG candidate starting at `start`.
 ///

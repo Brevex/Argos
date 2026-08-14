@@ -208,6 +208,13 @@ pub fn options(request: &dto::ScanRequest) -> crate::scan::Options {
         },
         triage: request.triage,
         min_long_side: request.min_long_side,
+        // Not on the wire: a client gets the engine's own budget. Putting it
+        // there is a schema change (`A-DTO-VERSIONED`), and no client asks for
+        // it yet.
+        reassembly_budget: None,
         previews: request.previews,
+        // Not on the wire: resuming a search names a session directory, which
+        // is a path, and the protocol deliberately carries none.
+        resume_from: None,
     }
 }

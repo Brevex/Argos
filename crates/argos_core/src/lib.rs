@@ -25,4 +25,4 @@ pub mod fixture;
 
 mod recovery;
 
-pub use recovery::{Confidence, Format, Stage, Timestamps};
+pub use recovery::{Confidence, Format, Stage, Timestamps, UnknownFormat};

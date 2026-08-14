@@ -56,6 +56,31 @@ const MAX_NAME_CHARS: usize = 255;
 /// (A-BOUNDED-ALLOC).
 const MAX_CLUSTER_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Bytes per allocation-table entry in both families. Source: FAT spec §4
+/// (FAT32) and exFAT spec §7.1.
+const FAT32_ENTRY_BYTES: u64 = 4;
+
+/// Smallest allocation-table value that ends a chain rather than continuing
+/// it. Source: FAT spec §4 — `0x0FFFFFF8` and above end a FAT32 chain, and
+/// `0x0FFFFFF7` marks a bad cluster; exFAT ends at `0xFFFFFFFF`.
+const FAT_END_OF_CHAIN: u64 = 0x0FFF_FFF7;
+
+/// Directories one volume walk will read.
+///
+/// A person's photographs sit in a folder, and folders nest, so the walk has
+/// to leave the root — reading only the root is why a whole library could be
+/// invisible on a FAT volume. These bound what a crafted or corrupt directory
+/// tree can cost (`A-BOUNDED-ALLOC`); a volume with more than this many
+/// directories yields the ones nearest its root.
+const MAX_DIRECTORIES: usize = 4096;
+
+/// How deep below the root the walk goes.
+const MAX_DIRECTORY_DEPTH: usize = 16;
+
+/// Bytes of one directory the walk will read before it stops following the
+/// chain. A directory larger than this is not one.
+const MAX_DIRECTORY_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Geometry of a FAT32 or exFAT volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fat {
@@ -71,6 +96,12 @@ pub struct Fat {
     pub root_offset: ByteOffset,
     /// Root directory length in bytes, when fixed by the format.
     pub root_bytes: u64,
+    /// First cluster of the root directory.
+    pub root_cluster: u64,
+    /// Absolute byte offset of the first file allocation table.
+    pub fat_offset: ByteOffset,
+    /// Length of one allocation table in bytes.
+    pub fat_bytes: u64,
     /// Volume length in bytes, from the boot sector's total-sector count.
     pub volume_bytes: u64,
 }
@@ -144,9 +175,10 @@ impl Fat {
             cluster_bytes,
             data_offset,
             root_offset,
-            // The FAT32 root is a cluster chain; one cluster is walked here
-            // and the residue/full walk covers the rest.
             root_bytes: cluster_bytes,
+            root_cluster,
+            fat_offset: volume_offset.checked_add(reserved.checked_mul(bytes_per_sector)?)?,
+            fat_bytes: fat_sectors.checked_mul(bytes_per_sector)?,
             volume_bytes: total_sectors.checked_mul(bytes_per_sector)?,
         })
     }
@@ -170,6 +202,8 @@ impl Fat {
         let root_offset =
             data_offset.checked_add((root_cluster - 2).checked_mul(cluster_bytes)?)?;
         let total_sectors = u64_le(sector, 72)?;
+        let fat_sector = u64::from(u32_le(sector, 80)?);
+        let fat_sectors = u64::from(u32_le(sector, 84)?);
         Some(Self {
             kind: FsKind::ExFat,
             volume_offset,
@@ -177,6 +211,9 @@ impl Fat {
             data_offset,
             root_offset,
             root_bytes: cluster_bytes,
+            root_cluster,
+            fat_offset: volume_offset.checked_add(fat_sector.checked_mul(bytes_per_sector)?)?,
+            fat_bytes: fat_sectors.checked_mul(bytes_per_sector)?,
             volume_bytes: total_sectors.checked_mul(bytes_per_sector)?,
         })
     }
@@ -199,12 +236,175 @@ impl Fat {
         &self,
         src: &mut R,
     ) -> Result<Vec<DeletedFile>, FsError> {
-        let len = usize::try_from(self.root_bytes).unwrap_or(0);
-        let mut buf = Vec::new();
-        if len == 0 || !read_at(src, self.root_offset.get(), len, &mut buf)? {
-            return Ok(Vec::new());
+        let mut out = Vec::new();
+        let mut seen: Vec<u64> = Vec::new();
+        // Breadth first from the root, so a volume whose depth ceiling is
+        // reached still yields the directories nearest it — where a person's
+        // own folders are, rather than the deepest branch of one of them.
+        let mut queue: Vec<(u64, usize)> = vec![(self.root_cluster, 0)];
+        let mut at = 0_usize;
+        let mut directories = 0_usize;
+
+        while at < queue.len() && directories < MAX_DIRECTORIES {
+            let (cluster, depth) = queue[at];
+            at += 1;
+            if seen.contains(&cluster) {
+                continue;
+            }
+            seen.push(cluster);
+            directories += 1;
+
+            let bytes = self.read_chain(src, cluster)?;
+            if bytes.is_empty() {
+                continue;
+            }
+            out.extend(self.deleted_in_directory(&bytes));
+            if depth < MAX_DIRECTORY_DEPTH {
+                queue.extend(
+                    self.subdirectories(&bytes)
+                        .into_iter()
+                        .map(|child| (child, depth + 1)),
+                );
+            }
         }
-        Ok(self.deleted_in_directory(&buf))
+        Ok(out)
+    }
+
+    /// Reads a directory by following its cluster chain.
+    ///
+    /// The chain is intact for a directory that still exists, which is what
+    /// makes this different from recovering a deleted *file*: the entries
+    /// naming deleted files live in directories the filesystem still tracks.
+    /// A chain that runs past [`MAX_DIRECTORY_BYTES`], repeats a cluster or
+    /// points outside the volume stops there rather than being followed
+    /// (`A-UNTRUSTED-ONDISK`).
+    fn read_chain<R: Read + Seek>(&self, src: &mut R, first: u64) -> Result<Vec<u8>, FsError> {
+        let mut out = Vec::new();
+        let mut piece = Vec::new();
+        let mut cluster = first;
+        let mut visited = 0_u64;
+        let step = usize::try_from(self.cluster_bytes).unwrap_or(0);
+        let ceiling = MAX_DIRECTORY_BYTES / self.cluster_bytes.max(1);
+
+        while visited < ceiling && cluster >= 2 {
+            let Some(offset) = self.cluster_at(cluster) else {
+                break;
+            };
+            if offset.get() >= self.volume_offset.get().saturating_add(self.volume_bytes) {
+                break;
+            }
+            if step == 0 || !read_at(src, offset.get(), step, &mut piece)? {
+                break;
+            }
+            out.extend_from_slice(&piece);
+            visited += 1;
+            match self.next_cluster(src, cluster)? {
+                // A chain that loops back on itself is corrupt, and following
+                // it would read the same directory for as long as the ceiling
+                // allowed.
+                Some(next) if next != cluster => cluster = next,
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// The cluster following `cluster` in the allocation table, if any.
+    fn next_cluster<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        cluster: u64,
+    ) -> Result<Option<u64>, FsError> {
+        let Some(at) = cluster
+            .checked_mul(FAT32_ENTRY_BYTES)
+            .filter(|at| at.saturating_add(FAT32_ENTRY_BYTES) <= self.fat_bytes)
+            .and_then(|at| self.fat_offset.checked_add(at))
+        else {
+            return Ok(None);
+        };
+        let mut buf = Vec::new();
+        if !read_at(src, at.get(), 4, &mut buf)? {
+            return Ok(None);
+        }
+        // Both families use 32-bit entries here; FAT32 reserves the top four
+        // bits. Source: exFAT spec §7.1, FAT spec §4.
+        let raw = u64::from(u32_le(&buf, 0).unwrap_or(0));
+        let next = if self.kind == FsKind::ExFat {
+            raw
+        } else {
+            raw & 0x0FFF_FFFF
+        };
+        // End-of-chain and bad-cluster marks are both "no next".
+        Ok((2..FAT_END_OF_CHAIN).contains(&next).then_some(next))
+    }
+
+    /// First clusters of the live subdirectories `dir` names.
+    ///
+    /// Only directories that still exist: a deleted one has lost its chain,
+    /// so following it would be reading whatever now occupies those clusters
+    /// and reporting the names found there as if they were its.
+    fn subdirectories(&self, dir: &[u8]) -> Vec<u64> {
+        match self.kind {
+            FsKind::ExFat => Self::exfat_subdirectories(dir),
+            _ => Self::fat32_subdirectories(dir),
+        }
+    }
+
+    fn fat32_subdirectories(dir: &[u8]) -> Vec<u64> {
+        let mut out = Vec::new();
+        for entry in dir.chunks_exact(32) {
+            let first = entry[0];
+            if first == 0 {
+                break;
+            }
+            let attrs = entry[11];
+            // `.` and `..` point back up; following them would loop.
+            if first == FAT_DELETED
+                || first == b'.'
+                || attrs & ATTR_LONG_NAME == ATTR_LONG_NAME
+                || attrs & ATTR_DIRECTORY == 0
+                || attrs & ATTR_VOLUME_ID != 0
+            {
+                continue;
+            }
+            let cluster = u64::from(u16_le(entry, 20).unwrap_or(0)) << 16
+                | u64::from(u16_le(entry, 26).unwrap_or(0));
+            if cluster >= 2 {
+                out.push(cluster);
+            }
+        }
+        out
+    }
+
+    fn exfat_subdirectories(dir: &[u8]) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut index = 0_usize;
+        while (index + 1) * 32 <= dir.len() {
+            let entry = &dir[index * 32..(index + 1) * 32];
+            let kind = entry[0];
+            index += 1;
+            if kind != EXFAT_ENTRY_FILE {
+                continue;
+            }
+            // Bit 4 of the file attributes is the directory flag.
+            // Source: exFAT spec §7.4.4.
+            let directory = u16_le(entry, 4).unwrap_or(0) & 0x0010 != 0;
+            let secondary = usize::from(entry[1]).min(MAX_NAME_FRAGMENTS + 1);
+            for _ in 0..secondary {
+                if (index + 1) * 32 > dir.len() {
+                    break;
+                }
+                let sub = &dir[index * 32..(index + 1) * 32];
+                index += 1;
+                if directory && sub[0] == EXFAT_ENTRY_STREAM {
+                    let cluster = u64::from(u32_le(sub, 20).unwrap_or(0));
+                    if cluster >= 2 {
+                        out.push(cluster);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Parses deleted entries out of one directory region's bytes.

@@ -34,6 +34,8 @@ pub struct Collected {
     pub source_object: Option<u64>,
     /// Parent candidate, for embedded thumbnails.
     pub parent: Option<ByteOffset>,
+    /// What the picture records about itself and its camera.
+    pub capture: argos_core::artifact::Capture,
     /// The bytes the sink was handed.
     pub bytes: Vec<u8>,
 }
@@ -56,6 +58,7 @@ impl std::fmt::Debug for Collected {
             )
             .field("source_object", &self.source_object)
             .field("parent", &self.parent)
+            .field("capture", &self.capture)
             .field("bytes", &format_args!("{} bytes", self.bytes.len()))
             .finish()
     }
@@ -117,6 +120,7 @@ impl ArtifactSink for Collector {
             recovered_name: artifact.recovered_name.map(str::to_owned),
             source_object: artifact.source_object,
             parent: artifact.parent,
+            capture: artifact.capture.clone(),
             bytes: collected,
         });
         Ok(())

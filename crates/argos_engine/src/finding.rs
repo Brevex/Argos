@@ -190,10 +190,28 @@ pub struct ScanReport {
     pub unreadable: Vec<ByteRange>,
     /// Volumes located, current and residual.
     pub volumes: Vec<Volume>,
+    /// Every fragmentation point carving localized, in medium order.
+    ///
+    /// Recorded so the search can be run again without sweeping the medium
+    /// again: locating these is what the sweep and the validation stage cost,
+    /// and on a terabyte that is hours, while searching from them is minutes.
+    /// A later run reads them back and starts at stage E.
+    pub fragmentation: Vec<crate::Broken>,
     /// Images recovered by reassembling fragments.
     pub reassembled: u64,
     /// Broken candidates reassembly was offered.
     pub reassembly_attempted: u64,
+    /// Images reported as the part of themselves that decodes, because their
+    /// remainder is not on the medium to be found.
+    pub partial_prefixes: u64,
+    /// Broken candidates the search left alone because the frame declares a
+    /// picture below the size floor.
+    ///
+    /// They are not lost: what carving established about each is still
+    /// reported, and a run with a lower floor searches them. Counting them
+    /// separately is what keeps "the search found nothing here" distinct from
+    /// "the search did not look here" (`A-CONFIDENCE-HONEST`).
+    pub reassembly_skipped_small: u64,
     /// Which of the run's ceilings were reached, if any.
     pub ceilings: Ceilings,
     /// Residual `FILE`-record regions that could not be attributed to an NTFS

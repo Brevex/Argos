@@ -33,8 +33,22 @@ const INDX_MAGIC: &[u8; 4] = b"INDX";
 
 /// Attribute type ids. Source: NTFS attribute definitions.
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
+const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
+
+/// Bytes of a fixed `$ATTRIBUTE_LIST` entry header, before its name.
+/// Source: NTFS on-disk layout — type, length, name length, name offset,
+/// starting VCN, base file reference, attribute id.
+const ATTRIBUTE_LIST_ENTRY_BYTES: usize = 26;
+
+/// Extension records one file's `$ATTRIBUTE_LIST` may name.
+///
+/// A file needs them when its run list outgrows one MFT record, which happens
+/// to the most heavily fragmented files on a volume — the ones worth
+/// recovering. This bounds what a corrupt list can make the walk read
+/// (`A-BOUNDED-ALLOC`); a real file uses a handful.
+const MAX_EXTENSION_RECORDS: usize = 256;
 const ATTR_END: u32 = 0xFFFF_FFFF;
 
 /// MFT record size used when no boot sector is available (orphan scan).
@@ -122,6 +136,25 @@ impl Ntfs {
         })
     }
 
+    /// Absolute offset of MFT record `number`.
+    ///
+    /// Records are numbered through the `$MFT`'s own extents, so a fragmented
+    /// `$MFT` puts record *n* wherever its runs place it — not at a fixed
+    /// stride from the start.
+    fn record_offset(&self, mft_extents: &[ByteRange], number: u64) -> Option<u64> {
+        let mut skip = number.checked_mul(u64::from(self.record_size))?;
+        for extent in mft_extents {
+            if skip < extent.len {
+                let at = extent.start.get().checked_add(skip)?;
+                return (at.checked_add(u64::from(self.record_size))?
+                    <= extent.end_saturating().get())
+                .then_some(at);
+            }
+            skip -= extent.len;
+        }
+        None
+    }
+
     /// Walks the `$MFT` and returns every record flagged deleted, with name,
     /// timestamps and content extents.
     ///
@@ -147,6 +180,7 @@ impl Ntfs {
             .unwrap_or_else(|| vec![ByteRange::new(self.mft_offset, 0)]);
 
         let mut found = Vec::new();
+        let mut extension = Vec::new();
         for extent in &mft_extents {
             let mut at = extent.start.get();
             let end = at.saturating_add(extent.len);
@@ -154,9 +188,21 @@ impl Ntfs {
                 if !read_at(src, at, record_len, &mut buf)? {
                     break;
                 }
-                if let Some(record) = Record::parse(&buf, at)
+                if let Some(mut record) = Record::parse(&buf, at)
                     && record.deleted
                 {
+                    // A file whose run list outgrew one record keeps the rest
+                    // in extension records. Following them is what makes the
+                    // most fragmented files come back whole rather than
+                    // truncated at whatever fitted.
+                    for number in std::mem::take(&mut record.extensions) {
+                        let Some(offset) = self.record_offset(&mft_extents, number) else {
+                            continue;
+                        };
+                        if read_at(src, offset, record_len, &mut extension)? {
+                            record.absorb_extension(&extension, offset);
+                        }
+                    }
                     found.push(record.into_deleted_file(self));
                 }
                 at += record_len as u64;
@@ -239,6 +285,9 @@ struct Record {
     size: u64,
     /// Resident payload as (offset within record, length), or runs.
     data: RecordData,
+    /// MFT records holding the rest of this file's `$DATA` run list, in file
+    /// order. Empty for a file whose runs fit in one record.
+    extensions: Vec<u64>,
 }
 
 enum RecordData {
@@ -270,6 +319,11 @@ impl Record {
         let mut fn_timestamps = Timestamps::default();
         let mut size = 0_u64;
         let mut data = RecordData::None;
+        let mut extensions: Vec<u64> = Vec::new();
+
+        // The record's own number, so an attribute list that points back at it
+        // is recognised. Source: NTFS 3.1 record header, offset 44.
+        let record_number = u64::from(u32_le(&record, 44)?);
 
         let mut at = attrs_at;
         for _ in 0..MAX_ATTRS {
@@ -326,6 +380,15 @@ impl Record {
                         };
                     }
                 }
+                // A file whose run list outgrew this record keeps the rest in
+                // extension records, and says so here. Without following them
+                // the file's extents stop partway through — silently, and for
+                // exactly the files that are most fragmented.
+                ATTR_ATTRIBUTE_LIST if !non_resident => {
+                    let (value_at, value_len) = resident_value(attr)?;
+                    let list = attr.get(value_at..value_at + usize::try_from(value_len).ok()?)?;
+                    extensions = data_extension_records(list, record_number);
+                }
                 _ => {}
             }
             at = at.checked_add(len)?;
@@ -341,7 +404,26 @@ impl Record {
             timestamps,
             size,
             data,
+            extensions,
         })
+    }
+
+    /// Appends the runs an extension record holds for this file's `$DATA`.
+    ///
+    /// The entries of an `$ATTRIBUTE_LIST` are in starting-VCN order, so
+    /// following them in order appends the file's runs in file order. Each
+    /// attribute's run list is its own chain of signed deltas, so decoding one
+    /// per record is correct.
+    fn absorb_extension(&mut self, raw: &[u8], record_at: u64) {
+        let Some(extension) = Self::parse(raw, record_at) else {
+            return;
+        };
+        let (RecordData::Runs { runs, .. }, RecordData::Runs { runs: mine, .. }) =
+            (extension.data, &mut self.data)
+        else {
+            return;
+        };
+        mine.extend(runs);
     }
 
     /// Content extents of the unnamed `$DATA` stream, absolute on the medium.
@@ -388,6 +470,40 @@ impl Record {
             source_object: Some(self.position),
         }
     }
+}
+
+/// MFT record numbers an `$ATTRIBUTE_LIST` names as holding `$DATA`.
+///
+/// Only the unnamed stream, and only records other than the base one: an entry
+/// pointing back at the record being parsed is already accounted for, and
+/// following it would read the same runs twice.
+fn data_extension_records(list: &[u8], base: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut at = 0_usize;
+    while at + ATTRIBUTE_LIST_ENTRY_BYTES <= list.len() && out.len() < MAX_EXTENSION_RECORDS {
+        let (Some(kind), Some(len)) = (u32_le(list, at), u16_le(list, at + 4)) else {
+            break;
+        };
+        let len = usize::from(len);
+        // A zero or unaligned length would not advance the walk.
+        if len < ATTRIBUTE_LIST_ENTRY_BYTES || at.saturating_add(len) > list.len() {
+            break;
+        }
+        let name_len = list.get(at + 6).copied().unwrap_or(0);
+        if kind == ATTR_DATA
+            && name_len == 0
+            && let Some(reference) = u64_le(list, at + 16)
+        {
+            // The low 48 bits are the record number; the top 16 are its
+            // sequence, which says nothing about where the record is.
+            let record = reference & 0x0000_FFFF_FFFF_FFFF;
+            if record != base && !out.contains(&record) {
+                out.push(record);
+            }
+        }
+        at += len;
+    }
+    out
 }
 
 /// One entry of a non-resident run list. A sparse run maps no medium bytes

@@ -77,6 +77,12 @@ pub enum Anchor {
     /// An orphaned NTFS `FILE` record — metadata of a filesystem whose
     /// `$MFT` no longer describes it, the primary residue after a re-format.
     NtfsRecord,
+    /// An NTFS `INDX` directory index buffer.
+    ///
+    /// Its slack holds the `$FILE_NAME` copies of entries a directory has
+    /// removed — names of deleted files, surviving where the directory itself
+    /// no longer lists them.
+    NtfsIndex,
 }
 
 /// How a volume was located.
@@ -97,6 +103,13 @@ pub struct Volume {
     pub range: ByteRange,
     /// Whether the volume is current or residue of an earlier format.
     pub origin: Origin,
+    /// Bytes in the unit this filesystem allocates in — cluster or block.
+    ///
+    /// A file's fragments begin and end on multiples of it, counted from the
+    /// volume's start, so it is the grid a reassembly search should step on.
+    /// Zero when the anchor did not state a usable one, which a caller reads
+    /// as "assume nothing" rather than as a size.
+    pub allocation_bytes: u64,
 }
 
 /// A deleted file recovered from filesystem metadata.

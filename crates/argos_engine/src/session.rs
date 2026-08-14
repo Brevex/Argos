@@ -186,6 +186,57 @@ impl ScanSession {
         self.run(medium, sink, progress, Some(classifier))
     }
 
+    /// Runs the search alone, over fragmentation points a previous run found.
+    ///
+    /// A scan of a large medium spends its hours locating these; searching from
+    /// them takes minutes. This is what lets the budget, the size floor and the
+    /// ceilings be tried again without reading the surface a second time.
+    ///
+    /// The medium is still read: every extent reported is fetched back and
+    /// hashed exactly as a scan's is, so pointing this at the wrong disk
+    /// recovers nothing rather than something wrong.
+    ///
+    /// # Errors
+    ///
+    /// Fails only when `sink` refuses an artifact.
+    pub fn reassemble<V, S, P>(
+        &self,
+        medium: Medium<V>,
+        broken: &[crate::Broken],
+        sink: &mut S,
+        progress: &P,
+    ) -> Result<ScanReport, ScanError>
+    where
+        V: Read + Seek + Send,
+        S: ArtifactSink,
+        P: ProgressSink + ?Sized,
+    {
+        self.inner.control.begin();
+        progress.emit(ScanEvent::StateChanged {
+            state: RunState::Running,
+        });
+        let outcome = pipeline::resume(
+            &self.inner.config,
+            &self.inner.control,
+            medium,
+            broken,
+            sink,
+            progress,
+            None::<&mut AcceptAll>,
+        );
+        let state = if self.inner.control.is_cancelled() {
+            RunState::Cancelled
+        } else {
+            RunState::Finished
+        };
+        self.inner.control.finish(state);
+        progress.emit(ScanEvent::StateChanged { state });
+        outcome.map(|mut report| {
+            report.state = state;
+            report
+        })
+    }
+
     fn run<V, S, P, C>(
         &self,
         medium: Medium<V>,

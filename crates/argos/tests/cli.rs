@@ -504,3 +504,171 @@ fn an_image_below_the_size_floor_is_recorded_and_not_written() {
         "the 640x480 image belongs in the directory: {written:?}"
     );
 }
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn a_batch_of_photographs_can_be_exported_by_camera_and_date() {
+    // The question a person actually has after a scan of a used disk: not
+    // "which artifact has hash 4f2c…" but "which of these hundreds of
+    // thousands are the ones I lost". A camera and a year answer it; an offset
+    // and a byte count do not.
+    let lost_first = Jpeg::new()
+        .with_capture(
+            "NIKON CORPORATION",
+            "NIKON D80",
+            "2009:07:14 16:22:05",
+            (3872, 2592),
+        )
+        .with_entropy_bytes(3000)
+        .build();
+    let lost_second = Jpeg::new()
+        .with_capture(
+            "NIKON CORPORATION",
+            "NIKON D80",
+            "2009:07:14 16:31:40",
+            (3872, 2592),
+        )
+        .with_entropy_bytes(3100)
+        .build();
+    let unrelated = Jpeg::new()
+        .with_capture("Apple", "iPhone 12", "2021:03:02 11:00:00", (4032, 3024))
+        .with_entropy_bytes(3200)
+        .build();
+
+    let disk = Disk::filled(1024 * 1024)
+        .with(10_000, &lost_first)
+        .with(200_000, &lost_second)
+        .with(600_000, &unrelated)
+        .into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+    let out = dir.path().join("recovered");
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(&out)
+        .args(["--min-long-side", "0"])
+        .output()
+        .expect("run argos scan");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
+            .expect("valid json");
+    assert_eq!(manifest["artifacts"][0]["camera_model"], "NIKON D80");
+    assert_eq!(manifest["artifacts"][0]["taken"], "2009:07:14 16:22:05");
+
+    let exported = dir.path().join("the-batch");
+    let export = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("export")
+        .args(["--from".as_ref(), out.as_os_str()])
+        .args(["--to".as_ref(), exported.as_os_str()])
+        .args(["--camera", "nikon"])
+        .args(["--taken-from", "2009"])
+        .args(["--taken-until", "2009"])
+        .output()
+        .expect("run argos export");
+    assert!(
+        export.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+
+    let taken: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(exported.join("manifest.json")).expect("exported manifest"),
+    )
+    .expect("valid json");
+    let models: Vec<&str> = taken["artifacts"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .map(|record| record["camera_model"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        models,
+        ["NIKON D80", "NIKON D80"],
+        "the export must hold that camera's pictures from that year, and only those"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn a_search_can_be_run_again_from_a_session_without_reading_the_medium_twice() {
+    // A scan of a large disk spends its hours sweeping the surface and driving
+    // every signature hit through a state machine, and both establish the same
+    // fragmentation points every time. Recording them is what lets a longer
+    // budget or a lower floor be tried in minutes.
+    //
+    // The first run is given a floor no photograph on this disk clears, so its
+    // search skips the fragmented image entirely. The second run lowers the
+    // floor and finds it — from the manifest, with the sweep never repeated.
+    let photo = argos_carve::fixture::photo_jpeg(320, 240, 0x5E55_1000_0000_0001);
+    let block = argos_carve::classify::BLOCK_BYTES;
+    let layout =
+        argos_carve::fixture::fragmented(512 * block, &photo, &[8 * block, 40 * block], block);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &layout.disk).expect("write fixture disk");
+    let first = dir.path().join("first");
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(&first)
+        .args(["--min-long-side", "4000"])
+        .output()
+        .expect("run argos scan");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(first.join("manifest.json")).expect("manifest"))
+            .expect("valid json");
+    let points = manifest["fragmentation"]
+        .as_array()
+        .expect("the manifest must record where the search could be picked up");
+    assert!(!points.is_empty());
+    assert_eq!(points[0]["offset"], (8 * block) as u64);
+
+    let second = dir.path().join("second");
+    let again = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("reassemble")
+        .args(["--from".as_ref(), first.as_os_str()])
+        .arg(&image)
+        .args(["--out".as_ref(), second.as_os_str()])
+        .args(["--min-long-side", "0"])
+        .output()
+        .expect("run argos reassemble");
+    assert!(
+        again.status.success(),
+        "reassemble failed: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+
+    let recovered = std::fs::read(second.join("000000.jpg")).expect("the reassembled photograph");
+    assert_eq!(
+        recovered, photo,
+        "a resumed search must land on the planted bytes exactly, as a scan's would"
+    );
+    let resumed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(second.join("manifest.json")).expect("manifest"))
+            .expect("valid json");
+    assert_eq!(resumed["artifacts"][0]["confidence"], "reassembled");
+    assert_eq!(
+        resumed["artifacts"][0]["extents"].as_array().map(Vec::len),
+        Some(2)
+    );
+}

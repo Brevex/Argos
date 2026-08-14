@@ -20,6 +20,11 @@ fn digest(hex: &str) -> Digest {
     Digest::new(bytes)
 }
 
+/// Nothing recorded about the camera: these tests are about the store, and a
+/// borrowed default keeps every one of them from naming a field it ignores.
+static NO_CAPTURE: std::sync::LazyLock<argos_core::artifact::Capture> =
+    std::sync::LazyLock::new(argos_core::artifact::Capture::default);
+
 fn artifact<'a>(extents: &'a [ByteRange], length: u64, sha256: &str) -> Artifact<'a> {
     Artifact {
         format: Format::Jpeg,
@@ -34,6 +39,7 @@ fn artifact<'a>(extents: &'a [ByteRange], length: u64, sha256: &str) -> Artifact
         source_object: None,
         parent: None,
         pixels: None,
+        capture: &NO_CAPTURE,
     }
 }
 
@@ -93,6 +99,7 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
             rejected_candidates: 7,
             unreadable: &unreadable,
             triage: None,
+            fragmentation: &[],
         })
         .expect("manifest");
     let json: serde_json::Value =
@@ -193,6 +200,7 @@ fn recovered_files_are_given_to_the_account_that_asked() {
             rejected_candidates: 0,
             unreadable: &[],
             triage: None,
+            fragmentation: &[],
         })
         .expect("write the manifest");
 

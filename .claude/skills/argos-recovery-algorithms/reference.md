@@ -53,12 +53,27 @@ Recovers the geometry of filesystems destroyed by re-formatting.
 - Walk the live `$MFT`: records with the `FILE` signature and the in-use flag clear are deleted
   files; parse `$STANDARD_INFORMATION`, `$FILE_NAME` (name, timestamps), and `$DATA` (resident
   payload, or non-resident run list decoded with checked arithmetic — runs are signed deltas).
+- A file whose run list outgrew its record keeps the rest in **extension records**, named by an
+  `$ATTRIBUTE_LIST` (0x20) in the base one. Follow every entry of type `$DATA` with no attribute
+  name, in the order the list gives them — that is starting-VCN order, so the runs append in file
+  order — resolving each record number through the `$MFT`'s own extents rather than at a fixed
+  stride, since a fragmented `$MFT` puts record *n* wherever its runs place it. Bounded by
+  `MAX_EXTENSION_RECORDS`. This is the shape NTFS gives its most fragmented files, and reading only
+  the base record reports them truncated at whatever fitted — which looks like a success.
 - Independently, signature-scan the surface for **orphaned `FILE` records** (records whose LBA is
   outside any known `$MFT`): after a re-format the new `$MFT` lands elsewhere, so old records
   survive in place. Validate by fixup array before trusting any field.
-- Mine `$I30` index slack for directory entries of deleted files (names + parent references that
-  may have no surviving MFT record).
-- Parse `$UsnJrnl:$J` for delete records (names, timestamps, file reference numbers).
+- Mine `$I30` index slack for directory entries of deleted files. A directory that removes an entry
+  leaves it in the index buffer's slack, so a name can outlive the `$FILE_NAME` in the file's own
+  record. The residue sweep locates `INDX` buffers the same way it locates `FILE` records.
+  An entry numbers an MFT record while a finding is identified by where its record sat, and the two
+  meet only through the geometry of the volume the index belongs to — so an index no located volume
+  covers names nothing, and a fragmented `$MFT` means a miss rather than a wrong name. A finding
+  that still has its own name keeps it: its record is the better evidence.
+- Parse `$UsnJrnl:$J` for delete records (names, timestamps, file reference numbers). The parser
+  exists and is tested; it is **not yet wired**, because reaching `$J` means reading a *named*
+  `$DATA` stream and the record walker deliberately reads only the unnamed one. Removing this
+  limitation updates this paragraph in the same change.
 - On a live Windows source, enumerate Volume Shadow Copies as additional read-only block sources.
 - **Tier**: `FsMetadata` when extents come from a validated record; names from `$I30`/`$UsnJrnl`
   alone attach as metadata to carved artifacts, they do not create extents.
@@ -70,14 +85,28 @@ Recovers the geometry of filesystems destroyed by re-formatting.
 - Deleted inodes in place have zeroed extent trees — do not bother. Instead scan the **jbd2
   journal**: descriptor blocks map journaled buffers to filesystem blocks; stale copies of
   inode-table blocks contain pre-deletion inodes whose extent trees are intact. Parse extent
-  trees (checked depth ≤ 5, bounded entries) to extents.
+  trees to extents at **any depth**: ext4 keeps them inline until a file has more than the inode
+  holds and then pushes them into index blocks, so a deep tree marks a heavily fragmented file —
+  the very file this stage exists for. Each node is accepted only with the extent magic and a
+  depth exactly one below its parent's, and the walk is bounded by `MAX_EXTENT_DEPTH` and
+  `MAX_TREE_BLOCKS`, so a crafted tree cannot descend for ever.
 - Carve directory-entry blocks (recognizable by `rec_len`/`name_len` self-consistency chains) for
-  orphaned names.
+  orphaned names. The parser exists and is tested; it is **not yet wired**, because nothing yet
+  offers it directory blocks — the journal walker reads inode tables, not directories. Removing
+  this limitation updates this paragraph in the same change.
 - **Tier**: `JournalResidue` for journal-mined extents; `FsMetadata` only for extents from
   currently valid metadata (e.g. snapshot-like cases).
 
 ## Spec: FAT32/exFAT deleted-file recovery
 
+- **The walk leaves the root.** A person's files sit in folders, and folders nest, so recovery
+  follows the root's cluster chain and descends into every live subdirectory it names, breadth
+  first — bounded by `MAX_DIRECTORIES`, `MAX_DIRECTORY_DEPTH` and `MAX_DIRECTORY_BYTES`, and by a
+  visited set so a chain that loops terminates. Reading only the root's first cluster, which is
+  what this did, makes a whole photo library invisible on a FAT volume.
+  Only *live* subdirectories are descended into: a deleted directory has lost its chain, so
+  following it would read whatever now occupies those clusters and report the names found there as
+  if they were its.
 - FAT32: directory entries starting `0xE5` are deleted; first cluster (high+low words) and size
   survive, the FAT chain does not. exFAT: entry sets with the in-use bit clear; `NoFatChain`
   entries retain exact extents.
@@ -120,6 +149,18 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   `ContiguousCarve` — it genuinely validated end to end — with the parent offset retained as
   provenance.
 - Progressive JPEG: multiple `SOS` scans are legal; track `EOI` only.
+- **A candidate that cannot be completed is reported as the part of itself that decodes**, when its
+  frame clears the size floor and at least `MIN_PARTIAL_PROGRESS` of it decoded. A photograph whose
+  remainder was overwritten is not recoverable, but its beginning is on the medium and decodes: a
+  3072x2304 frame the decoder walked 58% of is the top thirteen hundred rows of the picture, which
+  is the difference between recognising a photograph and having nothing.
+  - The extent runs from the header to the last byte of the last **whole** MCU, not to where the
+    stream stopped being this file: between those two are the bytes the decoder read on its way to
+    finding out, and they belong to whatever followed on the medium.
+  - The bytes reported are the medium's own. No `EOI` is appended and nothing is padded, so the
+    digest stays the digest of what was there (`A-PROVENANCE`).
+  - Tier `PartialOrThumbnail`, and the record carries how much of the frame decoded. A candidate
+    reassembly completed leaves no partial behind.
 
 ## Spec: PNG validation state machine
 
@@ -130,6 +171,24 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   (an inflate failure localizes it exactly; a CRC mismatch cannot localize damage within its
   chunk, so the chunk data start is reported as the earliest offset corruption may begin) and
   the inflate state summary (carried once stage E lands).
+
+## Spec: the search grid
+
+A fragment begins where an allocator put it, which is a multiple of the filesystem's allocation
+unit **counted from the volume's start**:
+
+- The residue sweep already reports each located volume's range; it also reports its allocation
+  unit, which the same boot sector or superblock states. The search steps on that unit, from that
+  origin. A volume that does not begin on a multiple of its own cluster size puts every real
+  boundary off the medium's absolute grid, so an absolute grid coarser than 4 KiB would step over
+  all of them.
+- Stepping on the real unit loses nothing — every fragment boundary is one of its multiples — and
+  costs proportionally fewer hypotheses: eight times fewer on a volume of 32 KiB clusters, for the
+  same reach.
+- When no located volume contains the region, or when two do and disagree on the grid, the search
+  falls back to `BLOCK_BYTES` from zero: a finer grid tries more than it needs to, while a wrong
+  coarser one would step over the boundary it was looking for. A resumed run has located no
+  volumes and therefore always uses the fallback.
 
 ## Spec: block classification
 
@@ -162,6 +221,20 @@ decides whether the results are evidence:
   decoder confirms.
 - **Progress is MCUs decoded**, never a stream position. Garbage fails on the first Huffman code
   outside the table, so progress cannot be inflated.
+- The decode is **resumed, not repeated**. Both searches ask one question thousands of times over:
+  given the path so far, how far does appending these bytes carry the decoder? Decoding the path
+  from `SOI` each time makes the answer cost the path rather than the candidate — linear in a
+  fragment that can be megabytes, so a full sweep costs hours. The path is decoded once to the last
+  MCU boundary inside it; each hypothesis restores that position (predictors, bit accumulator,
+  restart phase, MCU index) and decodes only the bytes between it and the path's end — at most one
+  MCU — plus the continuation. The resume is rebuilt whenever the path grows, so a walk's later
+  steps cost no more than its first. Measured against planted photographs, this holds a rejected
+  hypothesis at roughly 7 us whatever the path's size, against 166 us for a 6 KB fragment and
+  10.6 ms for a 315 KB one before it.
+- A resumed decode cannot see the splices before its resume point, and an assembly is a file only
+  when *every* join holds. So the cheap answer settles **how far**, and a candidate it reports as
+  complete is then re-decoded from the start over the whole assembly to settle **whether it is** —
+  which is where the seam check below runs. Completions are rare, so the exact pass is not a cost.
 - A reassembled PNG needs no equivalent: the per-chunk CRC32 the structural validator already
   verifies makes a chance assembly impossible, and its break point is exact for the same reason.
 - Among competing complete assemblies — which the exact gate makes rare — the smoothest wins,
@@ -170,6 +243,59 @@ decides whether the results are evidence:
   arithmetic-coded frames are reported as unsupported and are **not reassembled**: claiming a
   recovery from a coding the oracle cannot check would be a guess.
 
+## Spec: which candidates are searched, and in what order
+
+A search bounded by a clock spends itself on whatever it reaches first, so what it reaches first is
+part of the algorithm rather than an implementation detail.
+
+- **A candidate is searched only if its frame declares a picture at least `min_long_side` pixels on
+  its long side.** A frame states its size before its data, so this costs a header read and no
+  decode. It is what stops a used disk's thumbnail cache — which outnumbers its photographs by two
+  orders of magnitude — from spending the budget: a cache entry is a whole small file, and no
+  reassembly of one could produce anything but the small file it already is. Candidates below the
+  floor are counted and reported, never silently dropped; a format whose parser does not report
+  dimensions is never read as "too small".
+- **Regions are searched in order of the furthest any of their candidates decoded.** A frame the
+  decoder walked thousands of MCUs into is a photograph whose first fragment survived; one it walked
+  three into is a signature that landed on plausible bytes. Ties keep medium order, so two runs over
+  one medium agree.
+- When the budget runs out, what was not tried is reported as not tried (`A-CONFIDENCE-HONEST`).
+
+## Spec: resuming a search
+
+Locating a fragmentation point costs the sweep and the validation pass — hours on a terabyte —
+and establishes the same point every time. Searching from one costs minutes. So the points are
+**recorded**, and the search can be run again from them alone:
+
+- Every fragmentation point carving localizes is written to the manifest with what the decoder
+  established about it: header, break point, last whole unit decoded, declared dimensions, and the
+  decoded/required counts. They are recorded whether or not the search that followed found
+  anything — a point the budget never reached is exactly the one worth trying again.
+- A resumed run reads them back and starts at stage E. The sweep, the filesystem pass and the
+  validation pass do not run.
+- The medium is still read. Every extent a resumed run reports is fetched back and hashed exactly
+  as a scan's is, so a session pointed at the wrong medium recovers nothing rather than something
+  wrong.
+- A record naming a format this tool does not recover, or whose break point does not lie past its
+  header, is skipped rather than guessed at.
+
+## Spec: region-resident search
+
+Every hypothesis reads a few dozen bytes from a different offset. Served from the medium that is a
+seek apiece, and on rotational media a seek outweighs the decode it feeds by three orders of
+magnitude — the difference between a hypothesis costing microseconds and costing milliseconds.
+
+- The stretch a candidate can reach is read **once, sequentially, and held**; every hypothesis then
+  reads memory. Block classification runs over the held bytes, so the surface is not read twice.
+- A region is built to hold each of its headers' whole reach either side, *and* that header's first
+  fragment — the splices a gap search tries run from the header to the break point, so a region
+  ending between the two would offer the decoder a prefix it cannot read.
+- Consecutive regions therefore overlap by at most that reach, which caps the medium at being read
+  twice over — against once per header before (`docs/defects/01`).
+- Hypotheses are bounded to the held region at both ends. An offset outside it reads as
+  end-of-input, so a hypothesis that reaches past what was held fails rather than being answered
+  with anything else.
+
 ## Spec: bifragment gap carving
 
 For a candidate with header at `h` and fragmentation point at `h + k`:
@@ -177,9 +303,15 @@ For a candidate with header at `h` and fragmentation point at `h + k`:
 - The first fragment ends at a block boundary **at or below** `h + k`. The break point is an upper
   bound on the splice, not the splice itself: a wrong continuation frequently parses on for a
   while past the real boundary, so the nearest few block boundaries below it are all candidates
-  (`MAX_PREFIX_CANDIDATES`).
-- The second fragment starts at a later block boundary; hypotheses are tried in increasing gap
-  size, bounded by `MAX_GAP_BYTES`, and the total attempt count by `MAX_HYPOTHESES`.
+  (`MAX_PREFIX_CANDIDATES`). Each gets its own share of `MAX_HYPOTHESES`, and whatever a share
+  leaves unspent rolls forward; a ceiling consumed entirely by the first splice would leave the
+  rest untried, which is the same as not having them.
+- The second fragment starts at another block boundary, tried in increasing distance from the
+  first: **ahead** of it to `MAX_GAP_BYTES` (an allocator that split a file usually put the
+  remainder just past it), then **behind the header** to the same bound, which is where one lands
+  when the allocator fills a hole it had passed over. A trial fragment always runs forward, so one
+  proposed behind the header can reach back across it; an assembly whose trimmed extents overlap
+  is refused rather than reported, because it describes a layout no allocator produced.
 - The second fragment is offered as running to the end of the searchable region, **not** to a
   located footer, and the accepted extents are trimmed to the decoder's reported length. Footer
   enumeration would make the outcome depend on which of a medium's many false `FF D9` hits was
@@ -197,11 +329,34 @@ For candidates with > 2 fragments:
   across the stitch row; lower is better).
 - Parallel Unique Path: grow the best path per header greedily, all headers in parallel, each
   extent assignable to one path (matching Pal/Sencar/Memon's SmartCarver reassembly).
+- **Candidates are offered nearest-first, from the end of the path so far, within
+  `SEARCH_RADIUS_BYTES`.** A file's next fragment lies near its last one — the allocator split it
+  because no single run was long enough and took the nearest runs it had — so distance from the
+  path end is the prior. Sweeping the candidate list in medium order instead spends the whole
+  ceiling on whatever sits lowest on the disk, which for a header late on a terabyte is never the
+  continuation; the list is kept in medium order so the nearest is a binary search and the two
+  sides are walked outwards together.
+- The walk starts from **every** splice `MAX_PREFIX_CANDIDATES` allows, as the gap search does,
+  and keeps the smoothest assembly across all of them. Starting only from the block boundary
+  nearest the break cannot reach a file whose real splice is further below it.
 - A fragment committed to a path is trimmed to the bytes the decoder actually consumed from it.
   Left at the full length it was offered, it would swallow the rest of the medium and no further
   fragment could be reached, so every file would appear to have two pieces.
 - The walk does **not** stop at the first assembly that decodes: a shorter, wrong path often
   decodes, so every completion is scored and the smoothest is kept.
+- **The walk reconsiders its steps, up to `MAX_BRANCHING_FRAGMENTS`.** Committing only the
+  furthest-reaching candidate and never looking back loses a path whenever that candidate is not
+  the true continuation, which at three fragments happens often enough to cost most of them. Each
+  step instead keeps the `MAX_BRANCH` furthest-reaching and tries each in turn, depth first, under
+  the one shared hypothesis ceiling.
+- **How deep it may reconsider is a question about the oracle, not the budget.** Every branch is
+  another chance for an assembly that decodes and whose seams look like a photograph's to be the
+  wrong one. Measured against planted ground truth, three fragments is where the seam check holds —
+  87% recovered, nothing fabricated, against 25% before. At four it does not: the suite produced an
+  assembly of the right length, decoding end to end, whose three seams all passed, and which was
+  not the planted bytes. No seam threshold separated that case without refusing a third of the true
+  recoveries with it. So the search stops reconsidering where it can still tell the difference, and
+  past that depth commits greedily as before.
 - Progress and offsets inside a path are measured in the **assembled** stream, which is a
   different coordinate system from the medium once a path has more than one fragment.
 
@@ -222,7 +377,7 @@ medium for this tool. What separates them is the picture at the splice:
 - Outputs tier `Reassembled`, with every extent recorded per `A-PROVENANCE`.
 - References: Pal & Memon, IEEE SPM 2009; Pal, Sencar & Memon, DFRWS 2008; Uzun & Sencar 2015.
 
-### Measured recovery, and the greedy walk's limit
+### Measured recovery, and where the search stops
 
 Recovery rates are measured per fragmentation pattern against planted ground truth, and the suite
 holds two different things:
@@ -236,12 +391,14 @@ The suite includes a **competing photograph from the same encoder** between the 
 is the condition that defeats an entropy-only oracle; a suite that plants one image in noise does
 not test the guarantee it asserts.
 
-Two fragments — the dominant real pattern — is recovered in most cases, forwards or backwards, and
-the seam check refuses rather than guesses when it cannot judge, which costs some recall. Deeper
-fragmentation is where PUP's greediness shows: it commits one fragment per step and never
-reconsiders, so a step whose best candidate is not the true continuation loses the path. It gives
-up rather than guess, which is why nothing is fabricated, but it gives up often. Backtracking over
-committed steps is what would raise the deeper rates and is not implemented.
+Two and three fragments are recovered in most cases, forwards or backwards, and the seam check
+refuses rather than guesses when it cannot judge, which costs some recall. Past three the walk
+commits greedily and gives up often — deliberately, because the measurement showed that
+reconsidering deeper is where it starts fabricating rather than where it starts finding.
+
+The rates are also what fixes the search's width: it was widened until the suite reported an answer
+that was not the planted bytes, and then bounded to the depth before that. A rate is therefore not
+just a record of how well the search does — it is the evidence for how far it is allowed to go.
 
 ## Spec: confidence tiers and finding merge
 

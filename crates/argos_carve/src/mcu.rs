@@ -101,6 +101,15 @@ pub struct ScanOutcome {
     pub mcus_across: u32,
     /// Pixel rows one MCU spans.
     pub mcu_rows: u32,
+    /// Pixel width the frame header declares. Zero when no frame was parsed.
+    ///
+    /// This is what the image *claims to be*, read from the header before any
+    /// of its data is decoded, so it is known for a candidate that never
+    /// completes — which is what lets a search spend its budget on frames the
+    /// size of photographs rather than on a thumbnail cache.
+    pub width: u32,
+    /// Pixel height the frame header declares. Zero when no frame was parsed.
+    pub height: u32,
     /// MCU the decoder had reached as the stream crossed each watched
     /// offset, in the order the offsets were given — one per splice a
     /// reassembly is asking about. A zero means that offset was never
@@ -109,7 +118,18 @@ pub struct ScanOutcome {
     /// How many entries of [`ScanOutcome::seam_mcus`] are meaningful.
     pub seams: usize,
     /// First byte past the last one the decoder consumed.
+    ///
+    /// Includes the bytes it read while failing, so it marks where the stream
+    /// stopped being this image rather than where the image stopped.
     pub end: ByteOffset,
+    /// First byte past the last **complete** MCU.
+    ///
+    /// Everything before this decoded as picture; between here and
+    /// [`ScanOutcome::end`] are the bytes the decoder read on its way to
+    /// discovering they were not. Reporting a prefix of the image means
+    /// reporting up to here, or the file would carry a tail of whatever
+    /// followed it on the medium.
+    pub settled: ByteOffset,
     /// Why it stopped.
     pub stop: ScanStop,
 }
@@ -143,9 +163,12 @@ impl ScanOutcome {
             mcus_required: 0,
             mcus_across: 0,
             mcu_rows: 0,
+            width: 0,
+            height: 0,
             seam_mcus: [0; MAX_SEAMS],
             seams: 0,
             end: ByteOffset::new(end),
+            settled: ByteOffset::new(end),
             stop,
         }
     }
@@ -199,81 +222,237 @@ pub fn scan_watching<R: Read + Seek>(
 ) -> Result<ScanOutcome, CarveError> {
     let Scratch { stream, seg, .. } = scratch;
     let mut bytes = Bytes::new(src, start.get(), limit, stream);
+    let header = match parse_header(&mut bytes, seg)? {
+        Ok(header) => header,
+        Err(stop) => return Ok(ScanOutcome::nothing(bytes.pos(), stop)),
+    };
+    let (outcome, _) = decode_scan(&mut bytes, &header, Cursor::default(), watch, start.get())?;
+    Ok(outcome)
+}
+
+/// A decode stopped inside a fragment, ready to be carried on over whatever
+/// follows it.
+///
+/// A gap search proposes thousands of continuations for one first fragment,
+/// and decoding that fragment from `SOI` for each of them is what the search
+/// actually spends its time on: the cost is linear in the fragment's size, so
+/// a megabyte-long first fragment makes every hypothesis cost milliseconds and
+/// a full sweep cost hours. Decoding it once and restoring this instead makes
+/// a hypothesis cost what its own bytes cost.
+///
+/// Built by [`resume_at`] and spent by [`scan_resumed`].
+#[derive(Clone, Debug)]
+pub struct Resume {
+    header: Header,
+    cursor: Cursor,
+    /// Medium offset of the first byte the resumed decode has to read. It is
+    /// an MCU boundary at or below the fragment end the caller asked for, so
+    /// the bytes between the two are replayed — at most one MCU's worth.
+    replay_from: u64,
+}
+
+impl Resume {
+    /// Where the resumed decode has to start reading.
+    #[must_use]
+    pub fn replay_from(&self) -> ByteOffset {
+        ByteOffset::new(self.replay_from)
+    }
+
+    /// MCUs already accounted for when the decode stopped here.
+    #[must_use]
+    pub fn mcus_decoded(&self) -> u32 {
+        self.cursor.decoded
+    }
+
+    /// MCUs the frame requires in total.
+    #[must_use]
+    pub fn mcus_required(&self) -> u32 {
+        self.header.geometry.total
+    }
+
+    /// Pixel dimensions the frame header declares.
+    #[must_use]
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.header.width, self.header.height)
+    }
+}
+
+/// Decodes the candidate at `start` up to `until`, keeping the position.
+///
+/// `None` when nothing decoded — no parsable frame, a coding this decoder does
+/// not implement, or not one whole MCU inside the range.
+///
+/// # Errors
+///
+/// Fails only when reading or seeking `src` fails.
+pub fn resume_at<R: Read + Seek>(
+    src: &mut R,
+    start: ByteOffset,
+    until: u64,
+    scratch: &mut Scratch,
+) -> Result<Option<Resume>, CarveError> {
+    if until <= start.get() {
+        return Ok(None);
+    }
+    let Scratch { stream, seg, .. } = scratch;
+    let mut bytes = Bytes::new(src, start.get(), until, stream);
+    let Ok(header) = parse_header(&mut bytes, seg)? else {
+        return Ok(None);
+    };
+    let (_, snapshot) = decode_scan(&mut bytes, &header, Cursor::default(), &[], start.get())?;
+    Ok(snapshot.map(|snapshot| Resume {
+        header,
+        cursor: snapshot.cursor,
+        replay_from: snapshot.at,
+    }))
+}
+
+/// Carries a [`Resume`] on over `src`, which must present the replayed bytes
+/// followed by the continuation being tested.
+///
+/// `watch` and the returned offsets are in that stream's coordinates, not the
+/// medium's. MCU counts are absolute: what the resumed decode adds is added to
+/// what the prefix already accounted for, so a caller compares them against
+/// [`ScanOutcome::mcus_required`] exactly as an unresumed scan's.
+///
+/// # Errors
+///
+/// Fails only when reading or seeking `src` fails.
+pub fn scan_resumed<R: Read + Seek>(
+    resume: &Resume,
+    src: &mut R,
+    limit: u64,
+    watch: &[u64],
+    scratch: &mut Scratch,
+) -> Result<ScanOutcome, CarveError> {
+    let Scratch { stream, .. } = scratch;
+    let mut bytes = Bytes::new(src, 0, limit, stream);
+    let (outcome, _) = decode_scan(&mut bytes, &resume.header, resume.cursor, watch, 0)?;
+    Ok(outcome)
+}
+
+/// What the frame headers settled, and what every hypothesis resuming inside
+/// this scan shares.
+///
+/// Held apart from the decode position because it is the expensive half: the
+/// Huffman tables are built once per candidate, while the position is copied
+/// per hypothesis.
+#[derive(Clone, Debug)]
+struct Header {
+    scan: ScanHeader,
+    tables: Tables,
+    geometry: McuGeometry,
+    restart_interval: u16,
+    width: u32,
+    height: u32,
+}
+
+/// How far a scan had got, and everything needed to carry on from there.
+///
+/// Small and `Copy`: this is what a resumed hypothesis restores, so it must
+/// not cost what re-reading the fragment would.
+#[derive(Clone, Copy, Debug, Default)]
+struct Cursor {
+    predictors: [i32; MAX_COMPONENTS],
+    decoded: u32,
+    expected_restart: u8,
+    /// Bits pulled but not yet consumed, most significant first.
+    accumulator: u32,
+    /// How many of `accumulator`'s low bits are valid.
+    bits: u32,
+    halt: Halt,
+}
+
+/// A decode position at an MCU boundary, and where on the medium it sits.
+#[derive(Clone, Copy)]
+struct Snapshot {
+    cursor: Cursor,
+    /// First byte the decoder had not yet consumed.
+    at: u64,
+}
+
+/// Walks the marker segments up to and including `SOS`.
+fn parse_header<R: Read + Seek>(
+    bytes: &mut Bytes<'_, R>,
+    seg: &mut Vec<u8>,
+) -> Result<Result<Header, ScanStop>, CarveError> {
     let mut tables = Tables::default();
     let mut frame: Option<Frame> = None;
     let mut restart_interval = 0_u16;
 
-    if next(&mut bytes)? != Some(0xFF) || next(&mut bytes)? != Some(MARKER_SOI) {
-        return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+    if next(bytes)? != Some(0xFF) || next(bytes)? != Some(MARKER_SOI) {
+        return Ok(Err(ScanStop::Broke));
     }
 
     loop {
-        let Some(code) = next_marker(&mut bytes)? else {
-            return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+        let Some(code) = next_marker(bytes)? else {
+            return Ok(Err(ScanStop::Broke));
         };
         match code {
             MARKER_DHT => {
-                let Some(()) = read_payload(&mut bytes, seg)? else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                let Some(()) = read_payload(bytes, seg)? else {
+                    return Ok(Err(ScanStop::Broke));
                 };
                 if tables.absorb(seg).is_none() {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                    return Ok(Err(ScanStop::Broke));
                 }
             }
             MARKER_DRI => {
-                let Some(()) = read_payload(&mut bytes, seg)? else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                let Some(()) = read_payload(bytes, seg)? else {
+                    return Ok(Err(ScanStop::Broke));
                 };
                 let (Some(&hi), Some(&lo)) = (seg.first(), seg.get(1)) else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                    return Ok(Err(ScanStop::Broke));
                 };
                 restart_interval = u16::from_be_bytes([hi, lo]);
             }
             // Baseline and extended sequential, Huffman coded.
             0xC0 | 0xC1 => {
-                let Some(()) = read_payload(&mut bytes, seg)? else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                let Some(()) = read_payload(bytes, seg)? else {
+                    return Ok(Err(ScanStop::Broke));
                 };
                 let Some(parsed) = Frame::parse(seg) else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                    return Ok(Err(ScanStop::Broke));
                 };
                 frame = Some(parsed);
             }
             // Progressive, lossless, hierarchical and every arithmetic-coded
             // frame: outside what this decoder can check.
             0xC2 | 0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
-                return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Unsupported));
+                return Ok(Err(ScanStop::Unsupported));
             }
             MARKER_SOS => {
                 let Some(frame) = frame else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                    return Ok(Err(ScanStop::Broke));
                 };
-                let Some(()) = read_payload(&mut bytes, seg)? else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                let Some(()) = read_payload(bytes, seg)? else {
+                    return Ok(Err(ScanStop::Broke));
                 };
                 let Some(scan) = ScanHeader::parse(seg, &frame) else {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                    return Ok(Err(ScanStop::Broke));
                 };
-                return decode_scan(
-                    &mut bytes,
-                    &frame,
-                    &scan,
-                    &tables,
+                let Some(geometry) = McuGeometry::of(&frame, &scan) else {
+                    return Ok(Err(ScanStop::Broke));
+                };
+                return Ok(Ok(Header {
+                    scan,
+                    tables,
+                    geometry,
                     restart_interval,
-                    watch,
-                    start.get(),
-                );
+                    width: frame.width,
+                    height: frame.height,
+                }));
             }
-            MARKER_EOI => return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke)),
+            MARKER_EOI => return Ok(Err(ScanStop::Broke)),
             // Quantisation tables, comments, application data and the rest:
             // nothing the entropy decoder needs, but their length is trusted
             // only as far as the read limit allows.
             MARKER_DQT | MARKER_DNL | 0xC8 | 0xCC | 0xE0..=0xEF | 0xFE => {
-                if !skip_payload(&mut bytes)? {
-                    return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
+                if !skip_payload(bytes)? {
+                    return Ok(Err(ScanStop::Broke));
                 }
             }
-            _ => return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke)),
+            _ => return Ok(Err(ScanStop::Broke)),
         }
     }
 }
@@ -400,7 +579,7 @@ impl ScanHeader {
 }
 
 /// The Huffman tables a frame has declared so far.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct Tables {
     dc: [Option<HuffTable>; MAX_TABLES],
     ac: [Option<HuffTable>; MAX_TABLES],
@@ -446,7 +625,7 @@ const MAX_SYMBOLS: usize = 256;
 /// The symbol list is inline rather than a `Vec`: a table is rebuilt for every
 /// reassembly hypothesis, and thousands of those run per fragmented candidate,
 /// so a heap allocation here would be one per hypothesis (`M-MEM-REUSE`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct HuffTable {
     /// Smallest code of each length, indexed by length.
     mincode: [i32; MAX_CODE_BITS + 1],
@@ -500,9 +679,10 @@ impl HuffTable {
 }
 
 /// Where the bit reader stopped feeding.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Halt {
     /// Still inside entropy-coded data.
+    #[default]
     None,
     /// A marker was met; the scan cannot continue through it.
     Marker(u8),
@@ -525,12 +705,17 @@ struct BitReader<'a, 'b, R> {
 }
 
 impl<'a, 'b, R: Read + Seek> BitReader<'a, 'b, R> {
-    fn new(bytes: &'a mut Bytes<'b, R>) -> Self {
+    /// A reader carrying on from where `cursor` left off.
+    ///
+    /// The leftover bits matter: a scan boundary almost never falls on a byte
+    /// boundary, so a resume that started a fresh accumulator would drop the
+    /// tail of the last code it read.
+    fn resuming(bytes: &'a mut Bytes<'b, R>, cursor: Cursor) -> Self {
         Self {
             bytes,
-            accumulator: 0,
-            bits: 0,
-            halt: Halt::None,
+            accumulator: cursor.accumulator,
+            bits: cursor.bits,
+            halt: cursor.halt,
         }
     }
 
@@ -657,21 +842,27 @@ impl<'a, 'b, R: Read + Seek> BitReader<'a, 'b, R> {
 /// Decodes the scan, returning how much of the frame it accounted for.
 fn decode_scan<R: Read + Seek>(
     bytes: &mut Bytes<'_, R>,
-    frame: &Frame,
-    scan: &ScanHeader,
-    tables: &Tables,
-    restart_interval: u16,
+    header: &Header,
+    start: Cursor,
     watch: &[u64],
     origin: u64,
-) -> Result<ScanOutcome, CarveError> {
-    let Some(geometry) = McuGeometry::of(frame, scan) else {
-        return Ok(ScanOutcome::nothing(bytes.pos(), ScanStop::Broke));
-    };
+) -> Result<(ScanOutcome, Option<Snapshot>), CarveError> {
+    let Header {
+        scan,
+        tables,
+        geometry,
+        restart_interval,
+        ..
+    } = header;
 
-    let mut reader = BitReader::new(bytes);
-    let mut predictors = [0_i32; MAX_COMPONENTS];
-    let mut decoded = 0_u32;
-    let mut expected_restart = 0_u8;
+    let geometry = *geometry;
+    let restart_interval = *restart_interval;
+    let (width, height) = (header.width, header.height);
+
+    let mut reader = BitReader::resuming(bytes, start);
+    let mut predictors = start.predictors;
+    let mut decoded = start.decoded;
+    let mut expected_restart = start.expected_restart;
     // Absolute positions of the boundaries to watch, and the MCU the decoder
     // had reached as it crossed each. Watching every boundary is what makes a
     // multi-fragment assembly checkable: the caller judges each splice, and
@@ -683,17 +874,27 @@ fn decode_scan<R: Read + Seek>(
     }
     let mut seam_mcus = [0_u32; MAX_SEAMS];
     let mut crossed = 0_usize;
+    // The last MCU boundary reached, which is where a later hypothesis may
+    // pick the decode up. Only a boundary will do: mid-MCU the predictors and
+    // the bit accumulator describe a block that is half read.
+    let mut snapshot: Option<Snapshot> = None;
 
-    let outcome = |reader: &BitReader<'_, '_, R>, decoded, seam_mcus, stop| ScanOutcome {
-        mcus_decoded: decoded,
-        mcus_required: geometry.total,
-        mcus_across: geometry.across,
-        mcu_rows: geometry.rows,
-        seam_mcus,
-        seams,
-        end: ByteOffset::new(reader.bytes.pos()),
-        stop,
-    };
+    let outcome =
+        |reader: &BitReader<'_, '_, R>, decoded, seam_mcus, settled: Option<Snapshot>, stop| {
+            ScanOutcome {
+                mcus_decoded: decoded,
+                mcus_required: geometry.total,
+                mcus_across: geometry.across,
+                mcu_rows: geometry.rows,
+                width,
+                height,
+                seam_mcus,
+                seams,
+                end: ByteOffset::new(reader.bytes.pos()),
+                settled: ByteOffset::new(settled.map_or_else(|| reader.bytes.pos(), |at| at.at)),
+                stop,
+            }
+        };
 
     while decoded < geometry.total {
         if restart_interval > 0
@@ -702,14 +903,20 @@ fn decode_scan<R: Read + Seek>(
         {
             reader.align();
             let Some(code) = reader.marker()? else {
-                return Ok(outcome(&reader, decoded, seam_mcus, ScanStop::Broke));
+                return Ok((
+                    outcome(&reader, decoded, seam_mcus, snapshot, ScanStop::Broke),
+                    snapshot,
+                ));
             };
             // Restart markers run RST0..RST7 in order. A stream that skips one
             // is not this scan.
             if !(MARKER_RST0..=MARKER_RST7).contains(&code)
                 || code - MARKER_RST0 != expected_restart
             {
-                return Ok(outcome(&reader, decoded, seam_mcus, ScanStop::Broke));
+                return Ok((
+                    outcome(&reader, decoded, seam_mcus, snapshot, ScanStop::Broke),
+                    snapshot,
+                ));
             }
             expected_restart = (expected_restart + 1) % 8;
             predictors = [0_i32; MAX_COMPONENTS];
@@ -717,9 +924,23 @@ fn decode_scan<R: Read + Seek>(
         }
 
         if !decode_mcu(&mut reader, scan, tables, &mut predictors)? {
-            return Ok(outcome(&reader, decoded, seam_mcus, ScanStop::Broke));
+            return Ok((
+                outcome(&reader, decoded, seam_mcus, snapshot, ScanStop::Broke),
+                snapshot,
+            ));
         }
         decoded += 1;
+        snapshot = Some(Snapshot {
+            cursor: Cursor {
+                predictors,
+                decoded,
+                expected_restart,
+                accumulator: reader.accumulator,
+                bits: reader.bits,
+                halt: reader.halt,
+            },
+            at: reader.bytes.pos(),
+        });
         // The boundaries ascend, so each is crossed in turn.
         while crossed < seams && reader.bytes.pos() >= watched[crossed] {
             seam_mcus[crossed] = decoded;
@@ -735,7 +956,10 @@ fn decode_scan<R: Read + Seek>(
         // that needs one has already told us its height.
         _ => ScanStop::Broke,
     };
-    Ok(outcome(&reader, decoded, seam_mcus, stop))
+    Ok((
+        outcome(&reader, decoded, seam_mcus, snapshot, stop),
+        snapshot,
+    ))
 }
 
 /// Decodes one minimum coded unit; `false` when the data is not one.

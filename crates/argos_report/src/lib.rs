@@ -61,8 +61,42 @@ pub struct Manifest {
     /// How triage ran over this scan, when the caller reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage: Option<TriageRecord>,
+    /// One record per fragmentation point carving localized.
+    ///
+    /// Where the search can be picked up without sweeping the medium again.
+    /// Locating these is what a scan's expensive stages produce; searching from
+    /// them is minutes where the scan was hours, which is what lets a search be
+    /// run again with a longer budget or a lower floor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fragmentation: Vec<FragmentRecord>,
     /// One record per recovered artifact.
     pub artifacts: Vec<ArtifactRecord>,
+}
+
+/// One image that started decoding on the medium and stopped.
+///
+/// Plain numbers rather than the engine's own vocabulary: this crate is what
+/// writes the manifest and depends on nothing that recovers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FragmentRecord {
+    /// Where the image starts on the medium.
+    pub offset: u64,
+    /// Where the stream stopped being this image.
+    pub break_at: u64,
+    /// First byte past the last part of the picture that decoded whole.
+    pub decoded_end: u64,
+    /// Image format, as its canonical display name.
+    pub format: String,
+    /// Pixel width the frame header declares, when it declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_width: Option<u32>,
+    /// Pixel height the frame header declares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_height: Option<u32>,
+    /// Units of the picture that decoded, and how many it needs.
+    pub decoded: u32,
+    /// Units the whole picture requires.
+    pub required: u32,
 }
 
 impl Manifest {
@@ -180,6 +214,32 @@ pub struct ArtifactRecord {
     /// [`width`]: ArtifactRecord::width
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// Camera manufacturer the picture records about itself.
+    ///
+    /// This and the three fields below are how a person finds their own
+    /// photographs among a used disk's hundreds of thousands of recovered
+    /// images: an offset and a byte count separate nothing, while a camera and
+    /// a date separate one afternoon from ten years of everything else. They
+    /// survive a picture that does not, because they sit ahead of its data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_make: Option<String>,
+    /// Camera model the picture records about itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_model: Option<String>,
+    /// When the picture was taken, as stored: `YYYY:MM:DD HH:MM:SS`. Verbatim,
+    /// because it carries no zone and turning it into an instant would be
+    /// inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken: Option<String>,
+    /// Pixel width the picture's own metadata claims, which may differ from
+    /// the decoded [`width`] and survives when the picture does not.
+    ///
+    /// [`width`]: ArtifactRecord::width
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_width: Option<u32>,
+    /// Pixel height the picture's own metadata claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_height: Option<u32>,
     /// Length the source metadata claimed, when it said one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_length: Option<u64>,
@@ -404,6 +464,11 @@ impl Store {
             length: written,
             width: artifact.pixels.map(|(width, _)| width),
             height: artifact.pixels.map(|(_, height)| height),
+            camera_make: artifact.capture.make.clone(),
+            camera_model: artifact.capture.model.clone(),
+            taken: artifact.capture.taken.clone(),
+            declared_width: artifact.capture.pixels.map(|(width, _)| width),
+            declared_height: artifact.capture.pixels.map(|(_, height)| height),
             expected_length: artifact.expected_length,
             missing_bytes: artifact
                 .expected_length
@@ -494,6 +559,11 @@ impl Store {
             length: artifact.length,
             width: artifact.pixels.map(|(width, _)| width),
             height: artifact.pixels.map(|(_, height)| height),
+            camera_make: artifact.capture.make.clone(),
+            camera_model: artifact.capture.model.clone(),
+            taken: artifact.capture.taken.clone(),
+            declared_width: artifact.capture.pixels.map(|(width, _)| width),
+            declared_height: artifact.capture.pixels.map(|(_, height)| height),
             expected_length: artifact.expected_length,
             missing_bytes: artifact
                 .expected_length
@@ -601,6 +671,7 @@ impl Store {
             rejected_candidates: summary.rejected_candidates,
             unreadable: summary.unreadable.to_vec(),
             triage: summary.triage.cloned(),
+            fragmentation: summary.fragmentation.to_vec(),
             artifacts: std::mem::take(&mut self.records),
         };
         let path = self.dir.join(MANIFEST_FILE);
@@ -661,6 +732,8 @@ pub struct Summary<'a> {
     pub unreadable: &'a [ExtentRecord],
     /// How triage ran, when the caller has anything to say about it.
     pub triage: Option<&'a TriageRecord>,
+    /// Fragmentation points, so a later run can start from them.
+    pub fragmentation: &'a [FragmentRecord],
 }
 
 /// Writing recovery output failed.

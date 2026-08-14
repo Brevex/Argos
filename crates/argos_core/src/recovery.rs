@@ -95,6 +95,34 @@ impl Format {
     }
 }
 
+impl std::str::FromStr for Format {
+    type Err = UnknownFormat;
+
+    /// Parses the name [`Display`](fmt::Display) writes.
+    ///
+    /// This is how a format survives a round trip through a manifest, which is
+    /// what lets a later run pick up where an earlier one left off.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "jpeg" => Ok(Self::Jpeg),
+            "png" => Ok(Self::Png),
+            _ => Err(UnknownFormat),
+        }
+    }
+}
+
+/// A name that is not one of the formats this tool handles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownFormat;
+
+impl fmt::Display for UnknownFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("not an image format this tool recovers")
+    }
+}
+
+impl std::error::Error for UnknownFormat {}
+
 impl fmt::Display for Format {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {

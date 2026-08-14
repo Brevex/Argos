@@ -35,17 +35,22 @@ mod cache_run;
 mod error;
 mod merge;
 mod pipeline;
+mod search;
 mod session;
 
 #[cfg(feature = "test-util")]
 pub mod fixture;
 
 pub use annotate::TriageOutcome;
-/// The filesystem vocabulary a [`ScanReport`] speaks, re-exported so callers
-/// need no direct dependency on `argos_fs` (`M-FOREIGN-REEXPORTS`).
+/// The fragmentation and filesystem vocabulary a [`ScanReport`] speaks,
+/// re-exported so callers need no direct dependency on the crates that define
+/// it (`M-FOREIGN-REEXPORTS`).
+pub use argos_carve::reassemble::Broken;
 pub use argos_fs::{FsKind, Origin, Volume};
 pub use cache_run::CacheRun;
-pub use config::{DEFAULT_MIN_LONG_SIDE, ScanConfig, ScanConfigBuilder, Stages};
+pub use config::{
+    DEFAULT_MIN_LONG_SIDE, DEFAULT_REASSEMBLY_BUDGET, ScanConfig, ScanConfigBuilder, Stages,
+};
 pub use error::ScanError;
 pub use finding::{Ceilings, Finding, ScanReport};
 pub use session::{Medium, ScanSession};

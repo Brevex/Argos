@@ -57,10 +57,21 @@ pub const MAX_FRAGMENTS: usize = 16;
 
 /// Largest number of decode attempts one reassembly may make.
 ///
-/// Every hypothesis costs a full validation pass, so this is what bounds the
-/// time a single fragmented candidate can take, independent of anything read
-/// from the medium.
-pub const MAX_HYPOTHESES: u32 = 4096;
+/// This is what bounds the time a single fragmented candidate can take,
+/// independent of anything read from the medium. It is set to what a complete
+/// search proposes rather than below it, so a candidate whose remainder is on
+/// the medium is not missed for want of budget: [`MAX_PREFIX_CANDIDATES`]
+/// splices, each sweeping [`MAX_GAP_BYTES`] either side of the header in
+/// [`BLOCK_BYTES`] steps, is 8 x 2 x 16384.
+pub const MAX_HYPOTHESES: u32 = 262_144;
+
+/// How far from the end of a path the walk looks for its continuation.
+///
+/// A fragmented file's pieces lie near one another: the allocator split it
+/// because no single run was long enough, and took the nearest runs it had.
+/// Beyond this the candidates are other files' blocks, and testing them costs
+/// the budget the near ones need.
+pub const SEARCH_RADIUS_BYTES: u64 = MAX_GAP_BYTES;
 
 /// How far the stitch row may stand out before an assembly is refused.
 ///
@@ -94,6 +105,22 @@ pub struct Limits {
     pub max_hypotheses: u32,
     /// Fragment boundary granularity.
     pub block_bytes: u64,
+    /// How far from a path's end the graph walk considers a continuation.
+    pub search_radius_bytes: u64,
+    /// Lowest offset a fragment may be proposed at.
+    ///
+    /// The searchable region's far end is `medium_len`; this is its near end.
+    /// A caller serving the search from a held region sets both to the region,
+    /// so no hypothesis asks for bytes it does not have.
+    pub search_floor: u64,
+    /// Offset the block grid is counted from.
+    ///
+    /// A filesystem allocates in units counted from *its own* start, not the
+    /// medium's, so a volume that does not begin on a multiple of its cluster
+    /// size puts every real fragment boundary off the absolute grid. Setting
+    /// this to the volume's start is what makes the search step on the
+    /// boundaries an allocator actually produced.
+    pub block_origin: u64,
 }
 
 impl Default for Limits {
@@ -103,21 +130,35 @@ impl Default for Limits {
             max_fragments: MAX_FRAGMENTS,
             max_hypotheses: MAX_HYPOTHESES,
             block_bytes: BLOCK_BYTES,
+            search_radius_bytes: SEARCH_RADIUS_BYTES,
+            search_floor: 0,
+            block_origin: 0,
         }
     }
 }
 
 impl Limits {
+    /// Distance from the grid's origin, for an offset at or above it.
+    fn since_origin(self, at: u64) -> Option<u64> {
+        at.checked_sub(self.block_origin)
+    }
+
     /// The block boundary at or below `at`.
     fn floor(self, at: u64) -> u64 {
         let block = self.block_bytes.max(1);
-        at - (at % block)
+        let Some(offset) = self.since_origin(at) else {
+            return at;
+        };
+        at - (offset % block)
     }
 
     /// The block boundary at or above `at`.
     fn ceil(self, at: u64) -> u64 {
         let block = self.block_bytes.max(1);
-        match at % block {
+        let Some(offset) = self.since_origin(at) else {
+            return at;
+        };
+        match offset % block {
             0 => at,
             remainder => at.saturating_add(block - remainder),
         }
@@ -134,17 +175,86 @@ pub struct Broken {
     pub break_at: ByteOffset,
     /// Format the header claimed.
     pub format: Format,
+    /// Pixel dimensions the frame header declares, when the format states them
+    /// before its data.
+    ///
+    /// Known without decoding anything, which is what makes it usable as a
+    /// gate: a search can tell a photograph-sized frame from a cache entry for
+    /// the cost of reading a header, and spend its budget accordingly. `None`
+    /// for a format whose parser does not report them, and a `None` is never
+    /// read as "too small".
+    pub declared: Option<(u32, u32)>,
+    /// Units of the image the decoder accounted for before it stopped — MCUs
+    /// for JPEG. Zero for a format that does not count in them.
+    pub decoded: u32,
+    /// Units the whole image requires, in the same counting.
+    pub required: u32,
+    /// First byte past the last unit that decoded whole.
+    ///
+    /// `[header, decoded_end)` is the part of the image the medium still holds
+    /// and the decoder confirmed, which is what a caller reports when the rest
+    /// cannot be found. It is at or below [`Broken::break_at`], which marks
+    /// where the stream stopped being this file rather than where the file
+    /// stopped.
+    pub decoded_end: ByteOffset,
 }
 
-/// A reassembled image: which bytes, in which order, and how hard it was.
+impl Broken {
+    /// Whether the frame declares a picture at least `floor` pixels on its
+    /// long side.
+    ///
+    /// A frame that declares nothing clears it: the floor exists to keep
+    /// caches of small pictures out of a search, not to punish a format whose
+    /// header this crate does not read dimensions from.
+    #[must_use]
+    pub fn clears(&self, floor: u32) -> bool {
+        self.declared
+            .is_none_or(|(width, height)| width.max(height) >= floor)
+    }
+
+    /// How much of the image the decoder reached, as a fraction.
+    ///
+    /// Zero when the image's size is unknown, so a caller cannot mistake "not
+    /// counted" for "nothing decoded".
+    #[must_use]
+    pub fn progress(&self) -> f64 {
+        if self.required == 0 {
+            return 0.0;
+        }
+        f64::from(self.decoded) / f64::from(self.required)
+    }
+}
+
+/// A reassembled image: which bytes, in which order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reassembly {
     /// Source extents in file order. Concatenating them yields the image.
     pub extents: Vec<ByteRange>,
     /// Image length in bytes, as the decoder confirmed it.
     pub length: u64,
-    /// Decode attempts spent reaching this result, so a report can say what
-    /// the search cost.
+}
+
+/// What one search produced and what it cost.
+///
+/// The cost is reported whether or not anything was found, because a caller
+/// rationing a budget across a medium's candidates has to charge what a search
+/// actually spent. Charging every failure its ceiling instead spends the budget
+/// on the accounting: a scan of a 1 TB disk reached 63 of its 200 fragmentation
+/// points that way (`docs/defects/05-reassembly-never-ran.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attempt {
+    /// The image, when the oracle confirmed one.
+    pub reassembly: Option<Reassembly>,
+    /// Decode attempts spent.
+    pub hypotheses: u32,
+}
+
+/// What a walk over several headers produced and what it cost.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Walk {
+    /// One reassembly per header that completed.
+    pub assembled: Vec<(Broken, Reassembly)>,
+    /// Decode attempts spent across every header.
     pub hypotheses: u32,
 }
 
@@ -181,7 +291,7 @@ pub fn locate_break<R: Read + Seek>(
     scratch: &mut Scratch,
 ) -> Result<Option<Broken>, CarveError> {
     let limit = medium_len.min(header.get().saturating_add(crate::MAX_IMAGE_BYTES));
-    let break_at = match format {
+    let (break_at, declared, decoded, required, decoded_end) = match format {
         Format::Jpeg => {
             let outcome = crate::mcu::scan(src, header, limit, scratch)?;
             if outcome.is_complete()
@@ -190,14 +300,23 @@ pub fn locate_break<R: Read + Seek>(
             {
                 return Ok(None);
             }
-            outcome.end
+            (
+                outcome.end,
+                (outcome.width > 0 && outcome.height > 0)
+                    .then_some((outcome.width, outcome.height)),
+                outcome.mcus_decoded,
+                outcome.mcus_required,
+                outcome.settled,
+            )
         }
         Format::Png => {
             // A PNG's per-chunk CRC32 stops the structural walk exactly where
-            // the data stops being the file, so it needs no other oracle.
+            // the data stops being the file, so it needs no other oracle. It
+            // counts verified bytes rather than picture units, so nothing is
+            // claimed about how much of the picture that is.
             match crate::validate(format, src, header, limit, scratch)? {
                 Verdict::Complete { .. } => return Ok(None),
-                Verdict::Corrupt { at, .. } => at,
+                Verdict::Corrupt { at, .. } => (at, None, 0, 0, at),
             }
         }
     };
@@ -208,6 +327,10 @@ pub fn locate_break<R: Read + Seek>(
         header,
         break_at,
         format,
+        declared,
+        decoded,
+        required,
+        decoded_end,
     }))
 }
 
@@ -234,47 +357,325 @@ pub fn bifragment<R: Read + Seek>(
     medium_len: u64,
     limits: Limits,
     scratch: &mut Scratch,
-) -> Result<Option<Reassembly>, CarveError> {
+) -> Result<Attempt, CarveError> {
     let header = broken.header.get();
     let break_at = broken.break_at.get();
+    let mut attempts = 0_u32;
+    let nothing = |attempts| Attempt {
+        reassembly: None,
+        hypotheses: attempts,
+    };
     if break_at <= header || break_at >= medium_len {
-        return Ok(None);
+        return Ok(nothing(attempts));
     }
 
-    let mut attempts = 0_u32;
+    let step = limits.block_bytes.max(1);
+    let mut trial = Vec::new();
     // Ends of the first fragment: the block boundary at or below the break,
     // then earlier ones, since a wrong splice can parse on for a while.
-    for first_end in prefix_candidates(header, break_at, limits) {
-        // Smallest gap first (Garfinkel's ordering): the second fragment
-        // starts as soon after the first as the block grid allows.
+    let prefixes = prefix_candidates(header, break_at, limits);
+    let mut remaining_prefixes = prefixes.len();
+    for first_end in prefixes {
+        // Each prefix gets a share of what is left, so an early one that finds
+        // nothing cheaply does not deny a later one its turn — and whatever it
+        // leaves unspent rolls forward.
+        let share = limits
+            .max_hypotheses
+            .saturating_sub(attempts)
+            .div_ceil(u32::try_from(remaining_prefixes.max(1)).unwrap_or(1));
+        remaining_prefixes = remaining_prefixes.saturating_sub(1);
+        let ceiling = attempts.saturating_add(share).min(limits.max_hypotheses);
+        if attempts >= ceiling {
+            continue;
+        }
+
+        let first = [ByteRange::new(ByteOffset::new(header), first_end - header)];
+        let Some(oracle) = Oracle::at(src, broken.format, &first, scratch)? else {
+            continue;
+        };
+
+        // Ahead of the first fragment, smallest gap first (Garfinkel's
+        // ordering): an allocator that split a file usually put the remainder
+        // just past it.
         let mut second_start = limits.ceil(first_end.saturating_add(1));
         let furthest = second_start
             .saturating_add(limits.max_gap_bytes)
             .min(medium_len);
         while second_start < furthest {
-            if attempts >= limits.max_hypotheses {
-                return Ok(None);
+            if attempts >= ceiling {
+                break;
             }
             attempts += 1;
-
-            let extents = [
-                ByteRange::new(ByteOffset::new(header), first_end - header),
-                ByteRange::new(
-                    ByteOffset::new(second_start),
-                    tail_len(second_start, medium_len),
-                ),
-            ];
-            if let Some(accepted) = decodes(src, broken.format, &extents, scratch)? {
-                return Ok(Some(Reassembly {
-                    extents: trim_to(&extents, accepted.length),
-                    length: accepted.length,
+            if let Some(found) = try_second(
+                &oracle,
+                src,
+                broken.format,
+                &first,
+                second_start,
+                medium_len,
+                &mut trial,
+                scratch,
+            )? {
+                return Ok(Attempt {
+                    reassembly: Some(found),
                     hypotheses: attempts,
-                }));
+                });
             }
-            second_start = second_start.saturating_add(limits.block_bytes.max(1));
+            second_start = second_start.saturating_add(step);
+        }
+
+        // Behind the header, which is where an allocator puts a remainder when
+        // it fills a hole it had passed over. The trial fragment still runs
+        // forward from there, so it may reach back across the header; an
+        // assembly whose extents overlap is refused rather than reported.
+        let lowest = header
+            .saturating_sub(limits.max_gap_bytes)
+            .max(limits.search_floor);
+        let mut second_start = limits.floor(header);
+        while let Some(next) = second_start.checked_sub(step) {
+            if next < lowest || attempts >= ceiling {
+                break;
+            }
+            second_start = next;
+            attempts += 1;
+            if let Some(found) = try_second(
+                &oracle,
+                src,
+                broken.format,
+                &first,
+                second_start,
+                medium_len,
+                &mut trial,
+                scratch,
+            )? {
+                return Ok(Attempt {
+                    reassembly: Some(found),
+                    hypotheses: attempts,
+                });
+            }
         }
     }
-    Ok(None)
+    Ok(nothing(attempts))
+}
+
+/// Whether an extent list describes each byte at most once.
+///
+/// A trial second fragment runs forward to the end of the searchable region,
+/// so one proposed behind the header can reach back over it. Two extents that
+/// overlap describe a layout no allocator produced, and reporting one would
+/// claim the same bytes twice (`A-PROVENANCE`).
+fn disjoint(extents: &[ByteRange]) -> bool {
+    for (index, first) in extents.iter().enumerate() {
+        for second in &extents[index + 1..] {
+            let (from, to) = (first.start.get(), first.end_saturating().get());
+            let (other_from, other_to) = (second.start.get(), second.end_saturating().get());
+            if from < other_to && other_from < to {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A path prepared once, so testing a continuation of it costs that
+/// continuation's bytes rather than the path's.
+///
+/// Both searches ask the same question thousands of times over: given these
+/// bytes so far, how far does appending those bytes carry the decoder? Decoding
+/// "these bytes so far" from `SOI` each time makes the answer cost the path
+/// rather than the candidate, which is linear in a fragment that can be
+/// megabytes (`docs/defects/05-reassembly-never-ran.md`).
+enum Oracle {
+    /// The entropy decoder stopped inside the path, ready to carry on.
+    Jpeg {
+        resume: Box<crate::mcu::Resume>,
+        /// The path from the resume point to its end, in medium extents. A
+        /// resumed decode replays these before reaching the continuation; it
+        /// is at most one MCU's worth, since a resume point is an MCU
+        /// boundary.
+        replay: Vec<ByteRange>,
+        /// Path bytes before the resume point, for putting a resumed decode's
+        /// positions back into the path's own coordinates.
+        before: u64,
+    },
+    /// A PNG needs none of this: its per-chunk CRC32 already makes a chance
+    /// assembly impossible, and its walk is cheap enough to repeat.
+    Png,
+}
+
+impl Oracle {
+    /// Prepares `path`, which must be non-empty.
+    ///
+    /// `None` when nothing decodable starts there, which is the answer for most
+    /// signature hits on a used medium.
+    fn at<R: Read + Seek>(
+        src: &mut R,
+        format: Format,
+        path: &[ByteRange],
+        scratch: &mut Scratch,
+    ) -> Result<Option<Self>, CarveError> {
+        let length = total_len(path);
+        if length == 0 {
+            return Ok(None);
+        }
+        if format == Format::Png {
+            return Ok(Some(Self::Png));
+        }
+        let resume = {
+            let mut stream = Assembled::new(src, path);
+            crate::mcu::resume_at(&mut stream, ByteOffset::new(0), length, scratch)?
+        };
+        let Some(resume) = resume else {
+            return Ok(None);
+        };
+        let before = resume.replay_from().get();
+        if before > length {
+            return Ok(None);
+        }
+        Ok(Some(Self::Jpeg {
+            resume: Box::new(resume),
+            replay: tail_extents(path, before),
+            before,
+        }))
+    }
+
+    /// Runs the decoder over the path followed by `second`.
+    ///
+    /// `trial` is the caller's reusable extent buffer, so the hottest loop in
+    /// the search allocates nothing (`M-MEM-REUSE`). Progress and consumption
+    /// come back in the path's own coordinates, so a caller cannot tell a
+    /// resumed answer from a repeated one.
+    fn probe<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        path: &[ByteRange],
+        second: ByteRange,
+        trial: &mut Vec<ByteRange>,
+        scratch: &mut Scratch,
+    ) -> Result<Probed, CarveError> {
+        let Self::Jpeg {
+            resume,
+            replay,
+            before,
+        } = self
+        else {
+            trial.clear();
+            trial.extend_from_slice(path);
+            trial.push(second);
+            return probe(src, Format::Png, trial, scratch);
+        };
+        trial.clear();
+        trial.extend_from_slice(replay);
+        trial.push(second);
+        let splice = total_len(replay);
+        let outcome = {
+            let mut stream = Assembled::new(src, trial);
+            crate::mcu::scan_resumed(resume, &mut stream, total_len(trial), &[splice], scratch)?
+        };
+        let consumed = before.saturating_add(outcome.end.get());
+        Ok(Probed {
+            progress: u64::from(outcome.mcus_decoded),
+            consumed,
+            complete: outcome.is_complete().then_some(consumed),
+            seam_mcus: outcome.seam_mcus,
+            seams: outcome.seams,
+            mcus_across: outcome.mcus_across,
+            mcu_rows: outcome.mcu_rows,
+            unsupported: outcome.stop == crate::mcu::ScanStop::Unsupported,
+        })
+    }
+
+    /// Tests one continuation of `path`, returning the image when both the
+    /// decoder and the picture at every splice confirm it.
+    ///
+    /// A completion is re-decoded from the start over the whole assembly. The
+    /// resumed answer cannot see the splices before its resume point, and an
+    /// assembly is only a file when *every* join holds — so what is cheap
+    /// answers "how far", and what is exact answers "is it".
+    fn completes<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        format: Format,
+        path: &[ByteRange],
+        second: ByteRange,
+        trial: &mut Vec<ByteRange>,
+        scratch: &mut Scratch,
+    ) -> Result<Option<(f32, Reassembly)>, CarveError> {
+        if self
+            .probe(src, path, second, trial, scratch)?
+            .complete
+            .is_none()
+        {
+            return Ok(None);
+        }
+        trial.clear();
+        trial.extend_from_slice(path);
+        trial.push(second);
+        let probed = probe(src, format, trial, scratch)?;
+        let Some(length) = probed.complete else {
+            return Ok(None);
+        };
+        let extents = trim_to(trial, length);
+        if extents.len() != trial.len() || !disjoint(&extents) {
+            return Ok(None);
+        }
+        let Some(accepted) = score(src, format, &extents, length, &probed.seam_rows())? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            accepted.seam,
+            Reassembly {
+                extents,
+                length: accepted.length,
+            },
+        )))
+    }
+}
+
+/// Tests one continuation starting at `second_start`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the gap search's inner loop; bundling would allocate per hypothesis"
+)]
+fn try_second<R: Read + Seek>(
+    oracle: &Oracle,
+    src: &mut R,
+    format: Format,
+    path: &[ByteRange],
+    second_start: u64,
+    medium_len: u64,
+    trial: &mut Vec<ByteRange>,
+    scratch: &mut Scratch,
+) -> Result<Option<Reassembly>, CarveError> {
+    let tail = tail_len(second_start, medium_len);
+    if tail == 0 {
+        return Ok(None);
+    }
+    let second = ByteRange::new(ByteOffset::new(second_start), tail);
+    Ok(oracle
+        .completes(src, format, path, second, trial, scratch)?
+        .map(|(_, reassembly)| reassembly))
+}
+
+/// The part of `path` from assembled offset `from` to its end.
+///
+/// A resume point sits inside one of the path's extents, so the extent holding
+/// it is cut and the rest are carried whole.
+fn tail_extents(path: &[ByteRange], from: u64) -> Vec<ByteRange> {
+    let mut out = Vec::new();
+    let mut at = 0_u64;
+    for extent in path {
+        let end = at.saturating_add(extent.len);
+        if end > from {
+            let skip = from.saturating_sub(at);
+            out.push(ByteRange::new(
+                ByteOffset::new(extent.start.get().saturating_add(skip)),
+                extent.len.saturating_sub(skip),
+            ));
+        }
+        at = end;
+    }
+    out
 }
 
 /// How far a trial fragment starting at `start` is allowed to run.
@@ -331,7 +732,12 @@ pub fn parallel_unique_path<R: Read + Seek>(
     medium_len: u64,
     limits: Limits,
     scratch: &mut Scratch,
-) -> Result<Vec<(Broken, Reassembly)>, CarveError> {
+) -> Result<Walk, CarveError> {
+    debug_assert!(
+        candidates.is_sorted_by_key(|candidate| candidate.start.get()),
+        "candidates must be in medium order: the walk locates the blocks nearest \
+         a header by binary search over them"
+    );
     let mut shared = Shared {
         claimed: spoken_for.to_vec(),
         attempts: 0,
@@ -355,7 +761,10 @@ pub fn parallel_unique_path<R: Read + Seek>(
             assembled.push((header, reassembly));
         }
     }
-    Ok(assembled)
+    Ok(Walk {
+        assembled,
+        hypotheses: shared.attempts,
+    })
 }
 
 /// What every header's walk shares: the blocks already spoken for, and the one
@@ -400,142 +809,311 @@ fn grow_path<R: Read + Seek>(
     limits: Limits,
     scratch: &mut Scratch,
 ) -> Result<Option<Reassembly>, CarveError> {
-    let Shared { claimed, attempts } = shared;
     let header = broken.header.get();
     let break_at = broken.break_at.get();
     if break_at <= header {
         return Ok(None);
     }
-    let Some(&first_end) = prefix_candidates(header, break_at, limits).first() else {
-        return Ok(None);
-    };
-
-    let mut path = vec![ByteRange::new(ByteOffset::new(header), first_end - header)];
-    // How much of the file the decoder has been carried through, in the units
-    // `Probed::progress` counts. Not a position on the medium and not one in
-    // the assembled stream — a consumption count, so noise cannot inflate it.
-    let mut reached = 0_u64;
-    // Blocks this path has taken. They only become unavailable to other
-    // headers if the path completes: a greedy step that led nowhere must not
-    // deny its blocks to the next header (each extent is assignable to one
-    // path, but only a path that turned out to be a file).
-    let mut taken: Vec<ByteRange> = Vec::new();
-    // The smoothest complete assembly seen so far, and its score.
+    // Every splice the break point allows, as the gap search tries them. The
+    // break is an upper bound, not the splice: a wrong continuation often
+    // parses on past the real boundary, and a walk that only ever tried the
+    // nearest block boundary could not reach the file behind it.
     let mut best: Option<(f32, Reassembly)> = None;
-
-    while path.len() < limits.max_fragments {
-        // The candidate that carried the decoder furthest without completing.
-        let mut furthest: Option<(u64, u64, u64)> = None;
-
-        for candidate in candidates {
-            if !candidate.profile.class.can_hold_image_data() {
-                continue;
-            }
-            let start = candidate.start.get();
-            // A block inside an extent this path already holds, or one another
-            // recovery already claimed, is not free space. Testing the whole
-            // range rather than the start offset is what stops a path from
-            // reading the same bytes twice and reporting a layout no allocator
-            // could have produced.
-            if covers(claimed, start) || covers(&path, start) {
-                continue;
-            }
-            let tail = tail_len(start, medium_len);
-            if tail == 0 {
-                continue;
-            }
-            if *attempts >= limits.max_hypotheses {
-                return Ok(finish(best, &mut path, claimed, &taken));
-            }
-            *attempts += 1;
-
-            path.push(ByteRange::new(ByteOffset::new(start), tail));
-            let probed = probe(src, broken.format, &path, scratch)?;
-            let scored = match probed.complete {
-                Some(length) => score(
-                    src,
-                    broken.format,
-                    &trim_to(&path, length),
-                    length,
-                    &probed.seam_rows(),
-                )?,
-                None => None,
-            };
-            // Only a hypothesis that both completed and scored needs its path
-            // kept; cloning for every one of thousands would allocate on the
-            // hottest loop here for nothing (`M-MEM-REUSE`).
-            let trial = scored.is_some().then(|| path.clone());
-            path.pop();
-
-            if probed.unsupported {
-                // The oracle cannot check this coding, so no assembly built on
-                // it may be claimed.
-                return Ok(None);
-            }
-
-            match (probed.complete, scored) {
-                (Some(length), Some(accepted)) => {
-                    let better = best.as_ref().is_none_or(|(seam, _)| accepted.seam < *seam);
-                    if let (true, Some(trial)) = (better, trial) {
-                        best = Some((
-                            accepted.seam,
-                            Reassembly {
-                                extents: trim_to(&trial, length),
-                                length,
-                                hypotheses: *attempts,
-                            },
-                        ));
-                    }
-                }
-                _ => {
-                    if furthest.is_none_or(|(best_so_far, ..)| probed.progress > best_so_far) {
-                        furthest = Some((probed.progress, probed.consumed, start));
-                    }
-                }
-            }
-        }
-
-        // Nothing carried the decoder further, so the path cannot grow. What
-        // was already completed stands; guessing beyond it would be invention.
-        let Some((progress, consumed, start)) = furthest else {
-            break;
-        };
-        if progress <= reached {
+    for first_end in prefix_candidates(header, break_at, limits) {
+        if shared.attempts >= limits.max_hypotheses {
             break;
         }
-        reached = progress;
-        // Commit the fragment at the length the decoder actually consumed —
-        // an exact byte position from the entropy decoder, not arithmetic on a
-        // stream offset. Left at the full tail it was offered, this fragment
-        // would swallow the rest of the medium and no further one could ever
-        // be reached. Fragments are block-granular, so it rounds to the grid.
-        let before = total_len(&path);
-        let take = limits
-            .floor(consumed.saturating_sub(before))
-            .max(limits.block_bytes.max(1))
-            .min(tail_len(start, medium_len));
-        let committed = ByteRange::new(ByteOffset::new(start), take);
-        path.push(committed);
-        taken.push(committed);
+        let grown = grow_from(
+            src,
+            Splice { broken, first_end },
+            candidates,
+            medium_len,
+            shared,
+            limits,
+            scratch,
+        )?;
+        if let Some((seam, reassembly)) = grown
+            && best.as_ref().is_none_or(|(worst, _)| seam < *worst)
+        {
+            best = Some((seam, reassembly));
+        }
     }
-
-    Ok(finish(best, &mut path, claimed, &taken))
+    Ok(best.map(|(_, reassembly)| reassembly))
 }
 
-/// Claims the blocks a completed path used, and returns it.
-///
-/// A path that never completed claims nothing: its blocks stay available to
-/// the headers that follow.
-fn finish(
+/// One header and one place its first fragment might end.
+#[derive(Clone, Copy)]
+struct Splice {
+    broken: Broken,
+    first_end: u64,
+}
+
+/// Grows one header's path from one candidate splice.
+fn grow_from<R: Read + Seek>(
+    src: &mut R,
+    splice: Splice,
+    candidates: &[Candidate],
+    medium_len: u64,
+    shared: &mut Shared,
+    limits: Limits,
+    scratch: &mut Scratch,
+) -> Result<Option<(f32, Reassembly)>, CarveError> {
+    let Splice { broken, first_end } = splice;
+    let header = broken.header.get();
+    if first_end <= header {
+        return Ok(None);
+    }
+    let mut walk = Walking {
+        format: broken.format,
+        candidates,
+        medium_len,
+        limits,
+        path: vec![ByteRange::new(ByteOffset::new(header), first_end - header)],
+        trial: Vec::new(),
+        best: None,
+    };
+    step(src, &mut walk, 0, shared, scratch)?;
+    Ok(walk.best)
+}
+
+/// One header's search, as it stands.
+struct Walking<'a> {
+    format: Format,
+    candidates: &'a [Candidate],
+    medium_len: u64,
+    limits: Limits,
+    /// Fragments committed so far, in file order.
+    path: Vec<ByteRange>,
+    /// Reusable extent buffer for the probe, so the hottest loop allocates
+    /// nothing (`M-MEM-REUSE`).
+    trial: Vec<ByteRange>,
+    /// The smoothest complete assembly found, and its score.
     best: Option<(f32, Reassembly)>,
-    path: &mut Vec<ByteRange>,
-    claimed: &mut Vec<ByteRange>,
-    taken: &[ByteRange],
-) -> Option<Reassembly> {
-    path.clear();
-    let (_, reassembly) = best?;
-    claimed.extend_from_slice(taken);
-    Some(reassembly)
+}
+
+/// Continuations one step keeps when its best candidate may be the wrong one.
+///
+/// Committing only the furthest-reaching fragment and never reconsidering is
+/// what held deep fragmentation down: a step whose best candidate is not the
+/// true continuation loses the path for good, and with three fragments that
+/// happens often enough to cost most of them. Keeping a few and trying each in
+/// turn costs `MAX_BRANCH` times the nodes per level, which the resumed decoder
+/// makes affordable — a probe costs its own bytes rather than the path's.
+///
+/// Three rather than more because the true continuation is the furthest-
+/// reaching candidate or close behind it; past that the branches are other
+/// files' blocks, and they multiply.
+pub const MAX_BRANCH: usize = 3;
+
+/// Fragments a path may hold and still have its steps reconsidered.
+///
+/// Reconsidering costs more than time. Every branch is another chance for an
+/// assembly that decodes and whose seams look like a photograph's to be the
+/// wrong one, and the seam check is what has to tell them apart — so how wide
+/// the search may go is a question about the oracle, not about the budget.
+///
+/// Measured against planted ground truth, three fragments is where it holds:
+/// branching there recovers 87% of them with nothing fabricated, against 25%
+/// before. At four it does not — the suite produced an assembly of the right
+/// length, decoding end to end, whose three seams all passed, and which was not
+/// the planted bytes. Tightening the seam ratio does not separate that case
+/// (2.5 and 2.0 leave it, 1.6 removes it only by refusing a third of the true
+/// recoveries too), so the honest bound is depth. Beyond this the walk commits
+/// its best candidate and does not look back, which is what it did everywhere
+/// before (`M-DOCUMENTED-MAGIC`).
+pub const MAX_BRANCHING_FRAGMENTS: usize = 3;
+
+/// Extends `walk.path` by one fragment, every promising way, depth first.
+///
+/// `reached` is how far the decoder has been carried by the path already, in
+/// the units [`Probed::progress`] counts. A branch that does not beat it is not
+/// a continuation, and following one would let the search circle.
+fn step<R: Read + Seek>(
+    src: &mut R,
+    walk: &mut Walking<'_>,
+    reached: u64,
+    shared: &mut Shared,
+    scratch: &mut Scratch,
+) -> Result<(), CarveError> {
+    if walk.path.len() >= walk.limits.max_fragments || shared.attempts >= walk.limits.max_hypotheses
+    {
+        return Ok(());
+    }
+    // The path decoded once per node, so a probe costs the bytes it appends
+    // rather than everything before them
+    // (`docs/defects/05-reassembly-never-ran.md`).
+    let Some(oracle) = Oracle::at(src, walk.format, &walk.path, scratch)? else {
+        // Nothing decodes from this path, so nothing can continue it.
+        return Ok(());
+    };
+
+    // A file's next fragment lies near the end of its last one: the allocator
+    // was writing forward and took the nearest run it could. Sweeping the
+    // candidate list in medium order instead spends the whole budget on
+    // whatever happens to sit lowest on the disk, which for a header late on a
+    // terabyte is never the continuation.
+    let pivot = walk
+        .path
+        .last()
+        .map_or(0, |extent| extent.end_saturating().get());
+    let width = if walk.path.len() < MAX_BRANCHING_FRAGMENTS {
+        MAX_BRANCH
+    } else {
+        1
+    };
+    let mut branches: Vec<(u64, u64, u64)> = Vec::with_capacity(width + 1);
+
+    for candidate in nearest_first(walk.candidates, pivot, walk.limits.search_radius_bytes) {
+        if !candidate.profile.class.can_hold_image_data() {
+            continue;
+        }
+        let start = candidate.start.get();
+        // A block inside an extent this path already holds, or one another
+        // recovery already claimed, is not free space. Testing the whole range
+        // rather than the start offset is what stops a path from reading the
+        // same bytes twice and reporting a layout no allocator could have
+        // produced.
+        if covers(&shared.claimed, start) || covers(&walk.path, start) {
+            continue;
+        }
+        let tail = tail_len(start, walk.medium_len);
+        if tail == 0 {
+            continue;
+        }
+        if shared.attempts >= walk.limits.max_hypotheses {
+            break;
+        }
+        shared.attempts += 1;
+
+        let second = ByteRange::new(ByteOffset::new(start), tail);
+        let probed = oracle.probe(src, &walk.path, second, &mut walk.trial, scratch)?;
+        if probed.unsupported {
+            // The oracle cannot check this coding, so no assembly built on it
+            // may be claimed.
+            walk.best = None;
+            return Ok(());
+        }
+
+        if probed.complete.is_some() {
+            // Exactly, over the whole assembly, so every splice is judged.
+            if let Some((seam, reassembly)) = oracle.completes(
+                src,
+                walk.format,
+                &walk.path,
+                second,
+                &mut walk.trial,
+                scratch,
+            )? && walk.best.as_ref().is_none_or(|(worst, _)| seam < *worst)
+            {
+                walk.best = Some((seam, reassembly));
+            }
+        } else if probed.progress > reached {
+            keep_best(
+                &mut branches,
+                (probed.progress, probed.consumed, start),
+                width,
+            );
+        }
+    }
+
+    for (progress, consumed, start) in branches {
+        if shared.attempts >= walk.limits.max_hypotheses {
+            break;
+        }
+        // Commit the fragment at the length the decoder actually consumed — an
+        // exact byte position from the entropy decoder, not arithmetic on a
+        // stream offset. Left at the full tail it was offered, this fragment
+        // would swallow the rest of the medium and no further one could ever be
+        // reached. Fragments are block-granular, so it rounds to the grid.
+        let before = total_len(&walk.path);
+        let take = walk
+            .limits
+            .floor(consumed.saturating_sub(before))
+            .max(walk.limits.block_bytes.max(1))
+            .min(tail_len(start, walk.medium_len));
+        walk.path.push(ByteRange::new(ByteOffset::new(start), take));
+        step(src, walk, progress, shared, scratch)?;
+        walk.path.pop();
+    }
+    Ok(())
+}
+
+/// Keeps `branch` among the `width` furthest-reaching, best first.
+fn keep_best(branches: &mut Vec<(u64, u64, u64)>, branch: (u64, u64, u64), width: usize) {
+    let at = branches.partition_point(|(progress, ..)| *progress >= branch.0);
+    if at >= width {
+        return;
+    }
+    branches.insert(at, branch);
+    branches.truncate(width);
+}
+
+/// Candidates ordered by distance from `pivot`, nearest first, within
+/// `radius`.
+///
+/// The list is in medium order, so the nearest is found by binary search and
+/// the two sides are walked outwards together.
+fn nearest_first(candidates: &[Candidate], pivot: u64, radius: u64) -> NearestFirst<'_> {
+    let split = candidates.partition_point(|candidate| candidate.start.get() < pivot);
+    NearestFirst {
+        candidates,
+        pivot,
+        radius,
+        ahead: split,
+        behind: split,
+    }
+}
+
+/// Iterator over [`nearest_first`].
+struct NearestFirst<'a> {
+    candidates: &'a [Candidate],
+    pivot: u64,
+    radius: u64,
+    /// Next index at or above the pivot.
+    ahead: usize,
+    /// One past the next index below the pivot.
+    behind: usize,
+}
+
+impl<'a> Iterator for NearestFirst<'a> {
+    type Item = &'a Candidate;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let above = self.candidates.get(self.ahead);
+            let below = self
+                .behind
+                .checked_sub(1)
+                .and_then(|index| self.candidates.get(index));
+            let take_above = match (above, below) {
+                (None, None) => return None,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(above), Some(below)) => {
+                    above.start.get().abs_diff(self.pivot) <= self.pivot.abs_diff(below.start.get())
+                }
+            };
+            let picked = if take_above {
+                self.ahead += 1;
+                self.candidates.get(self.ahead - 1)
+            } else {
+                self.behind -= 1;
+                self.candidates.get(self.behind)
+            };
+            let picked = picked?;
+            if picked.start.get().abs_diff(self.pivot) > self.radius {
+                // The list is sorted, so everything further out on this side is
+                // further still: that side is finished.
+                if take_above {
+                    self.ahead = self.candidates.len();
+                } else {
+                    self.behind = 0;
+                }
+                continue;
+            }
+            return Some(picked);
+        }
+    }
 }
 
 /// Whether `at` falls inside any of `extents`.
@@ -723,30 +1301,6 @@ fn score<R: Read + Seek>(
             }))
         }
     }
-}
-
-/// Whether a trial extent list is really the image, and to what length.
-///
-/// The entropy decoder is the gate: an assembly is the image only when every
-/// MCU the frame declares decoded and the stream then reached `EOI`. Nothing
-/// heuristic decides this.
-fn decodes<R: Read + Seek>(
-    src: &mut R,
-    format: Format,
-    extents: &[ByteRange],
-    scratch: &mut Scratch,
-) -> Result<Option<Accepted>, CarveError> {
-    let probed = probe(src, format, extents, scratch)?;
-    let Some(length) = probed.complete else {
-        return Ok(None);
-    };
-    score(
-        src,
-        format,
-        &trim_to(extents, length),
-        length,
-        &probed.seam_rows(),
-    )
 }
 
 /// An assembly both the decoder and the picture confirmed.

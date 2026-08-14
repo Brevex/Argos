@@ -278,6 +278,154 @@ fn a_corrupt_candidate_is_counted_never_reported() {
     assert_eq!(report.rejected_candidates, 1);
 }
 
+/// Broken candidates planted for the budget test.
+///
+/// Enough of them that a stage which charges every failure its whole
+/// per-candidate ceiling runs out partway, which is what a used disk does:
+/// its fragmentation points number in the thousands.
+const BROKEN_CANDIDATES: usize = 200;
+
+const MIB: u64 = 1024 * 1024;
+
+#[test]
+fn a_photograph_whose_tail_is_gone_comes_back_as_the_part_that_decodes() {
+    // A photograph overwritten partway through cannot be reassembled: the
+    // bytes are not on the medium to be found. What is there is its beginning,
+    // and the decoder can say exactly how much of it decodes. Before, such a
+    // candidate produced no file at all.
+    //
+    // Beside it, a thumbnail-cache entry truncated the same way. It must
+    // produce nothing: the search floor is what keeps a used disk's caches out
+    // of the output, and it has to hold for partials as it does for whole
+    // files (docs/defects/02-thumbnail-provenance.md).
+    let photo = argos_carve::fixture::photo_jpeg(1600, 1200, 0x9E11_0000_0000_0007);
+    let cache = argos_carve::fixture::photo_jpeg(258, 258, 0x9E11_0000_0000_0009);
+    let disk = argos_carve::fixture::Disk::noisy(3 * 1024 * 1024, 0x0FF1_CE00_0000_0001)
+        .with(
+            64 * 1024,
+            &argos_carve::fixture::truncated(&photo, photo.len() * 6 / 10),
+        )
+        .with(
+            2 * 1024 * 1024,
+            &argos_carve::fixture::truncated(&cache, cache.len() * 6 / 10),
+        )
+        .into_bytes();
+
+    let config = ScanConfig::builder()
+        .workers(NonZeroUsize::new(2).expect("at least one worker"))
+        .chunk_bytes(CHUNK)
+        .min_long_side(argos_engine::DEFAULT_MIN_LONG_SIDE)
+        .build()
+        .expect("valid configuration");
+    let (artifacts, report) = scan_with(&disk, config);
+
+    let partials: Vec<_> = artifacts
+        .iter()
+        .filter(|artifact| artifact.confidence == Confidence::PartialOrThumbnail)
+        .collect();
+    let [partial] = partials.as_slice() else {
+        panic!("expected exactly the photograph's prefix, got {partials:?}");
+    };
+    assert_eq!(partial.extents[0].start.get(), 64 * 1024);
+    // The decoder cannot see where the planted bytes ended, so it may walk a
+    // little way into whatever followed before a Huffman code stops matching.
+    // Those bytes are on the medium and did decode, so reporting them is
+    // honest; what must hold is that everything the photograph did cover comes
+    // back exactly, and nothing is padded or invented.
+    let planted = photo.len() * 6 / 10;
+    let overlap = partial.bytes.len().min(planted);
+    assert_eq!(
+        &partial.bytes[..overlap],
+        &photo[..overlap],
+        "the prefix must be the photograph's own bytes"
+    );
+    assert!(
+        partial.bytes.len() >= planted * 9 / 10,
+        "the decoder should reach nearly all of what survived: {} of {planted}",
+        partial.bytes.len()
+    );
+    assert!(
+        partial.bytes.len() <= planted + 64 * 1024,
+        "and must not run far past it: {} of {planted}",
+        partial.bytes.len()
+    );
+    assert_eq!(report.partial_prefixes, 1);
+    assert_eq!(
+        report.reassembly_skipped_small, 1,
+        "the cache entry declares 258 pixels and is left to the floor"
+    );
+}
+
+#[test]
+fn a_fragmented_photograph_far_into_a_large_medium_is_reassembled() {
+    // The condition the region search exists for, and the one no fixture of a
+    // few hundred kilobytes can pose: a header two hundred megabytes in, whose
+    // continuation is near it and whose candidate blocks are nowhere near the
+    // start of the medium. The medium is generated per byte read rather than
+    // held, so the distances are a disk's.
+    let photo = argos_carve::fixture::photo_jpeg(320, 240, 0xC0FF_EE00_0000_0001);
+    let block = argos_carve::classify::BLOCK_BYTES as u64;
+    let header = 200 * MIB;
+    let layout =
+        argos_carve::fixture::planted(260 * MIB, &photo, &[header, header + 6 * MIB], block);
+
+    let workers = 4;
+    let session = ScanSession::new(config(workers));
+    let views: Vec<_> = (0..workers).map(|_| layout.source()).collect();
+    let medium = Medium::new(views, layout.disk.len()).expect("medium");
+    let mut sink = Collector::new();
+    let report = session.start(medium, &mut sink, &Discard).expect("scan");
+
+    let recovered = sink
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.confidence == Confidence::Reassembled)
+        .expect("the fragmented photograph must be reassembled");
+    assert_eq!(
+        recovered.bytes, photo,
+        "a reassembly must be the planted bytes, not merely something that decoded"
+    );
+    assert_eq!(
+        recovered.extents.len(),
+        2,
+        "both fragments are reported: {:?}",
+        recovered.extents
+    );
+    assert_eq!(report.reassembled, 1);
+}
+
+#[test]
+fn every_fragmentation_point_is_offered_to_reassembly() {
+    // None of these can be reassembled — their remainders are not on the
+    // medium — so each costs the search one failed attempt and nothing else.
+    // A stage that stops before the last one has spent its budget on the
+    // accounting rather than on the medium, and the candidates it never
+    // reached are the ones a real disk holds furthest in.
+    // Real encoded photographs, so the entropy decoder actually walks a scan
+    // and reports a fragmentation point; a distinct one each, so a search
+    // cannot complete one candidate out of another's bytes.
+    let stride = 16384;
+    let mut disk =
+        argos_carve::fixture::Disk::noisy(stride * (BROKEN_CANDIDATES + 2), 0x0BEE_F00D_0000_0001);
+    for index in 0..BROKEN_CANDIDATES {
+        let photo =
+            argos_carve::fixture::photo_jpeg(160, 120, 0x51ED_0000_0000_0001 + index as u64);
+        let truncated = argos_carve::fixture::truncated(&photo, photo.len() / 2);
+        disk = disk.with(stride * (index + 1), &truncated);
+    }
+
+    let (_, report) = scan(&disk.into_bytes());
+
+    assert_eq!(
+        report.reassembly_attempted, BROKEN_CANDIDATES as u64,
+        "every fragmentation point the sweep found must reach the search"
+    );
+    assert_eq!(
+        report.reassembled, 0,
+        "no remainder was planted, so reassembling one would be inventing it"
+    );
+}
+
 /// A view that fails every read overlapping a chosen range, the way a medium
 /// with a bad sector does.
 struct Damaged {
@@ -841,4 +989,99 @@ fn a_medium_of_noise_costs_reassembly_nothing() {
     assert!(artifacts.is_empty());
     assert_eq!(report.reassembly_attempted, 0);
     assert!(!report.ceilings.reassembly_decodes);
+}
+
+#[test]
+fn a_recovered_photograph_carries_its_camera_and_date_into_the_report() {
+    // Two photographs from one camera on one afternoon, and a third from
+    // another camera years earlier. Nothing about their offsets or their byte
+    // counts separates them; what does is what each records about itself.
+    //
+    // The second is truncated, so it comes back only as the part that decodes
+    // — and it must still say when it was taken, because that is exactly the
+    // recovery a person cannot identify any other way.
+    let whole = argos_carve::fixture::Jpeg::new()
+        .with_capture(
+            "NIKON CORPORATION",
+            "NIKON D80",
+            "2009:07:14 16:22:05",
+            (3872, 2592),
+        )
+        .with_entropy_bytes(4096)
+        .build();
+    let partial_source = argos_carve::fixture::photo_jpeg(1600, 1200, 0x0CA5_0000_0000_0003);
+    let older = argos_carve::fixture::Jpeg::new()
+        .with_capture(
+            "Canon",
+            "Canon PowerShot A590",
+            "2003:01:02 08:00:00",
+            (2048, 1536),
+        )
+        .with_entropy_bytes(4096)
+        .build();
+
+    let disk = argos_carve::fixture::Disk::noisy(3 * 1024 * 1024, 0x0DA7_E000_0000_0001)
+        .with(64 * 1024, &whole)
+        .with(512 * 1024, &partial_source[..partial_source.len() * 6 / 10])
+        .with(2 * 1024 * 1024, &older)
+        .into_bytes();
+
+    let (artifacts, _) = scan_with(&disk, config(2));
+
+    let nikon = artifacts
+        .iter()
+        .find(|artifact| artifact.capture.model.as_deref() == Some("NIKON D80"))
+        .expect("the whole photograph must report its camera");
+    assert_eq!(nikon.capture.taken.as_deref(), Some("2009:07:14 16:22:05"));
+    assert_eq!(nikon.capture.pixels, Some((3872, 2592)));
+
+    let canon = artifacts
+        .iter()
+        .find(|artifact| artifact.capture.make.as_deref() == Some("Canon"))
+        .expect("the older photograph must report its camera");
+    assert_eq!(canon.capture.taken.as_deref(), Some("2003:01:02 08:00:00"));
+
+    // A photograph without EXIF records nothing rather than something invented.
+    let partial = artifacts
+        .iter()
+        .find(|artifact| artifact.confidence == Confidence::PartialOrThumbnail)
+        .expect("the truncated photograph must come back as its decodable part");
+    assert!(
+        partial.capture.is_empty(),
+        "nothing may be reported about a picture that recorded nothing: {:?}",
+        partial.capture
+    );
+}
+
+#[test]
+fn a_recovery_whose_own_record_lost_its_name_is_named_by_the_index_slack() {
+    // A directory that removes an entry leaves the entry in its index
+    // buffer's slack, so a file's name can outlive the `$FILE_NAME` in its own
+    // record. The index entry carries the MFT record number, which is what
+    // ties the name to a recovery — it creates no extent, and a recovery that
+    // still has its own name keeps it.
+    let jpeg = argos_carve::fixture::Jpeg::new().build();
+    // The record is planted nameless; only the index knows what it was called.
+    let file =
+        argos_fs::fixture::FilePlan::new("", 128 * 1024, jpeg.len()).with_content(jpeg.clone());
+    let mut image = argos_fs::fixture::ntfs_volume(CHUNK * 6, 32 * 1024, &file);
+
+    // An INDX buffer naming MFT record 1 — the record the fixture plants the
+    // deleted file in — somewhere the sweep will meet it.
+    let index = argos_fs::fixture::ntfs_indx(&[("childhood-birthday.jpg", 1)]);
+    let at = CHUNK * 4;
+    image[at..at + index.len()].copy_from_slice(&index);
+
+    let (artifacts, _) = scan(&image);
+
+    let recovered = artifacts
+        .iter()
+        .find(|artifact| artifact.stage == Stage::Filesystem)
+        .expect("the deleted file must be recovered from its record");
+    assert_eq!(
+        recovered.recovered_name.as_deref(),
+        Some("childhood-birthday.jpg"),
+        "a name surviving only in index slack must reach the artifact"
+    );
+    assert_eq!(recovered.bytes, jpeg, "and it names the right bytes");
 }

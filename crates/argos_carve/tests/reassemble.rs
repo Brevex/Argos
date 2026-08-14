@@ -60,6 +60,7 @@ fn a_two_fragment_image_is_reassembled_to_the_exact_planted_bytes() {
         &mut scratch,
     )
     .expect("in-memory read")
+    .reassembly
     .expect("a two-fragment image must be reassembled");
 
     assert_eq!(recovered.extents, layout.extents, "claimed extents");
@@ -92,16 +93,20 @@ fn a_fragment_stored_before_its_predecessor_is_still_reassembled_in_file_order()
     )
     .expect("in-memory read");
 
-    // A backwards second fragment is outside bifragment's forward gap search.
-    // What matters is that it invents nothing: the entropy decoder refuses
-    // every forward splice, so the answer is "not found", never a fabrication.
-    assert!(
-        recovered.is_none(),
-        "bifragment searches forward only and must not invent a backwards splice"
-    );
+    // The gap search sweeps behind the header as well as ahead of it, so this
+    // layout is its own to recover — and the extents must be the planted ones,
+    // in file order rather than medium order.
+    let gapped = recovered
+        .reassembly
+        .expect("the gap search must look behind the header");
+    assert_eq!(gapped.extents, layout.extents, "claimed extents");
+    let mut assembled = Vec::new();
+    for extent in &gapped.extents {
+        assembled.extend_from_slice(extent_bytes(&layout.disk, *extent));
+    }
+    assert_eq!(assembled, image, "the extents must hold the planted bytes");
 
-    // The graph walk, which is not restricted to searching forward, does find
-    // it — and lands on the planted bytes exactly.
+    // The graph walk finds it independently, and lands on the same bytes.
     let candidates = candidate_blocks(&layout);
     let mut src = layout.source();
     let assembled = reassemble::parallel_unique_path(
@@ -114,7 +119,7 @@ fn a_fragment_stored_before_its_predecessor_is_still_reassembled_in_file_order()
         &mut scratch,
     )
     .expect("in-memory read");
-    let [(_, walked)] = assembled.as_slice() else {
+    let [(_, walked)] = assembled.assembled.as_slice() else {
         panic!("the backwards layout must be reassembled by the walk, got {assembled:?}");
     };
     assert_eq!(walked.extents, layout.extents, "claimed extents");
@@ -146,7 +151,7 @@ fn an_n_fragment_image_is_reassembled_by_the_graph_walk() {
     )
     .expect("in-memory read");
 
-    let [(_, recovered)] = assembled.as_slice() else {
+    let [(_, recovered)] = assembled.assembled.as_slice() else {
         panic!("the three-fragment image must be reassembled, got {assembled:?}");
     };
     assert_eq!(recovered.extents, layout.extents, "claimed extents");
@@ -197,7 +202,7 @@ fn reassembly_never_claims_an_image_that_is_not_there() {
     .expect("in-memory read");
 
     assert!(
-        recovered.is_none(),
+        recovered.reassembly.is_none(),
         "with no second fragment on the medium there is nothing to reassemble"
     );
 }
@@ -224,7 +229,7 @@ fn the_hypothesis_budget_bounds_the_search() {
     .expect("in-memory read");
 
     assert!(
-        recovered.is_none(),
+        recovered.reassembly.is_none(),
         "a budget of one attempt cannot reach a fragment twenty blocks away"
     );
 }
@@ -307,7 +312,7 @@ fn the_walk_never_reads_the_same_bytes_twice() {
     )
     .expect("in-memory read");
 
-    for (_, reassembly) in &assembled {
+    for (_, reassembly) in &assembled.assembled {
         for (index, extent) in reassembly.extents.iter().enumerate() {
             for other in &reassembly.extents[index + 1..] {
                 let (a_start, a_end) = (extent.start.get(), extent.end_saturating().get());
@@ -351,7 +356,7 @@ fn bytes_another_recovery_already_claimed_are_not_offered_to_the_walk() {
     )
     .expect("in-memory read");
 
-    for (_, reassembly) in &assembled {
+    for (_, reassembly) in &assembled.assembled {
         for extent in &reassembly.extents {
             let start = extent.start.get();
             assert!(
@@ -360,4 +365,105 @@ fn bytes_another_recovery_already_claimed_are_not_offered_to_the_walk() {
             );
         }
     }
+}
+
+#[test]
+fn the_search_steps_on_the_volume_grid_rather_than_the_medium_one() {
+    // A filesystem allocates in clusters counted from its own start, so a
+    // volume that does not begin on a multiple of its cluster size puts every
+    // real fragment boundary off the medium's grid. Stepping on the medium's
+    // would step over all of them.
+    let image = jpeg_image();
+    let cluster = 2 * BLOCK;
+    // The volume begins one 4 KiB block in, so its cluster boundaries are at
+    // 4096, 12288, 20480 … — every one of them off the absolute grid.
+    let volume_start = BLOCK;
+    let first = volume_start;
+    let second = volume_start + 6 * cluster;
+    let split = cluster;
+
+    let disk = Disk::noisy(96 * BLOCK, 0x9A11_0000_0000_0001)
+        .with(first, &image[..split])
+        .with(second, &image[split..])
+        .into_bytes();
+    let layout = Fragmented {
+        image: image.clone(),
+        extents: vec![
+            ByteRange::new(ByteOffset::new(first as u64), split as u64),
+            ByteRange::new(ByteOffset::new(second as u64), (image.len() - split) as u64),
+        ],
+        disk,
+    };
+    let header = ByteOffset::new(first as u64);
+    let broken = broken_at(&layout, header, Format::Jpeg);
+
+    let search = |origin: usize| {
+        let mut src = layout.source();
+        let mut scratch = Scratch::new();
+        reassemble::bifragment(
+            &mut src,
+            broken,
+            layout.disk.len() as u64,
+            Limits {
+                block_bytes: cluster as u64,
+                block_origin: origin as u64,
+                ..Limits::default()
+            },
+            &mut scratch,
+        )
+        .expect("in-memory read")
+        .reassembly
+    };
+
+    assert!(
+        search(0).is_none(),
+        "the medium's grid holds none of this volume's boundaries, so a search \
+         stepping on it can only miss — and must say so rather than invent"
+    );
+
+    let recovered = search(volume_start)
+        .expect("the volume's own grid holds every boundary its allocator produced");
+    assert_eq!(recovered.extents, layout.extents, "claimed extents");
+    let mut assembled = Vec::new();
+    for extent in &recovered.extents {
+        assembled.extend_from_slice(extent_bytes(&layout.disk, *extent));
+    }
+    assert_eq!(assembled, image, "the extents must hold the planted bytes");
+}
+
+#[test]
+fn a_coarser_grid_costs_proportionally_fewer_hypotheses() {
+    // The point of stepping on the real cluster size: the same reach for a
+    // fraction of the attempts, which is what the budget then spends elsewhere.
+    let image = jpeg_image();
+    let layout = fragmented(96 * BLOCK, &image, &[4 * BLOCK, 60 * BLOCK], BLOCK);
+    let header = ByteOffset::new(4 * BLOCK as u64);
+    let broken = broken_at(&layout, header, Format::Jpeg);
+
+    let spent = |block: usize| {
+        let mut src = layout.source();
+        let mut scratch = Scratch::new();
+        reassemble::bifragment(
+            &mut src,
+            broken,
+            layout.disk.len() as u64,
+            Limits {
+                block_bytes: block as u64,
+                // No remainder is reachable on this grid, so the search spends
+                // its whole sweep and the counts are comparable.
+                max_gap_bytes: 32 * BLOCK as u64,
+                ..Limits::default()
+            },
+            &mut scratch,
+        )
+        .expect("in-memory read")
+        .hypotheses
+    };
+
+    let fine = spent(BLOCK);
+    let coarse = spent(8 * BLOCK);
+    assert!(
+        coarse * 4 < fine,
+        "an eight-times coarser grid must cost far fewer hypotheses: {coarse} against {fine}"
+    );
 }

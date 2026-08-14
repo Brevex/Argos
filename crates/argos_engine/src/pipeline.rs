@@ -39,6 +39,7 @@ use crate::config::{CHUNK_OVERLAP_BYTES, ScanConfig};
 use crate::error::ScanError;
 use crate::finding::{Finding, ScanReport};
 use crate::merge;
+use crate::search;
 use crate::session::{Control, Medium};
 
 /// Bytes re-read individually when a whole chunk fails to read, so damage is
@@ -161,48 +162,149 @@ where
     }
 
     if config.stages().carving {
-        let (carved, broken) = validate_candidates(
+        // The volumes the sweep located, so the search steps on the grid the
+        // allocator that split these files actually used.
+        let volumes = std::mem::take(&mut report.volumes);
+        carve(
+            config,
             control,
             &mut views,
             swept.candidates,
             range_end,
+            &volumes,
+            &mut findings,
             progress,
             &mut report,
         );
-        progress.emit(ScanEvent::StageFinished {
-            stage: Stage::Validation,
-            findings: carved.len() as u64,
-        });
-        findings.extend(carved);
-
-        if config.stages().reassembly && !broken.is_empty() {
-            let reassembled = reassemble_broken(
-                control,
-                &mut views,
-                &broken,
-                range_end,
-                progress,
-                &mut report,
-            );
-            progress.emit(ScanEvent::StageFinished {
-                stage: Stage::Reassembly,
-                findings: reassembled.len() as u64,
-            });
-            findings.extend(reassembled);
-        }
+        report.volumes = volumes;
     }
 
+    report_findings(
+        config,
+        control,
+        &mut views,
+        findings,
+        sink,
+        progress,
+        classifier,
+        &mut report,
+    )?;
+    Ok(report)
+}
+
+/// Runs the search alone, over fragmentation points a previous run located.
+///
+/// The stages that find them — the sweep and the validation pass — are what a
+/// scan of a large medium spends its hours on, and they establish the same
+/// points every time. Starting from them is what makes the search's budget,
+/// its size floor and its ceilings something a person can try again in minutes
+/// instead of overnight.
+///
+/// Nothing is assumed about the medium beyond those points: every extent this
+/// reports is read back and hashed exactly as a scan's is, so a session pointed
+/// at the wrong disk recovers nothing rather than something wrong.
+pub(crate) fn resume<V, S, P, C>(
+    config: &ScanConfig,
+    control: &Control,
+    medium: Medium<V>,
+    broken: &[Broken],
+    sink: &mut S,
+    progress: &P,
+    classifier: Option<&mut C>,
+) -> Result<ScanReport, ScanError>
+where
+    V: Read + Seek + Send,
+    S: ArtifactSink,
+    P: ProgressSink + ?Sized,
+    C: Classifier + Send,
+{
+    let (mut views, medium_len) = medium.into_parts();
+    let range = config.range_within(medium_len);
+    let range_end = range.end_saturating().get();
+    let mut report = ScanReport {
+        fragmentation: broken.to_vec(),
+        ..ScanReport::default()
+    };
+    let mut findings = Vec::new();
+
+    let mut whole_again = HashSet::new();
+    if config.stages().reassembly {
+        let reassembled = reassemble_broken(
+            control,
+            &mut views,
+            Reassembling {
+                broken,
+                already_recovered: &[],
+                budget: config.reassembly_budget(),
+                min_long_side: config.min_long_side(),
+                // A resumed run did not locate any volumes, so it steps on the
+                // finest grid rather than assuming one.
+                volumes: &[],
+                medium_len: range_end,
+            },
+            progress,
+            &mut report,
+        );
+        whole_again.extend(
+            reassembled
+                .iter()
+                .filter_map(|finding| finding.extents.first().map(|extent| extent.start)),
+        );
+        progress.emit(ScanEvent::StageFinished {
+            stage: Stage::Reassembly,
+            findings: reassembled.len() as u64,
+        });
+        findings.extend(reassembled);
+    }
+    let partials = partial_prefixes(broken, &whole_again, config.min_long_side());
+    report.partial_prefixes = partials.len() as u64;
+    findings.extend(partials);
+
+    report_findings(
+        config,
+        control,
+        &mut views,
+        findings,
+        sink,
+        progress,
+        classifier,
+        &mut report,
+    )?;
+    Ok(report)
+}
+
+/// Merges what the stages found, writes it, and annotates what was written.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the tail of both entry points; naming its inputs twice would be worse"
+)]
+fn report_findings<V, S, P, C>(
+    config: &ScanConfig,
+    control: &Control,
+    views: &mut [V],
+    mut findings: Vec<Finding>,
+    sink: &mut S,
+    progress: &P,
+    classifier: Option<&mut C>,
+    report: &mut ScanReport,
+) -> Result<(), ScanError>
+where
+    V: Read + Seek + Send,
+    S: ArtifactSink,
+    P: ProgressSink + ?Sized,
+    C: Classifier + Send,
+{
     merge::consolidate(&mut findings, &report.unreadable);
     // The size floor is applied inside the report stage or not at all: whether
     // to write an artifact has to be settled before it is written.
     let emitted = emit(
         control,
-        &mut views,
+        views,
         &findings,
         sink,
         config.min_long_side(),
         progress,
-        &mut report,
+        report,
     )?;
 
     report.cache_runs = same_size_runs(&emitted);
@@ -218,17 +320,9 @@ where
     if !work.is_idle()
         && let Some(view) = views.first_mut()
     {
-        crate::annotate::run(
-            control,
-            view,
-            &findings,
-            &emitted,
-            work,
-            progress,
-            &mut report,
-        );
+        crate::annotate::run(control, view, &findings, &emitted, work, progress, report);
     }
-    Ok(report)
+    Ok(())
 }
 
 /// What the medium's layout says about the artifacts just written.
@@ -559,7 +653,90 @@ fn recover_filesystems<V: Read + Seek, P: ProgressSink + ?Sized>(
             );
         }
     }
+
+    name_from_index_slack(
+        control,
+        view,
+        &sweep.ntfs_indexes,
+        &ntfs_volumes,
+        &mut found,
+    );
     found
+}
+
+/// Names findings from the `$FILE_NAME` copies a directory index kept.
+///
+/// A directory that removes an entry leaves it in the index buffer's slack, so
+/// a file's name can survive when its own record's `$FILE_NAME` did not. The
+/// entry carries the MFT record number, which is what ties a name to a
+/// recovery — nothing here creates an extent, and a finding that already has a
+/// name keeps it, because its own record is the better evidence
+/// (`A-CONFIDENCE-HONEST`).
+fn name_from_index_slack<V: Read + Seek>(
+    control: &Control,
+    view: &mut V,
+    regions: &[ByteRange],
+    volumes: &[Volume],
+    found: &mut [Finding],
+) {
+    let nameless: Vec<usize> = found
+        .iter()
+        .enumerate()
+        .filter(|(_, finding)| finding.name.is_none() && finding.source_object.is_some())
+        .map(|(index, _)| index)
+        .collect();
+    if nameless.is_empty() {
+        return;
+    }
+
+    let mut buf = Vec::new();
+    for region in regions {
+        if control.is_cancelled() {
+            return;
+        }
+        // An index entry numbers a record; a finding is identified by where
+        // its record sat. The two meet only through the geometry of the volume
+        // the index belongs to, so an index no located volume covers names
+        // nothing rather than naming by coincidence.
+        let Some(geometry) = volumes
+            .iter()
+            .find(|volume| covers(volume.range, *region))
+            .and_then(|volume| {
+                argos_fs::ntfs::Ntfs::open(view, volume.range.start)
+                    .ok()
+                    .flatten()
+            })
+        else {
+            continue;
+        };
+        let len = usize::try_from(region.len).unwrap_or(0);
+        buf.clear();
+        buf.resize(len, 0);
+        if len == 0 || read_exact_at(view, region.start.get(), &mut buf).is_err() {
+            continue;
+        }
+        for ghost in argos_fs::ntfs::indx_names(&buf) {
+            // Where that record number sits, for an unfragmented `$MFT`. A
+            // fragmented one puts it elsewhere, and then this names nothing —
+            // a miss, never a wrong name.
+            let Some(at) = ghost
+                .mft_record
+                .checked_mul(u64::from(geometry.record_size))
+                .and_then(|offset| geometry.mft_offset.checked_add(offset))
+            else {
+                continue;
+            };
+            for &index in &nameless {
+                let finding = &mut found[index];
+                if finding.name.is_none() && finding.source_object == Some(at.get()) {
+                    finding.name = Some(ghost.name.clone().into_boxed_str());
+                    if finding.timestamps == argos_core::Timestamps::default() {
+                        finding.timestamps = ghost.timestamps;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn covers(outer: ByteRange, inner: ByteRange) -> bool {
@@ -853,265 +1030,386 @@ fn validate_one<V: Read + Seek>(
     }
 }
 
-/// Bytes either side of a fragmentation point whose blocks are offered to the
-/// graph walk.
+/// Validates every signature hit, then recovers what did not carve whole.
 ///
-/// An allocator splits a file because it could not find one run long enough,
-/// so the remainder lands in the same region — searching the whole medium for
-/// every broken candidate would cost far more and find little. Classifying
-/// only this window also keeps the block set small enough to hold
-/// (A-BOUNDED-ALLOC).
-const REASSEMBLY_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+/// Three outcomes reach `findings`: the images that carved contiguously, the
+/// ones reassembly put back together, and — for the rest — the part of each
+/// that decodes, because a photograph whose remainder was overwritten still
+/// has a beginning on the medium.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one call site; bundling the stage's inputs would name them twice"
+)]
+fn carve<V, P>(
+    config: &ScanConfig,
+    control: &Control,
+    views: &mut [V],
+    candidates: Vec<Candidate>,
+    range_end: u64,
+    volumes: &[Volume],
+    findings: &mut Vec<Finding>,
+    progress: &P,
+    report: &mut ScanReport,
+) where
+    V: Read + Seek + Send,
+    P: ProgressSink + ?Sized,
+{
+    let (carved, broken) =
+        validate_candidates(control, views, candidates, range_end, progress, report);
+    // Kept whatever the search then does with them: locating a fragmentation
+    // point is what the sweep and the validation stage cost, and a later run
+    // that starts from these skips both.
+    report.fragmentation.clone_from(&broken);
+    progress.emit(ScanEvent::StageFinished {
+        stage: Stage::Validation,
+        findings: carved.len() as u64,
+    });
+    findings.extend(carved);
 
-/// Blocks the graph walk may consider at once.
-const MAX_REASSEMBLY_BLOCKS: usize = 1 << 16;
+    let mut whole_again = HashSet::new();
+    if config.stages().reassembly && !broken.is_empty() {
+        let reassembled = reassemble_broken(
+            control,
+            views,
+            Reassembling {
+                broken: &broken,
+                already_recovered: findings,
+                budget: config.reassembly_budget(),
+                min_long_side: config.min_long_side(),
+                volumes,
+                medium_len: range_end,
+            },
+            progress,
+            report,
+        );
+        whole_again.extend(
+            reassembled
+                .iter()
+                .filter_map(|finding| finding.extents.first().map(|extent| extent.start)),
+        );
+        progress.emit(ScanEvent::StageFinished {
+            stage: Stage::Reassembly,
+            findings: reassembled.len() as u64,
+        });
+        findings.extend(reassembled);
+    }
 
-/// Bytes the graph walk may classify before it stops looking.
-///
-/// This bounds the *work*, which [`MAX_REASSEMBLY_BLOCKS`] does not: that caps
-/// the blocks kept, and a medium whose windows hold almost nothing image-like
-/// fills it never, so without this the pass reads until the windows run out.
-/// Merged windows are read sequentially, so this is a bound in seconds on any
-/// medium rather than a bound in blocks that depends on what is on it.
-const MAX_CLASSIFY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+    let partials = partial_prefixes(&broken, &whole_again, config.min_long_side());
+    report.partial_prefixes = partials.len() as u64;
+    findings.extend(partials);
+}
 
-/// Bytes read per request while classifying a window.
-const CLASSIFY_READ_BYTES: usize = 1024 * 1024;
+/// What the reassembly stage is given to work with.
+#[derive(Clone, Copy)]
+struct Reassembling<'a> {
+    /// Fragmentation points carving localized, in medium order.
+    broken: &'a [Broken],
+    /// Findings from the earlier stages, whose extents are already accounted
+    /// for and must not be offered to the search as free space.
+    already_recovered: &'a [Finding],
+    /// How long the stage may search, or `None` for every candidate.
+    budget: Option<std::time::Duration>,
+    /// Smallest long side a frame may declare and still be searched.
+    min_long_side: u32,
+    /// Volumes the sweep located, whose allocation units are the grid a
+    /// fragment boundary really falls on.
+    volumes: &'a [Volume],
+    /// End of the searchable region.
+    medium_len: u64,
+}
 
 /// Recovers images the medium stored in pieces.
 ///
-/// Two techniques in order of cost: the gap search first, because two
-/// fragments with a gap is the dominant real pattern and it needs no block
-/// classification; then the graph walk over classified blocks for whatever the
-/// gap search could not complete.
+/// The medium is walked in regions, each read once and held while every header
+/// inside it is searched: the gap search first, because two fragments with a
+/// gap is the dominant real pattern, then the graph walk over the region's
+/// classified blocks for whatever the gap search could not complete. Serving
+/// the search from memory is what makes a hypothesis cost its own bytes rather
+/// than a seek.
 ///
-/// The whole stage shares one decode budget. Reassembly runs by default, so a
-/// medium carrying thousands of false signature hits must not be able to turn
+/// The stage shares one wall-clock budget. Reassembly runs by default, so a
+/// medium carrying thousands of fragmentation points must not be able to turn
 /// a scan into an overnight job; when the budget runs out the report says so
 /// rather than implying the medium held nothing more.
 fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
     control: &Control,
     views: &mut [V],
-    broken: &[Broken],
-    medium_len: u64,
+    work: Reassembling<'_>,
     progress: &P,
     report: &mut ScanReport,
 ) -> Vec<Finding> {
+    let Reassembling {
+        broken,
+        already_recovered,
+        budget,
+        min_long_side,
+        volumes,
+        medium_len,
+    } = work;
     let Some(view) = views.first_mut() else {
         return Vec::new();
     };
-    // The stage's three phases are counted together, because they are one
-    // stage on screen. The total is an upper bound — the walk only sees what
-    // the gap search left — and `StageFinished` settles the bar at the end. A
-    // total that is too large costs a bar that stops short; no total at all
-    // costs a window that looks hung, which is what this stage did.
-    let runs = merged_windows(broken, medium_len);
+    let (broken, plans) = plan_search(broken, min_long_side, medium_len, report);
+    let broken = &*broken;
+    let deadline = budget.map(|limit| std::time::Instant::now() + limit);
+    let spent = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
+
+    // Each header is counted twice — once for the gap search, once for the
+    // walk — plus one step per region read, because they are one stage on
+    // screen. `StageFinished` settles the bar at the end.
     let counter = Counter::start(
         progress,
         Stage::Reassembly,
         (broken.len() as u64)
-            .saturating_add(runs.len() as u64)
-            .saturating_add(broken.len() as u64),
+            .saturating_mul(2)
+            .saturating_add(plans.len() as u64),
     );
+
     let mut scratch = Scratch::new();
     let mut found = Vec::new();
-    let mut spent = 0_u32;
-    let mut unresolved = Vec::new();
-    // Extents the gap search already recovered. The graph walk must not offer
+    // Extents another recovery already accounts for. The search must not offer
     // them again: two artifacts over the same bytes are two reports of one
     // file, and the merge step cannot collapse them because their content
-    // hashes differ (A-PROVENANCE).
-    let mut spoken_for: Vec<ByteRange> = Vec::new();
+    // hashes differ (A-PROVENANCE). Filesystem metadata counts here too — a
+    // run list is a stronger statement about which bytes belong together than
+    // anything this stage can derive.
+    let mut spoken_for: Vec<ByteRange> = already_recovered
+        .iter()
+        .flat_map(|finding| finding.extents.iter().copied())
+        .collect();
+    let mut buffer = Vec::new();
 
-    for &candidate in broken {
+    for plan in plans {
         if control.is_cancelled() {
             return found;
         }
-        report.reassembly_attempted = report.reassembly_attempted.saturating_add(1);
-        if spent >= crate::config::REASSEMBLY_BUDGET {
+        if spent() {
             report.ceilings.reassembly_decodes = true;
             return found;
         }
-        let limits = reassemble::Limits {
-            max_hypotheses: reassemble::MAX_HYPOTHESES
-                .min(crate::config::REASSEMBLY_BUDGET - spent),
-            ..reassemble::Limits::default()
-        };
-        match reassemble::bifragment(view, candidate, medium_len, limits, &mut scratch) {
-            Ok(Some(reassembly)) => {
-                spent = spent.saturating_add(reassembly.hypotheses);
-                report.reassembled = report.reassembled.saturating_add(1);
-                spoken_for.extend_from_slice(&reassembly.extents);
-                found.push(finding_from_reassembly(candidate, &reassembly));
-            }
-            Ok(None) => {
-                spent = spent.saturating_add(limits.max_hypotheses);
-                unresolved.push(candidate);
-            }
-            // A candidate we cannot read is one we cannot reassemble.
-            Err(_) => {}
-        }
+        let region = search::Region::load(view, plan.range, buffer);
         counter.step();
-    }
-
-    if unresolved.is_empty() || spent >= crate::config::REASSEMBLY_BUDGET {
-        report.ceilings.reassembly_decodes |= spent >= crate::config::REASSEMBLY_BUDGET;
-        return found;
-    }
-
-    let blocks = classify_windows(control, view, &runs, &counter, report);
-
-    // One header at a time, so the stage can say how far it has got and can be
-    // stopped. The extents a completed path claims are carried into the next
-    // header's call, which is what keeps two paths from reporting the same
-    // bytes as two files (A-PROVENANCE) — the property the walk would
-    // otherwise get from holding every header at once.
-    for &candidate in &unresolved {
-        if control.is_cancelled() {
-            return found;
-        }
-        if spent >= crate::config::REASSEMBLY_BUDGET {
-            report.ceilings.reassembly_decodes = true;
-            return found;
-        }
+        let range = region.range();
+        let grid = allocation_grid(volumes, range);
         let limits = reassemble::Limits {
-            max_hypotheses: reassemble::MAX_HYPOTHESES
-                .min(crate::config::REASSEMBLY_BUDGET - spent),
+            search_floor: range.start.get(),
+            block_bytes: grid.0,
+            block_origin: grid.1,
             ..reassemble::Limits::default()
         };
-        match reassemble::parallel_unique_path(
-            view,
-            std::slice::from_ref(&candidate),
-            &blocks,
-            &spoken_for,
-            medium_len,
-            limits,
-            &mut scratch,
-        ) {
-            Ok(assembled) if !assembled.is_empty() => {
-                for (header, reassembly) in assembled {
-                    spent = spent.saturating_add(reassembly.hypotheses);
+        // Every hypothesis is bounded by what was held, so none can ask for a
+        // byte this region does not have.
+        let searchable = range.end_saturating().get();
+        let mut unresolved = Vec::new();
+
+        for &candidate in &broken[plan.headers.clone()] {
+            if control.is_cancelled() || spent() {
+                break;
+            }
+            report.reassembly_attempted = report.reassembly_attempted.saturating_add(1);
+            // A candidate that cannot be read is one that cannot be
+            // reassembled, and it is already counted as attempted.
+            if let Ok(attempt) = reassemble::bifragment(
+                &mut region.view(),
+                candidate,
+                searchable,
+                limits,
+                &mut scratch,
+            ) {
+                match attempt.reassembly {
+                    Some(reassembly) => {
+                        report.reassembled = report.reassembled.saturating_add(1);
+                        spoken_for.extend_from_slice(&reassembly.extents);
+                        found.push(finding_from_reassembly(candidate, &reassembly));
+                    }
+                    None => unresolved.push(candidate),
+                }
+            }
+            counter.step();
+        }
+
+        for &candidate in &unresolved {
+            if control.is_cancelled() || spent() {
+                break;
+            }
+            if let Ok(walk) = reassemble::parallel_unique_path(
+                &mut region.view(),
+                std::slice::from_ref(&candidate),
+                region.blocks(),
+                &spoken_for,
+                searchable,
+                limits,
+                &mut scratch,
+            ) {
+                for (header, reassembly) in walk.assembled {
                     report.reassembled = report.reassembled.saturating_add(1);
                     spoken_for.extend_from_slice(&reassembly.extents);
                     found.push(finding_from_reassembly(header, &reassembly));
                 }
             }
-            // Assembled nothing, or could not be read. The search happened
-            // either way, and charging the whole of it is what stops a medium
-            // of false headers from spending the budget as if nothing had been
-            // tried.
-            _ => spent = spent.saturating_add(limits.max_hypotheses),
+            counter.step();
         }
-        counter.step();
+
+        buffer = region.into_buffer();
     }
-    report.ceilings.reassembly_decodes |= spent >= crate::config::REASSEMBLY_BUDGET;
+    report.ceilings.reassembly_decodes |= spent();
     found
 }
 
-/// Classifies the blocks around each fragmentation point.
+/// The allocation grid a region's fragments fall on: unit size, and where it
+/// is counted from.
 ///
-/// The window is read in large sequential pieces and sliced per block, the way
-/// the rest of the pipeline reads: a block-at-a-time seek and read would issue
-/// thousands of syscalls per candidate, which is the one thing that outweighs
-/// every other cost in a scan (`M-THROUGHPUT`).
-fn classify_windows<V: Read + Seek, P: ProgressSink + ?Sized>(
-    control: &Control,
-    view: &mut V,
-    runs: &[ByteRange],
-    counter: &Counter<'_, P>,
-    report: &mut ScanReport,
-) -> Vec<reassemble::Candidate> {
-    let block = argos_carve::classify::BLOCK_BYTES;
-    let mut blocks: Vec<reassemble::Candidate> = Vec::new();
-    let mut window = vec![0_u8; CLASSIFY_READ_BYTES];
-    let mut budget = MAX_CLASSIFY_BYTES;
-
-    for run in runs {
-        if control.is_cancelled() {
-            return blocks;
+/// A filesystem allocates in clusters counted from its own start, so those are
+/// the only offsets a fragment can begin at. Stepping on them instead of on
+/// every 4 KiB is exact — no real boundary is skipped, because every one of
+/// them is a cluster boundary — and on a volume of 32 KiB clusters it is eight
+/// times fewer hypotheses for the same reach, which the budget spends
+/// elsewhere.
+///
+/// Falls back to the smallest cluster any filesystem here uses when no located
+/// volume contains the region, or when two do and disagree: a finer grid tries
+/// more than it needs to, while a wrong coarser one would step over the
+/// boundary it was looking for.
+fn allocation_grid(volumes: &[Volume], region: ByteRange) -> (u64, u64) {
+    let default = (reassemble::BLOCK_BYTES, 0);
+    let mut found: Option<(u64, u64)> = None;
+    for volume in volumes {
+        let (start, end) = (
+            volume.range.start.get(),
+            volume.range.end_saturating().get(),
+        );
+        if volume.allocation_bytes < reassemble::BLOCK_BYTES
+            || !volume
+                .allocation_bytes
+                .is_multiple_of(reassemble::BLOCK_BYTES)
+            || region.start.get() < start
+            || region.end_saturating().get() > end
+        {
+            continue;
         }
-        let to = run.end_saturating().get();
-        let mut at = run.start.get();
-        while at + block as u64 <= to {
-            if blocks.len() >= MAX_REASSEMBLY_BLOCKS || budget == 0 {
-                report.ceilings.reassembly_search = true;
-                return blocks;
-            }
-            if control.is_cancelled() {
-                return blocks;
-            }
-            let want = usize::try_from((to - at).min(CLASSIFY_READ_BYTES as u64).min(budget))
-                .unwrap_or(CLASSIFY_READ_BYTES);
-            let whole = want - (want % block);
-            if whole == 0 {
-                break;
-            }
-            budget = budget.saturating_sub(whole as u64);
-            if read_exact_at(view, at, &mut window[..whole]).is_err() {
-                // Unreadable here; skip the piece rather than the run.
-                at = at.saturating_add(whole as u64);
-                continue;
-            }
-            for (index, chunk) in window[..whole].chunks_exact(block).enumerate() {
-                let profile = argos_carve::classify::classify(chunk);
-                if profile.class.can_hold_image_data() {
-                    if blocks.len() >= MAX_REASSEMBLY_BLOCKS {
-                        report.ceilings.reassembly_search = true;
-                        return blocks;
-                    }
-                    blocks.push(reassemble::Candidate {
-                        start: ByteOffset::new(at.saturating_add((index * block) as u64)),
-                        profile,
-                    });
-                }
-            }
-            at = at.saturating_add(whole as u64);
+        let grid = (volume.allocation_bytes, start);
+        match found {
+            Some(earlier) if earlier != grid => return default,
+            _ => found = Some(grid),
         }
-        counter.step();
     }
-    blocks
+    found.unwrap_or(default)
 }
 
-/// The medium regions the graph walk will look at, merged and in order.
+/// Which candidates the search takes, and the order it takes their regions in.
 ///
-/// Fragmentation points cluster: in one scan of a mechanical disk, 203
-/// candidates fell inside eight megabytes of each other. Reading a window per
-/// candidate therefore reads the same bytes once per candidate — hundreds of
-/// gigabytes of seeking to classify a few, which is how this stage came to run
-/// for hours and report nothing.
+/// Two decisions, both made before a byte is read.
 ///
-/// Merging first makes each block read exactly once, in medium order, which is
-/// also what removes the need to remember which blocks have already been seen:
-/// the walk cannot revisit one.
-fn merged_windows(broken: &[Broken], medium_len: u64) -> Vec<ByteRange> {
-    let block = argos_carve::classify::BLOCK_BYTES as u64;
-    let mut spans: Vec<(u64, u64)> = broken
+/// A frame declares its size before its data, so what a candidate claims to be
+/// is known for the cost of a header. Searching only photograph-sized frames is
+/// what stops a used disk's thumbnail cache — which outnumbers its photographs
+/// by two orders of magnitude — from spending the budget: the entries are whole
+/// small files, and no reassembly of one could produce anything but the small
+/// file it already is (`docs/defects/02-thumbnail-provenance.md`).
+///
+/// Then regions go in the order of the candidate that decoded furthest inside
+/// each. A frame the decoder walked thousands of MCUs into is a photograph
+/// whose first fragment survived; one it walked three into is a signature that
+/// happened to land on plausible bytes. When the clock runs out, it runs out
+/// having spent itself on the first kind.
+fn plan_search(
+    broken: &[Broken],
+    min_long_side: u32,
+    medium_len: u64,
+    report: &mut ScanReport,
+) -> (Vec<Broken>, Vec<search::Plan>) {
+    let taken: Vec<Broken> = broken
         .iter()
-        .filter_map(|candidate| {
-            let centre = candidate.header.get();
-            let from = centre.saturating_sub(REASSEMBLY_WINDOW_BYTES);
-            let from = from - (from % block);
-            let to = centre
-                .saturating_add(REASSEMBLY_WINDOW_BYTES)
-                .min(medium_len);
-            (to > from + block).then_some((from, to))
-        })
+        .copied()
+        .filter(|candidate| candidate.clears(min_long_side))
         .collect();
-    spans.sort_unstable();
+    report.reassembly_skipped_small = broken
+        .len()
+        .saturating_sub(taken.len())
+        .try_into()
+        .unwrap_or(u64::MAX);
 
-    let mut merged: Vec<ByteRange> = Vec::with_capacity(spans.len());
-    for (from, to) in spans {
-        match merged.last_mut() {
-            // Touching or overlapping the previous run: extend it rather than
-            // starting another, so the read stays one sequential pass.
-            Some(last) if from <= last.end_saturating().get() => {
-                let end = last.end_saturating().get().max(to);
-                *last = ByteRange::new(last.start, end - last.start.get());
-            }
-            _ => merged.push(ByteRange::new(ByteOffset::new(from), to - from)),
-        }
-    }
-    merged
+    let mut plans: Vec<_> = search::plan_regions(
+        &taken,
+        medium_len,
+        search::REGION_BYTES,
+        reassemble::MAX_GAP_BYTES,
+    )
+    .into_iter()
+    .map(|plan| {
+        let best = taken[plan.headers.clone()]
+            .iter()
+            .map(reassemble::Broken::progress)
+            .fold(0.0_f64, f64::max);
+        (plan, best)
+    })
+    .collect();
+    plans.sort_by(|(left, left_best), (right, right_best)| {
+        right_best
+            .partial_cmp(left_best)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            // Ties keep medium order, so two runs over one medium agree.
+            .then_with(|| left.range.start.cmp(&right.range.start))
+    });
+    (taken, plans.into_iter().map(|(plan, _)| plan).collect())
+}
+
+/// Smallest share of a frame that has to decode before its prefix is reported.
+///
+/// Below this there is not enough picture to be worth a file: a frame the
+/// decoder walked a twentieth of is a few rows at the top and grey beneath. The
+/// bytes are still accounted for — the candidate is in the manifest either way
+/// — so this decides whether a file is written, not whether the evidence is
+/// recorded (`M-DOCUMENTED-MAGIC`).
+const MIN_PARTIAL_PROGRESS: f64 = 0.05;
+
+/// Reports what decoded of the images reassembly could not complete.
+///
+/// A photograph whose remainder was overwritten is not recoverable, but its
+/// beginning is *on the medium* and decodes: a 3072x2304 frame the decoder
+/// walked 58% of is the top thirteen hundred rows of the picture, which is the
+/// difference between recognising a photograph and having nothing. Before this,
+/// such a candidate produced no file at all — only the EXIF thumbnail its
+/// header happened to carry, at a size too small to make out.
+///
+/// The bytes reported are the medium's own, from the header to where the
+/// decoder stopped; no `EOI` is appended and nothing is padded, so the digest
+/// stays the digest of what was there (`A-PROVENANCE`). What the file is
+/// missing is stated rather than hidden: the tier is the weakest there is, and
+/// the record carries how much of the frame decoded.
+fn partial_prefixes(
+    broken: &[Broken],
+    whole_again: &HashSet<ByteOffset>,
+    min_long_side: u32,
+) -> Vec<Finding> {
+    broken
+        .iter()
+        .filter(|candidate| !whole_again.contains(&candidate.header))
+        .filter(|candidate| candidate.clears(min_long_side))
+        .filter(|candidate| candidate.progress() >= MIN_PARTIAL_PROGRESS)
+        .filter_map(|candidate| {
+            // To the last whole unit, not to where the stream stopped being
+            // this file: between the two are the bytes the decoder read on its
+            // way to finding out, and they belong to whatever followed on the
+            // medium rather than to this picture.
+            let length = candidate
+                .decoded_end
+                .get()
+                .checked_sub(candidate.header.get())
+                .filter(|length| *length > 0)?;
+            Some(Finding {
+                format: candidate.format,
+                stage: Stage::Carve,
+                confidence: Confidence::PartialOrThumbnail,
+                extents: Box::from([ByteRange::new(candidate.header, length)]),
+                declared_size: None,
+                timestamps: argos_core::Timestamps::default(),
+                name: None,
+                source_object: None,
+                parent: None,
+            })
+        })
+        .collect()
 }
 
 /// Turns a confirmed reassembly into a finding.
@@ -1151,34 +1449,52 @@ pub(crate) struct Measure {
     buf: Vec<u8>,
 }
 
-impl Measure {
-    /// The artifact's pixel dimensions, or `None` when it does not decode.
+/// What reading an artifact back established about the picture.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Measured {
+    /// Pixel dimensions, or `None` when the artifact does not decode.
     ///
     /// `None` is not a verdict: an artifact whose picture cannot be measured
     /// is written, because a decoder that gave up is not evidence that the
     /// bytes are worthless.
-    fn dimensions<V: Read + Seek>(
+    pub pixels: Option<(u32, u32)>,
+    /// What the picture records about itself and its camera.
+    pub capture: argos_core::artifact::Capture,
+}
+
+impl Measure {
+    /// Reads the artifact back and measures its picture.
+    ///
+    /// One read serves both answers, and both come from bytes whose digest was
+    /// checked against the one recorded at recovery — a description read from
+    /// a medium that changed underneath the scan would describe something else.
+    fn measure<V: Read + Seek>(
         &mut self,
         view: &mut V,
         finding: &Finding,
         sha256: Digest,
-    ) -> Option<(u32, u32)> {
-        let length = usize::try_from(finding.length()).ok()?;
+    ) -> Measured {
+        let nothing = Measured::default;
+        let Ok(length) = usize::try_from(finding.length()) else {
+            return nothing();
+        };
         if length > argos_carve::decode::MAX_DECODE_BYTES {
-            return None;
+            return nothing();
         }
         self.buf.clear();
         self.buf.reserve(length);
         let mut bytes = ExtentReader::new(view, &finding.extents);
-        bytes.read_to_end(&mut self.buf).ok()?;
-        if self.buf.len() != length {
-            return None;
+        if bytes.read_to_end(&mut self.buf).is_err() || self.buf.len() != length {
+            return nothing();
         }
         if Digest::new(Sha256::digest(&*self.buf).into()) != sha256 {
-            return None;
+            return nothing();
         }
-        let image = argos_carve::decode::decode_rgba(finding.format, &self.buf)?;
-        Some((image.width(), image.height()))
+        Measured {
+            pixels: argos_carve::decode::decode_rgba(finding.format, &self.buf)
+                .map(|image| (image.width(), image.height())),
+            capture: argos_carve::metadata(&self.buf),
+        }
     }
 }
 
@@ -1318,6 +1634,7 @@ impl<S: ArtifactSink> Writing<'_, S> {
             return Ok(None);
         }
 
+        let measured = self.measure.measure(view, finding, sha256);
         let artifact = Artifact {
             format: finding.format,
             stage: finding.stage,
@@ -1336,7 +1653,8 @@ impl<S: ArtifactSink> Writing<'_, S> {
             // dimensions, so the manifest describes the medium whole even when
             // the directory does not, and the extents locate the bytes exactly
             // for a rerun with a lower floor.
-            pixels: self.measure.dimensions(view, finding, sha256),
+            pixels: measured.pixels,
+            capture: &measured.capture,
         };
         let dimensions = artifact.pixels;
         if !clears_floor(dimensions, self.min_long_side) {
@@ -1549,88 +1867,5 @@ impl<V: Read + Seek> Seek for ExtentReader<'_, V> {
 
     fn stream_position(&mut self) -> std::io::Result<u64> {
         Ok(self.assembled_position())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use argos_core::Format;
-    use argos_core::geometry::ByteOffset;
-
-    use super::{Broken, REASSEMBLY_WINDOW_BYTES, merged_windows};
-
-    fn broken_at(offset: u64) -> Broken {
-        Broken {
-            header: ByteOffset::new(offset),
-            break_at: ByteOffset::new(offset + 4096),
-            format: Format::Jpeg,
-        }
-    }
-
-    #[test]
-    fn clustered_headers_are_read_once_instead_of_once_each() {
-        // The measured shape of a real medium: 203 fragmentation points inside
-        // eight megabytes. A window each would read the same bytes 203 times,
-        // which is what turned this stage into an overnight job.
-        let medium = 1 << 40;
-        let base = 100 * 1024 * 1024;
-        let broken: Vec<_> = (0..203)
-            .map(|index| broken_at(base + index * 40 * 1024))
-            .collect();
-
-        let runs = merged_windows(&broken, medium);
-
-        assert_eq!(
-            runs.len(),
-            1,
-            "one cluster is one sequential read: {runs:?}"
-        );
-        let read: u64 = runs.iter().map(|run| run.len).sum();
-        let separate = broken.len() as u64 * 2 * REASSEMBLY_WINDOW_BYTES;
-        assert!(
-            read * 5 < separate,
-            "merging must collapse the work, not restate it: {read} vs {separate}"
-        );
-    }
-
-    #[test]
-    fn headers_further_apart_than_a_window_stay_separate() {
-        let medium = 1 << 40;
-        let far = 8 * REASSEMBLY_WINDOW_BYTES;
-        let runs = merged_windows(&[broken_at(far), broken_at(far * 4)], medium);
-        assert_eq!(runs.len(), 2, "{runs:?}");
-        assert!(
-            runs[0].end_saturating().get() <= runs[1].start.get(),
-            "merged runs come out in medium order and do not overlap: {runs:?}"
-        );
-    }
-
-    #[test]
-    fn a_window_never_runs_past_the_medium() {
-        let medium = 32 * 1024 * 1024;
-        let runs = merged_windows(&[broken_at(medium - 4096)], medium);
-        for run in &runs {
-            assert!(
-                run.end_saturating().get() <= medium,
-                "a read past the end is a read that fails: {run:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_block_appears_in_exactly_one_run() {
-        // The property that lets the classification pass drop the set of blocks
-        // it has already seen: runs cannot overlap, so it cannot revisit one.
-        let medium = 1 << 40;
-        let broken: Vec<_> = (0..50)
-            .map(|index| broken_at(1_000_000 + index * 3 * 1024 * 1024))
-            .collect();
-        let runs = merged_windows(&broken, medium);
-        for pair in runs.windows(2) {
-            assert!(
-                pair[0].end_saturating().get() < pair[1].start.get(),
-                "overlapping runs would classify the same block twice: {pair:?}"
-            );
-        }
     }
 }

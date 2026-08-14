@@ -250,3 +250,90 @@ fn cyclic_exif_ifd_chain_terminates_without_a_thumbnail() {
     // thumbnail, because IFD0 carries no thumbnail tags.
     assert_eq!(argos_carve::exif::thumbnail(&payload[6..]), None);
 }
+
+// --- what a recovered image says about itself ------------------------------
+
+#[test]
+fn a_recovered_image_reports_the_camera_and_the_moment() {
+    let jpeg = argos_carve::fixture::Jpeg::new()
+        .with_capture(
+            "NIKON CORPORATION",
+            "NIKON D80",
+            "2009:07:14 16:22:05",
+            (3872, 2592),
+        )
+        .build();
+
+    let found = argos_carve::metadata(&jpeg);
+
+    assert_eq!(found.make.as_deref(), Some("NIKON CORPORATION"));
+    assert_eq!(found.model.as_deref(), Some("NIKON D80"));
+    assert_eq!(found.taken.as_deref(), Some("2009:07:14 16:22:05"));
+    assert_eq!(found.pixels, Some((3872, 2592)));
+}
+
+#[test]
+fn a_photograph_that_lost_its_picture_still_says_when_it_was_taken() {
+    // The reason this is read from the artifact rather than from a whole file:
+    // the description sits ahead of the picture data, so it survives a frame
+    // whose scan was overwritten — and a partial recovery is exactly the case
+    // where a person most needs to know which photograph it was.
+    let jpeg = argos_carve::fixture::Jpeg::new()
+        .with_capture(
+            "Canon",
+            "Canon PowerShot A590",
+            "2011:12:25 09:03:41",
+            (3264, 2448),
+        )
+        .with_entropy_bytes(8192)
+        .build();
+    let prefix = argos_carve::fixture::truncated(&jpeg, jpeg.len() / 3);
+
+    let found = argos_carve::metadata(&prefix);
+
+    assert_eq!(found.taken.as_deref(), Some("2011:12:25 09:03:41"));
+    assert_eq!(found.model.as_deref(), Some("Canon PowerShot A590"));
+}
+
+#[test]
+fn truncation_at_every_byte_of_a_described_image_never_panics() {
+    let jpeg = argos_carve::fixture::Jpeg::new()
+        .with_capture("Sony", "DSC-W180", "2010:01:01 00:00:00", (100, 200))
+        .build();
+    for keep in 0..jpeg.len().min(600) {
+        let _ = argos_carve::metadata(&jpeg[..keep]);
+    }
+}
+
+#[test]
+fn a_description_whose_offsets_point_outside_it_yields_nothing() {
+    // Every offset in a TIFF header comes from the medium. One that points
+    // past the payload must read as absent, never as whatever happens to sit
+    // there (A-UNTRUSTED-ONDISK).
+    let payload =
+        argos_carve::fixture::exif_capture("Make", "Model", "2009:01:01 00:00:00", (4, 4));
+    let overflowing = argos_carve::fixture::with_u32_be(&payload, 6 + 4, u32::MAX);
+
+    assert!(argos_carve::exif::metadata(&overflowing[6..]).is_empty());
+    for at in 0..payload.len() {
+        let _ = argos_carve::exif::metadata(&payload[..at]);
+    }
+}
+
+#[test]
+fn a_cyclic_ifd_chain_terminates_without_a_description() {
+    // IFD0 pointing at itself through the Exif-IFD tag: the walk is bounded by
+    // a count, so it stops whatever the pointers say.
+    let payload =
+        argos_carve::fixture::exif_capture("Make", "Model", "2009:01:01 00:00:00", (4, 4));
+    let mut cyclic = payload.clone();
+    // The Exif-IFD pointer is the third IFD0 entry's value: 6 (Exif header)
+    // + 8 (TIFF header) + 2 (count) + 2 * 12 (entries) + 8 (into the entry).
+    let at = 6 + 8 + 2 + 24 + 8;
+    cyclic[at..at + 4].copy_from_slice(&8_u32.to_le_bytes());
+
+    let found = argos_carve::exif::metadata(&cyclic[6..]);
+
+    // It terminates; whatever it read is bounded and no loop occurred.
+    assert!(found.taken.is_none(), "a cycle cannot reach the Exif IFD");
+}

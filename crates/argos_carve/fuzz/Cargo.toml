@@ -39,6 +39,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "exif_metadata"
+path = "fuzz_targets/exif_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "carver_scan"
 path = "fuzz_targets/carver_scan.rs"
 test = false

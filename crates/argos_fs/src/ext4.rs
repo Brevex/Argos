@@ -285,7 +285,7 @@ impl Ext4 {
                         break;
                     };
                     // Inode numbers are one-based within the table.
-                    if let Some(file) = self.deleted_from_inode(raw, slot + 1) {
+                    if let Some(file) = self.deleted_from_inode(src, raw, slot + 1) {
                         found.push(file);
                     }
                 }
@@ -318,7 +318,12 @@ impl Ext4 {
 
     /// Interprets a journalled inode copy: a deleted file keeps its extent
     /// tree here even though the in-place inode has it zeroed.
-    fn deleted_from_inode(&self, raw: &[u8], inode_number: u64) -> Option<DeletedFile> {
+    fn deleted_from_inode<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        raw: &[u8],
+        inode_number: u64,
+    ) -> Option<DeletedFile> {
         let links = u16_le(raw, 26)?;
         let dtime = u32_le(raw, 20)?;
         let mode = u16_le(raw, 0)?;
@@ -330,7 +335,7 @@ impl Ext4 {
         if size == 0 {
             return None;
         }
-        let extents = self.inline_extents(raw, size)?;
+        let extents = self.tree_extents(src, raw, size).ok().flatten()?;
         if extents.is_empty() {
             return None;
         }
@@ -348,39 +353,109 @@ impl Ext4 {
         })
     }
 
-    /// Depth-0 extent entries of an inode, as absolute byte ranges. Deeper
-    /// trees need index-block reads and are handled by the journal walker's
-    /// caller path; here an index node yields no inline extents.
-    fn inline_extents(&self, inode: &[u8], size: u64) -> Option<Vec<ByteRange>> {
-        let body = inode.get(40..100)?;
-        if u16_le(body, 0)? != EXTENT_MAGIC {
-            return None;
+    /// An inode's extent tree, as absolute byte ranges in file order.
+    ///
+    /// The tree is inline while a file has few enough extents to fit in the
+    /// inode; past that ext4 pushes them into index blocks, and a file with a
+    /// deep tree is a heavily fragmented one — exactly the file this whole
+    /// stage exists to recover. Reading only the inline case dropped those
+    /// silently.
+    ///
+    /// Every node is checked for the extent magic and a depth below its
+    /// parent's, so a crafted tree cannot descend for ever; the walk is bounded
+    /// by [`MAX_EXTENT_DEPTH`] and [`MAX_TREE_BLOCKS`] besides
+    /// (`A-UNTRUSTED-ONDISK`).
+    fn tree_extents<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        inode: &[u8],
+        size: u64,
+    ) -> Result<Option<Vec<ByteRange>>, FsError> {
+        let Some(body) = inode.get(40..100) else {
+            return Ok(None);
+        };
+        if u16_le(body, 0) != Some(EXTENT_MAGIC) {
+            return Ok(None);
         }
-        let entries = u16_le(body, 2)?.min(MAX_EXTENT_ENTRIES);
-        let depth = u16_le(body, 6)?;
-        if depth > MAX_EXTENT_DEPTH {
-            return None;
-        }
-        if depth != 0 {
-            return Some(Vec::new());
-        }
-        let mut out = Vec::with_capacity(usize::from(entries));
+        let Some(depth) = u16_le(body, 6).filter(|depth| *depth <= MAX_EXTENT_DEPTH) else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
         let mut remaining = size;
+        let mut nodes = 0_usize;
+        self.walk_extent_node(src, body, depth, &mut remaining, &mut nodes, &mut out)?;
+        Ok(Some(out))
+    }
+
+    /// Appends one extent node's ranges, descending into index nodes.
+    fn walk_extent_node<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        node: &[u8],
+        depth: u16,
+        remaining: &mut u64,
+        nodes: &mut usize,
+        out: &mut Vec<ByteRange>,
+    ) -> Result<(), FsError> {
+        let Some(entries) = u16_le(node, 2).map(|count| count.min(MAX_EXTENT_ENTRIES)) else {
+            return Ok(());
+        };
+        if depth == 0 {
+            for index in 0..usize::from(entries) {
+                let at = 12 + index * 12;
+                let (Some(len), Some(start_hi), Some(start_lo)) = (
+                    u16_le(node, at + 4),
+                    u16_le(node, at + 6),
+                    u32_le(node, at + 8),
+                ) else {
+                    break;
+                };
+                // Lengths above 32768 mark uninitialized extents (no content).
+                if len == 0 || len > 32768 || *remaining == 0 {
+                    continue;
+                }
+                let block = u64::from(start_lo) | (u64::from(start_hi) << 32);
+                let (Some(bytes), Some(at)) = (
+                    u64::from(len)
+                        .checked_mul(self.block_bytes)
+                        .map(|bytes| bytes.min(*remaining)),
+                    self.block_at(block),
+                ) else {
+                    break;
+                };
+                out.push(ByteRange::new(at, bytes));
+                *remaining = remaining.saturating_sub(bytes);
+            }
+            return Ok(());
+        }
+
+        let mut child = Vec::new();
+        let block_len = usize::try_from(self.block_bytes).unwrap_or(4096);
         for index in 0..usize::from(entries) {
+            if *nodes >= MAX_TREE_BLOCKS {
+                break;
+            }
+            *nodes += 1;
             let at = 12 + index * 12;
-            let len = u16_le(body, at + 4)?;
-            // Lengths above 32768 mark uninitialized extents (no content).
-            if len == 0 || len > 32768 {
+            let (Some(lo), Some(hi)) = (u32_le(node, at + 4), u16_le(node, at + 8)) else {
+                break;
+            };
+            let Some(child_at) = self.block_at(u64::from(lo) | (u64::from(hi) << 32)) else {
+                break;
+            };
+            if !read_at(src, child_at.get(), block_len, &mut child)? {
+                break;
+            }
+            // A child must be an extent node one level shallower than its
+            // parent; anything else is not this tree.
+            if u16_le(&child, 0) != Some(EXTENT_MAGIC) || u16_le(&child, 6) != Some(depth - 1) {
                 continue;
             }
-            let start_hi = u16_le(body, at + 6)?;
-            let start_lo = u32_le(body, at + 8)?;
-            let block = u64::from(start_lo) | (u64::from(start_hi) << 32);
-            let bytes = u64::from(len).checked_mul(self.block_bytes)?.min(remaining);
-            out.push(ByteRange::new(self.block_at(block)?, bytes));
-            remaining = remaining.saturating_sub(bytes);
+            let owned = std::mem::take(&mut child);
+            self.walk_extent_node(src, &owned, depth - 1, remaining, nodes, out)?;
+            child = owned;
         }
-        Some(out)
+        Ok(())
     }
 }
 
