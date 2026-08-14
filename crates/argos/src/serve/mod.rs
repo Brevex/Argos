@@ -86,6 +86,9 @@ struct Engine {
     /// Whether an acquisition is under way. An acquisition holds the medium
     /// exactly as a scan does, and this process reads one medium at a time.
     acquiring: Arc<Mutex<bool>>,
+    /// Raised to stop the running acquisition. An acquisition has no session to
+    /// cancel through, so the flag is the whole mechanism.
+    stop_acquire: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Engine {
@@ -97,6 +100,7 @@ impl Engine {
             ready: Mutex::new(false),
             worker: Mutex::new(None),
             acquiring: Arc::new(Mutex::new(false)),
+            stop_acquire: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -157,6 +161,12 @@ impl Engine {
                 Ok(Reply::Done(Done::new()))
             }
             Call::ScanCancel => {
+                // One call for both jobs, because this process reads one medium
+                // at a time and a client that has to know which kind of read it
+                // is stopping is a client keeping track of the engine's state
+                // for it.
+                self.stop_acquire
+                    .store(true, std::sync::atomic::Ordering::Release);
                 self.cancel();
                 Ok(Reply::Done(Done::new()))
             }
@@ -234,6 +244,11 @@ impl Engine {
             .acquiring
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        // Cleared here rather than at the end of the last run, so a stop that
+        // arrived after one finished cannot cancel the next one before it
+        // starts.
+        self.stop_acquire
+            .store(false, std::sync::atomic::Ordering::Release);
 
         let source = PathBuf::from(source);
         let to = PathBuf::from(to);
@@ -247,13 +262,16 @@ impl Engine {
         let wire = Arc::clone(&self.out);
         let image = written_to.clone();
         let acquiring = Arc::clone(&self.acquiring);
+        let stop = Arc::clone(&self.stop_acquire);
         let worker = std::thread::spawn(move || {
             let notice = Acquisition {
                 out: Arc::clone(&wire),
                 image,
                 sized: Mutex::new(Some(sized_tx)),
             };
-            let outcome = crate::acquire::run(&source, &to, &notice);
+            let outcome = crate::acquire::run(&source, &to, &notice, &|| {
+                stop.load(std::sync::atomic::Ordering::Acquire)
+            });
             *acquiring
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
@@ -547,6 +565,8 @@ impl crate::acquire::Notice for Acquisition {
             sectors: report.sector_count(),
             recovered: report.recovered_sectors(),
             unreadable_regions: report.unreadable().len() as u64,
+            not_attempted: report.not_attempted(),
+            stopped_early: report.stopped_early(),
             complete: report.is_complete(),
         }));
     }

@@ -22,12 +22,22 @@ use argos_device::{Device, ImageSource};
 
 /// Acquires `source` into a new raw image at `to`.
 ///
+/// `cancelled` is consulted once per chunk of the sweep and once per sector of
+/// the refinement, so a stop takes effect within one read rather than at the
+/// end of the medium. What was copied before the stop stays copied: the image
+/// is a prefix of the medium, and the report says how much was never reached.
+///
 /// # Errors
 ///
 /// Fails when the destination would write onto the source, when it is not an
 /// ordinary file, when it already exists, when the source cannot be opened
 /// read-only, or when the image cannot be written.
-pub fn run(source: &Path, to: &Path, notice: &dyn Notice) -> anyhow::Result<()> {
+pub fn run(
+    source: &Path,
+    to: &Path,
+    notice: &dyn Notice,
+    cancelled: &dyn Fn() -> bool,
+) -> anyhow::Result<()> {
     crate::destination::refuse_writing_onto_source(source, to)?;
     refuse_device_destination(to)?;
 
@@ -48,12 +58,20 @@ pub fn run(source: &Path, to: &Path, notice: &dyn Notice) -> anyhow::Result<()> 
 
     let mut report = |progress: Progress| notice.progress(progress);
     let report = match open_source(source)? {
-        Source::Device(mut device) => {
-            acquire::run(&mut device, &mut dest, acquire::Options::new(), &mut report)
-        }
-        Source::Image(mut image) => {
-            acquire::run(&mut image, &mut dest, acquire::Options::new(), &mut report)
-        }
+        Source::Device(mut device) => acquire::run(
+            &mut device,
+            &mut dest,
+            acquire::Options::new(),
+            &mut report,
+            cancelled,
+        ),
+        Source::Image(mut image) => acquire::run(
+            &mut image,
+            &mut dest,
+            acquire::Options::new(),
+            &mut report,
+            cancelled,
+        ),
     }
     .with_context(|| format!("cannot write the image {}", to.display()))?;
 
@@ -191,7 +209,7 @@ mod tests {
         let to = dir.path().join("copy.img");
 
         let collected = Collected::default();
-        run(&source, &to, &collected).expect("acquire a healthy image file");
+        run(&source, &to, &collected, &|| false).expect("acquire a healthy image file");
 
         assert_eq!(
             std::fs::read(&to).expect("the acquired image"),
@@ -242,7 +260,8 @@ mod tests {
         std::fs::write(&to, b"an earlier acquisition").expect("write the existing image");
 
         let collected = Collected::default();
-        run(&source, &to, &collected).expect_err("an existing destination must be refused");
+        run(&source, &to, &collected, &|| false)
+            .expect_err("an existing destination must be refused");
 
         assert_eq!(
             std::fs::read(&to).expect("the earlier image"),

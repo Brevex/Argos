@@ -234,6 +234,17 @@ dto! {
         /// Runs of sectors that stayed unreadable after both passes.
         #[cfg_attr(feature = "bindings", ts(type = "number"))]
         pub unreadable_regions: u64,
+        /// Sectors the run never tried, because it was stopped before reaching
+        /// them.
+        ///
+        /// Never folded into `unreadable_regions`: that is what the *medium*
+        /// refused, and a run its operator stopped says nothing about the
+        /// medium. Merging the two would turn a cancelled copy into a report of
+        /// a damaged disk (`A-CONFIDENCE-HONEST`).
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub not_attempted: u64,
+        /// Whether the run was stopped before it covered the medium.
+        pub stopped_early: bool,
         /// Whether every sector was read.
         pub complete: bool,
     }

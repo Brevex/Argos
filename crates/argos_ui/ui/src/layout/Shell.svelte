@@ -66,7 +66,7 @@
     session.stopping
       ? { label: 'Stopping…', enabled: false }
       : session.running
-        ? { label: 'Cancel', enabled: !busy && session.job === 'scan' }
+        ? { label: 'Cancel', enabled: !busy }
         : { label: job === 'acquire' ? 'Copy disk' : 'Start scan', enabled: ready },
   );
 
@@ -277,7 +277,11 @@
         Only while a run is under way, and never once a stop has been asked
         for: there is nothing to suspend once the engine is winding down.
       -->
-      {#if session.running && !session.stopping}
+      <!--
+        A copy has no stages to suspend between, so it takes the one control
+        that means something for it: stop.
+      -->
+      {#if session.running && !session.stopping && session.job === 'scan'}
         <button class="action secondary" disabled={busy} onclick={suspend}>
           {session.paused ? 'Resume' : 'Pause'}
         </button>

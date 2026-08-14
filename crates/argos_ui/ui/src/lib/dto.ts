@@ -68,6 +68,20 @@ recovered: number,
  */
 unreadableRegions: number, 
 /**
+ * Sectors the run never tried, because it was stopped before reaching
+ * them.
+ *
+ * Never folded into `unreadable_regions`: that is what the *medium*
+ * refused, and a run its operator stopped says nothing about the
+ * medium. Merging the two would turn a cancelled copy into a report of
+ * a damaged disk (`A-CONFIDENCE-HONEST`).
+ */
+notAttempted: number, 
+/**
+ * Whether the run was stopped before it covered the medium.
+ */
+stoppedEarly: boolean, 
+/**
  * Whether every sector was read.
  */
 complete: boolean, };

@@ -177,6 +177,38 @@ impl Controls {
     }
 }
 
+/// Watches stdin for `q` and raises `stop` when it arrives.
+///
+/// An acquisition of a large medium runs for hours and has no stages to pause
+/// between, so it takes the one control that means something: stop. What was
+/// copied before the stop stays copied, and the report says how much of the
+/// medium was never reached.
+///
+/// The thread is detached for the same reason as [`spawn_console_controls`].
+#[must_use]
+pub fn spawn_stop_control(stop: Arc<AtomicBool>) -> Controls {
+    let active = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&active);
+    std::thread::spawn(move || {
+        let mut command = String::new();
+        loop {
+            command.clear();
+            match std::io::stdin().read_line(&mut command) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            if !flag.load(Ordering::Acquire) {
+                return;
+            }
+            if command.trim() == "q" {
+                stop.store(true, Ordering::Release);
+                return;
+            }
+        }
+    });
+    Controls { active }
+}
+
 /// Watches stdin for `p`, `r` and `q` and drives `session` accordingly.
 ///
 /// The thread is detached: it may be parked on a read from a console that

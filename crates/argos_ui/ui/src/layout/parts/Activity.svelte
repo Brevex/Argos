@@ -33,7 +33,9 @@
         // writes it and writes the manifest, and saying so is what makes the
         // wait legible instead of looking like a button that did nothing.
         if (session.stopping) {
-          return 'Stopping — finishing the image being written, then the manifest';
+          return session.job === 'acquire'
+            ? 'Stopping — what has been copied so far stays in the image'
+            : 'Stopping — finishing the image being written, then the manifest';
         }
         // The stage, named, because a run spends most of its time in passes
         // that are not the read: a screen that only ever said "Scanning" while
@@ -49,9 +51,22 @@
         if (session.job === 'acquire') {
           const copy = session.acquired;
           if (copy === null) return 'Finished — the disk was copied';
-          return copy.complete
-            ? 'Finished — every sector was read into the image'
-            : `Finished — ${count(copy.sectors - copy.recovered)} sectors in ${count(copy.unreadableRegions)} runs could not be read and are zero-filled in the image`;
+          if (copy.complete) return 'Finished — every sector was read into the image';
+          // Two different facts, never merged: a run stopped by its operator
+          // says nothing about the medium, and reporting it as damage would be
+          // a false account of the disk (`A-CONFIDENCE-HONEST`).
+          const said = [];
+          if (copy.stoppedEarly) {
+            said.push(
+              `Stopped — ${count(copy.notAttempted)} sectors were never read, and the image ends where the copy did`,
+            );
+          }
+          if (copy.unreadableRegions > 0) {
+            said.push(
+              `${count(copy.unreadableRegions)} runs of sectors could not be read and are zero-filled in the image`,
+            );
+          }
+          return said.length > 0 ? said.join('. ') : 'Finished — the disk was copied';
         }
         const examined = 'Finished — every candidate on the medium was examined';
         // What was left unwritten is said here or nowhere. The manifest in the
@@ -104,6 +119,10 @@
       <div>
         <dt>Unreadable runs</dt>
         <dd>{count(session.acquired?.unreadableRegions ?? 0)}</dd>
+      </div>
+      <div>
+        <dt>Never read</dt>
+        <dd>{count(session.acquired?.notAttempted ?? 0)}</dd>
       </div>
     {:else}
       <div>

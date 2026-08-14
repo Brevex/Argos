@@ -110,8 +110,6 @@ impl Engine {
         serde_json::from_str(&line).unwrap_or_else(|err| panic!("not a message: {line}: {err}"))
     }
 
-    /// Reads messages until the scan reports it finished, collecting the
-    /// method names seen on the way.
     /// Reads until the notification named `method` arrives, and returns it.
     ///
     /// Everything before it is discarded, which is what a caller waiting on a
@@ -126,6 +124,8 @@ impl Engine {
         }
     }
 
+    /// Reads messages until the scan reports it finished, collecting the
+    /// method names seen on the way.
     fn drain_until_finished(&mut self) -> (Vec<String>, serde_json::Value) {
         let mut seen = Vec::new();
         loop {
@@ -403,6 +403,48 @@ fn an_acquisition_over_the_wire_copies_the_medium_and_says_what_it_read() {
         Some(2),
         "the copy must recover what the original does: {results}"
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn a_cancelled_acquisition_reports_what_it_never_reached_as_untried_not_as_damage() {
+    // The distinction the report exists for: a run its operator stopped says
+    // nothing about the medium. If the sectors it never reached were counted as
+    // unreadable, a cancelled copy would read as a failing disk.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    fixture(&image);
+    let copy = dir.path().join("copy.img");
+
+    let mut engine = Engine::spawn();
+    engine.handshake();
+    engine.call(
+        "acquire.start",
+        &serde_json::json!({ "source": image, "to": copy }),
+    );
+    engine.call("scan.cancel", &serde_json::json!(null));
+
+    let acquired = engine.wait_for("acquired");
+    let params = &acquired["params"];
+    // The fixture is small enough that the copy may well have finished before
+    // the cancel landed; either outcome is correct, and both must be honest.
+    if params["complete"] == true {
+        assert_eq!(params["notAttempted"], 0);
+        assert_eq!(params["stoppedEarly"], false);
+    } else {
+        assert_eq!(
+            params["stoppedEarly"], true,
+            "an incomplete copy of a healthy fixture can only be a stopped one: {acquired}"
+        );
+        assert!(
+            params["notAttempted"].as_u64().is_some_and(|n| n > 0),
+            "a stopped copy has sectors it never reached: {acquired}"
+        );
+        assert_eq!(
+            params["unreadableRegions"], 0,
+            "stopping is not damage: the fixture refused nothing"
+        );
+    }
 }
 
 #[test]

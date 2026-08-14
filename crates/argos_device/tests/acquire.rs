@@ -26,8 +26,14 @@ fn healthy_medium_is_acquired_bit_identical() {
     let mut src = MemDisk::new(SECTOR, data.clone());
     let mut dest = Cursor::new(Vec::new());
 
-    let report = acquire::run(&mut src, &mut dest, acquire::Options::new(), &mut |_| {})
-        .expect("dest is ram");
+    let report = acquire::run(
+        &mut src,
+        &mut dest,
+        acquire::Options::new(),
+        &mut |_| {},
+        &|| false,
+    )
+    .expect("dest is ram");
 
     assert!(report.is_complete());
     assert_eq!(report.recovered_sectors(), 300);
@@ -44,8 +50,14 @@ fn bad_sectors_are_zero_filled_and_mapped_exactly() {
         .with_bad_sector(Lba::new(130));
     let mut dest = Cursor::new(Vec::new());
 
-    let report = acquire::run(&mut src, &mut dest, acquire::Options::new(), &mut |_| {})
-        .expect("dest is ram");
+    let report = acquire::run(
+        &mut src,
+        &mut dest,
+        acquire::Options::new(),
+        &mut |_| {},
+        &|| false,
+    )
+    .expect("dest is ram");
     let image = dest.into_inner();
 
     assert_eq!(
@@ -85,7 +97,8 @@ fn small_chunks_and_trailing_partial_chunk_are_handled() {
     let mut dest = Cursor::new(Vec::new());
     let options = acquire::Options::new().with_chunk_sectors(4);
 
-    let report = acquire::run(&mut src, &mut dest, options, &mut |_| {}).expect("dest is ram");
+    let report =
+        acquire::run(&mut src, &mut dest, options, &mut |_| {}, &|| false).expect("dest is ram");
 
     assert_eq!(report.unreadable(), [SectorRange::new(Lba::new(9), 1)]);
     assert_eq!(
@@ -117,6 +130,7 @@ fn both_passes_report_progress_that_reaches_their_own_total() {
             acquire::Progress::Swept { done, total } => swept.push((done, total)),
             acquire::Progress::Refined { done, total } => refined.push((done, total)),
         },
+        &|| false,
     )
     .expect("dest is ram");
 
@@ -146,5 +160,58 @@ fn both_passes_report_progress_that_reaches_their_own_total() {
         "progress must be capped: {} sweep, {} refine",
         swept.len(),
         refined.len()
+    );
+}
+
+#[test]
+fn a_stopped_acquisition_counts_what_it_never_reached_apart_from_what_the_medium_refused() {
+    // A run its operator stopped says nothing about the medium. Folding the
+    // sectors it never reached into the unreadable map would turn a cancelled
+    // copy into a report of a damaged disk, which is the one thing this report
+    // exists to state precisely (`A-CONFIDENCE-HONEST`).
+    const SECTORS: u64 = 4096;
+    let sectors = SECTORS;
+    let bytes = usize::try_from(SECTORS * u64::from(SECTOR.get())).expect("the fixture fits");
+    let data = vec![0xA5_u8; bytes];
+    let mut src = MemDisk::new(SECTOR, data);
+    let mut dest = Cursor::new(Vec::new());
+
+    // Stop as soon as the first chunk has been reported, so the run ends well
+    // inside the medium.
+    let seen = std::cell::Cell::new(0_u32);
+    let report = acquire::run(
+        &mut src,
+        &mut dest,
+        acquire::Options::new(),
+        &mut |_| seen.set(seen.get() + 1),
+        &|| seen.get() > 0,
+    )
+    .expect("dest is ram");
+
+    assert!(
+        report.stopped_early(),
+        "the run was stopped and must say so"
+    );
+    assert!(
+        report.not_attempted() > 0,
+        "a stopped run leaves sectors it never reached"
+    );
+    assert!(
+        report.unreadable().is_empty(),
+        "a healthy medium refused nothing; stopping is not damage: {:?}",
+        report.unreadable()
+    );
+    assert!(
+        !report.is_complete(),
+        "a run that did not cover the medium is not a complete copy"
+    );
+    assert_eq!(
+        report.recovered_sectors() + report.not_attempted(),
+        sectors,
+        "every sector is either recovered or untried, and none is counted twice"
+    );
+    assert!(
+        report.recovered_sectors() > 0,
+        "what was copied before the stop stays copied"
     );
 }

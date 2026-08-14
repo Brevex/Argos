@@ -268,7 +268,7 @@ fn main() -> anyhow::Result<()> {
                 resume_from: None,
             },
         ),
-        Command::Acquire { source, to } => acquire::run(&source, &to, &console::Console),
+        Command::Acquire { source, to } => run_acquire(&source, &to),
         Command::Serve => {
             serve::run();
             Ok(())
@@ -332,6 +332,21 @@ fn main() -> anyhow::Result<()> {
             )
         }
     }
+}
+
+/// Copies a medium into a raw image, stoppable with `q`.
+///
+/// A pass over a terabyte is hours, and a person who starts one has to be able
+/// to end it. What was copied before the stop stays copied, and the report says
+/// how much of the medium was never reached.
+fn run_acquire(source: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let controls = progress::spawn_stop_control(std::sync::Arc::clone(&stop));
+    let outcome = acquire::run(source, to, &console::Console, &|| {
+        stop.load(std::sync::atomic::Ordering::Acquire)
+    });
+    controls.stop();
+    outcome
 }
 
 fn run_scan(

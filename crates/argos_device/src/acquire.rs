@@ -11,7 +11,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Seek, SeekFrom, Write};
 
-use argos_core::geometry::{Lba, SectorRange};
+use argos_core::geometry::{Lba, SectorRange, SectorSize};
 use argos_core::source::BlockSource;
 
 /// Sectors per read during the sweep pass. 128 sectors is 64 KiB at 512-byte
@@ -93,6 +93,7 @@ const PROGRESS_STEPS: u64 = 200;
 pub struct Report {
     sector_count: u64,
     unreadable: Vec<SectorRange>,
+    not_attempted: u64,
 }
 
 impl Report {
@@ -104,20 +105,44 @@ impl Report {
 
     /// Sectors recovered into the image.
     ///
+    /// Excludes both what the medium refused and what a stopped run never
+    /// reached. A sector that was not tried is not a sector that was recovered,
+    /// and counting one as the other would overstate the copy
+    /// (`A-CONFIDENCE-HONEST`).
+    ///
     /// # Panics
     ///
-    /// Panics if the unreadable map claims more sectors than the medium has —
-    /// a broken invariant must stop the program, not misreport a recovery.
+    /// Panics if the two together claim more sectors than the medium has — a
+    /// broken invariant must stop the program, not misreport a recovery.
     #[must_use]
     pub fn recovered_sectors(&self) -> u64 {
-        let lost: u64 = self.unreadable.iter().map(|range| range.sectors).sum();
+        let refused: u64 = self.unreadable.iter().map(|range| range.sectors).sum();
+        let lost = refused.saturating_add(self.not_attempted);
         self.sector_count.checked_sub(lost).unwrap_or_else(|| {
             panic!(
-                "unreadable map claims {lost} lost sectors on a medium of {} — a wrong number \
-                 must never reach a report",
-                self.sector_count
+                "the account claims {lost} sectors lost on a medium of {} ({refused} refused, {} \
+                 not attempted) — a wrong number must never reach a report",
+                self.sector_count, self.not_attempted
             )
         })
+    }
+
+    /// Sectors the run never tried, because it was stopped before reaching
+    /// them.
+    ///
+    /// Deliberately not folded into [`Report::unreadable`]: that map is what
+    /// the *medium* refused, and a run stopped by its operator says nothing
+    /// about the medium. Merging the two would turn a cancelled copy into a
+    /// report of a damaged disk.
+    #[must_use]
+    pub fn not_attempted(&self) -> u64 {
+        self.not_attempted
+    }
+
+    /// Whether the run was stopped before it covered the medium.
+    #[must_use]
+    pub fn stopped_early(&self) -> bool {
+        self.not_attempted > 0
     }
 
     /// Runs that stayed unreadable after refinement; their image bytes are zero
@@ -130,7 +155,7 @@ impl Report {
     /// Whether every sector of the medium was recovered.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.unreadable.is_empty()
+        self.unreadable.is_empty() && self.not_attempted == 0
     }
 }
 
@@ -205,6 +230,7 @@ pub fn run<S, W>(
     dest: &mut W,
     options: Options,
     progress: &mut dyn FnMut(Progress),
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Report, AcquireError>
 where
     S: BlockSource,
@@ -224,13 +250,92 @@ where
             )
         });
     let mut buf = vec![0_u8; chunk_len];
-    let mut suspects = Vec::new();
 
-    // Pass 1: sequential sweep.
+    let swept = sweep(
+        src,
+        dest,
+        options,
+        &mut buf,
+        progress,
+        cancelled,
+        sector_count,
+    )?;
+    let refined = refine(
+        src,
+        dest,
+        &mut buf[..sector_bytes],
+        progress,
+        cancelled,
+        geometry.sector_size,
+        &swept,
+    )?;
+
+    dest.seek(SeekFrom::End(0))?;
+    dest.flush()?;
+
+    Ok(Report {
+        sector_count,
+        unreadable: refined.unreadable,
+        not_attempted: swept.not_attempted.saturating_add(refined.not_attempted),
+    })
+}
+
+/// What the sequential pass left behind.
+struct Swept {
+    /// Chunks the sweep could not read and zero-filled. Each is revisited
+    /// sector by sector unless the run was stopped.
+    suspects: Vec<SectorRange>,
+    /// Sectors past where a stopped sweep got to.
+    not_attempted: u64,
+    /// Whether the sweep was stopped before it covered the medium.
+    stopped: bool,
+}
+
+/// What refinement resolved.
+struct Refined {
+    /// Runs that stayed unreadable after being retried one sector at a time.
+    unreadable: Vec<SectorRange>,
+    /// Suspect sectors a stopped run never retried. Neither recovered nor known
+    /// to be refused, so counted apart from both.
+    not_attempted: u64,
+}
+
+/// Pass one: read the medium in chunks, skipping over what fails.
+///
+/// A failing chunk is zero-filled and noted rather than retried here, so the
+/// healthy majority is off the medium quickly — which on a disk that is dying
+/// is the difference between most of it and none of it.
+fn sweep<S, W>(
+    src: &mut S,
+    dest: &mut W,
+    options: Options,
+    buf: &mut [u8],
+    progress: &mut dyn FnMut(Progress),
+    cancelled: &dyn Fn() -> bool,
+    sector_count: u64,
+) -> Result<Swept, AcquireError>
+where
+    S: BlockSource,
+    W: Write + Seek,
+{
+    let sector_bytes = buf.len() / usize::try_from(options.chunk_sectors).unwrap_or(1).max(1);
+    let mut suspects = Vec::new();
     dest.seek(SeekFrom::Start(0))?;
     let sweep_stride = stride(sector_count);
     let mut lba = Lba::new(0);
     while lba.get() < sector_count {
+        // Checked once per chunk, so a stop takes effect within one read rather
+        // than at the end of the medium. What is already written stays written:
+        // the image is a prefix of the medium, and the report says how much of
+        // it was never reached.
+        if cancelled() {
+            let not_attempted = sector_count - lba.get();
+            return Ok(Swept {
+                suspects,
+                not_attempted,
+                stopped: true,
+            });
+        }
         let sectors = options.chunk_sectors.min(sector_count - lba.get());
         let len = usize::try_from(sectors).unwrap_or_else(|_| {
             panic!("chunk sector count {sectors} fits usize: it is capped by the chunk size")
@@ -254,20 +359,58 @@ where
             });
         }
     }
+    Ok(Swept {
+        suspects,
+        not_attempted: 0,
+        stopped: false,
+    })
+}
 
-    // Pass 2: refine each suspect chunk sector by sector.
-    let mut unreadable = Vec::new();
+/// Pass two: revisit each chunk the sweep skipped, one sector at a time.
+///
+/// Skipped entirely when the sweep was stopped: a suspect is a chunk the sweep
+/// zero-filled, and one that is never retried is neither recovered nor known to
+/// be refused, so its sectors are counted as untried.
+fn refine<S, W>(
+    src: &mut S,
+    dest: &mut W,
+    sector_buf: &mut [u8],
+    progress: &mut dyn FnMut(Progress),
+    cancelled: &dyn Fn() -> bool,
+    sector_size: SectorSize,
+    swept: &Swept,
+) -> Result<Refined, AcquireError>
+where
+    S: BlockSource,
+    W: Write + Seek,
+{
     // The denominator is what the sweep could not read, not the medium: a disk
     // with one bad chunk and one with a thousand spend very different amounts
     // of time here, and only this number predicts which.
-    let suspect_sectors: u64 = suspects
+    let suspect_sectors: u64 = swept
+        .suspects
         .iter()
         .fold(0, |sum, range| sum.saturating_add(range.sectors));
+    if swept.stopped {
+        return Ok(Refined {
+            unreadable: Vec::new(),
+            not_attempted: suspect_sectors,
+        });
+    }
+
+    let mut unreadable = Vec::new();
     let refine_stride = stride(suspect_sectors);
     let mut refined = 0_u64;
-    let sector_buf = &mut buf[..sector_bytes];
-    for suspect in suspects {
+    for suspect in &swept.suspects {
         for step in 0..suspect.sectors {
+            // Once per sector: refinement is where a failing disk spends its
+            // time, and a stop that waited for the whole pass would not be one.
+            if cancelled() {
+                return Ok(Refined {
+                    unreadable,
+                    not_attempted: suspect_sectors - refined,
+                });
+            }
             let sector = suspect.start.checked_add(step).unwrap_or_else(|| {
                 panic!(
                     "suspect sector {}+{step} overflowed; range was {suspect}",
@@ -276,17 +419,13 @@ where
             });
             match src.read_at(sector, sector_buf) {
                 Ok(()) => {
-                    let offset = sector
-                        .to_byte_offset(geometry.sector_size)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "byte offset of sector {sector} at {} overflowed u64 after the \
-                                 sweep already wrote it",
-                                geometry.sector_size
-                            )
-                        })
-                        .get();
-                    dest.seek(SeekFrom::Start(offset))?;
+                    let offset = sector.to_byte_offset(sector_size).unwrap_or_else(|| {
+                        panic!(
+                            "byte offset of sector {sector} at {sector_size} overflowed u64 after \
+                             the sweep already wrote it"
+                        )
+                    });
+                    dest.seek(SeekFrom::Start(offset.get()))?;
                     dest.write_all(sector_buf)?;
                 }
                 Err(_) => push_merged(&mut unreadable, sector),
@@ -300,12 +439,9 @@ where
             }
         }
     }
-    dest.seek(SeekFrom::End(0))?;
-    dest.flush()?;
-
-    Ok(Report {
-        sector_count,
+    Ok(Refined {
         unreadable,
+        not_attempted: 0,
     })
 }
 
