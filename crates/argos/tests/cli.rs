@@ -51,6 +51,165 @@ fn scan_recovers_all_images_bit_identical_end_to_end() {
     assert_eq!(manifest["artifacts"][0]["confidence"], "contiguous-carve");
     assert_eq!(manifest["artifacts"][0]["stage"], "carve");
     assert!(manifest["unreadable"].as_array().is_some_and(Vec::is_empty));
+    // The run's own account of its reach, so a later reader can tell a medium
+    // that held nothing from a run that stopped short of looking.
+    assert_eq!(manifest["coverage"]["omitted_assets"], 0);
+    assert_eq!(manifest["coverage"]["dropped_unreadable"], 0);
+    assert_eq!(manifest["coverage"]["unattributed_residue"], 0);
+    assert!(manifest["coverage"]["bytes_swept"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn a_range_scans_its_neighbourhood_and_reports_only_what_it_covered() {
+    // The anchor-directed mode: files deleted together were written together,
+    // so the surroundings of a photograph that did come back are where the rest
+    // of its batch is. A whole disk is hours; a neighbourhood is minutes, and
+    // can afford settings the whole disk cannot.
+    let inside = Jpeg::new().with_entropy_bytes(2048).build();
+    let outside = Jpeg::new().with_entropy_bytes(4096).build();
+    let disk = Disk::filled(4 * 1024 * 1024)
+        .with(100_000, &outside)
+        .with(2_000_000, &inside)
+        .into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+    let out = dir.path().join("recovered");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(&out)
+        .args(["--min-long-side", "0"])
+        .args(["--range", "1_500_000..2_500_000"])
+        .output()
+        .expect("run argos scan");
+    assert!(
+        output.status.success(),
+        "ranged scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).expect("manifest"))
+            .expect("valid json");
+    let offsets: Vec<u64> = manifest["artifacts"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .filter_map(|record| record["source_offset"].as_u64())
+        .collect();
+    assert_eq!(
+        offsets,
+        vec![2_000_000],
+        "only the image inside the range may be reported: {offsets:?}"
+    );
+    // And the account describes the range, not the medium.
+    assert_eq!(manifest["coverage"]["bytes_swept"], 1_000_000);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn a_range_that_covers_nothing_is_refused_rather_than_scanned() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, Disk::filled(64 * 1024).into_bytes()).expect("write fixture disk");
+
+    for bad in ["2000..1000", "notarange", "10..abc"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+            .arg("scan")
+            .arg(&image)
+            .arg("--out")
+            .arg(dir.path().join(format!("out-{}", bad.len())))
+            .args(["--range", bad])
+            .output()
+            .expect("run argos scan");
+        assert!(
+            !output.status.success(),
+            "{bad} must be refused rather than interpreted: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn acquire_copies_a_medium_and_the_copy_scans_to_the_same_images() {
+    // The point of acquiring: everything afterwards works from the image, so a
+    // failing medium is read exactly once. The property that makes that safe is
+    // that the copy is the medium — bit for bit — and recovers the same files.
+    let jpeg_bytes = Jpeg::new().build();
+    let disk = Disk::filled(512 * 1024)
+        .with(20_000, &jpeg_bytes)
+        .into_bytes();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source.img");
+    std::fs::write(&source, &disk).expect("write fixture disk");
+    let copy = dir.path().join("copy.img");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("acquire")
+        .arg(&source)
+        .arg("--to")
+        .arg(&copy)
+        .output()
+        .expect("run argos acquire");
+    assert!(
+        output.status.success(),
+        "acquire failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&copy).expect("the acquired image"),
+        disk,
+        "an acquisition that is not bit-identical is not evidence"
+    );
+
+    let out = dir.path().join("recovered");
+    let scan = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&copy)
+        .arg("--out")
+        .arg(&out)
+        .args(["--min-long-side", "0"])
+        .output()
+        .expect("run argos scan");
+    assert!(scan.status.success());
+    assert_eq!(
+        std::fs::read(out.join("000000.jpg")).expect("recovered jpeg"),
+        jpeg_bytes
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn acquire_refuses_to_overwrite_an_image_that_already_exists() {
+    // An acquisition that silently overwrote an earlier one would destroy the
+    // only copy of a medium that may no longer be readable.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source.img");
+    std::fs::write(&source, Disk::filled(64 * 1024).into_bytes()).expect("write fixture disk");
+    let copy = dir.path().join("copy.img");
+    std::fs::write(&copy, b"an earlier acquisition").expect("write the existing image");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("acquire")
+        .arg(&source)
+        .arg("--to")
+        .arg(&copy)
+        .output()
+        .expect("run argos acquire");
+
+    assert!(!output.status.success(), "an existing image must be kept");
+    assert_eq!(
+        std::fs::read(&copy).expect("the earlier image"),
+        b"an earlier acquisition",
+        "and it must be untouched"
+    );
 }
 
 #[test]

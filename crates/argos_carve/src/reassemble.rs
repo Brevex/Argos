@@ -314,9 +314,15 @@ pub fn locate_break<R: Read + Seek>(
             // the data stops being the file, so it needs no other oracle. It
             // counts verified bytes rather than picture units, so nothing is
             // claimed about how much of the picture that is.
+            //
+            // The `IHDR` is read separately and cheaply, because what a
+            // candidate declares itself to be is what lets a search skip the
+            // icons and cache entries that outnumber photographs on a used
+            // disk. Without it every PNG candidate clears every size floor.
+            let declared = crate::png::header_dimensions(src, header, limit, scratch)?;
             match crate::validate(format, src, header, limit, scratch)? {
                 Verdict::Complete { .. } => return Ok(None),
-                Verdict::Corrupt { at, .. } => (at, None, 0, 0, at),
+                Verdict::Corrupt { at, .. } => (at, declared, 0, 0, at),
             }
         }
     };

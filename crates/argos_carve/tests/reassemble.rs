@@ -42,6 +42,63 @@ fn broken_at(layout: &Fragmented, header: ByteOffset, format: Format) -> Broken 
 }
 
 #[test]
+fn a_fragmented_png_declares_its_size_so_a_search_can_skip_the_small_ones() {
+    // A used disk holds two orders of magnitude more icons and cache entries
+    // than photographs, and on the measured disk 42,484 of 50,355
+    // fragmentation points were PNG. Every one of them cleared every size
+    // floor, because a candidate that declares nothing is never "too small" —
+    // so the search spent its budget on 48-pixel icons no reassembly could
+    // turn into anything but the icon they already are.
+    //
+    // The `IHDR` states the size before any data, so it costs thirty-three
+    // bytes to know.
+    let icon = argos_carve::fixture::icon_png(48, 0x51CE);
+    let photo = argos_carve::fixture::png(1600, 40);
+
+    // Planted cut short: the header verified, the rest of the file did not
+    // survive. That is what a fragmentation point looks like from the walk.
+    let broken_png = |image: &[u8]| {
+        let at = 4 * BLOCK;
+        let disk = Disk::filled(64 * BLOCK)
+            .with(at, &image[..image.len() / 2])
+            .into_bytes();
+        let mut src = std::io::Cursor::new(disk.clone());
+        let mut scratch = Scratch::new();
+        reassemble::locate_break(
+            &mut src,
+            ByteOffset::new(at as u64),
+            Format::Png,
+            disk.len() as u64,
+            &mut scratch,
+        )
+        .expect("in-memory read")
+        .expect("a truncated PNG must break")
+    };
+
+    assert_eq!(
+        broken_png(&icon).declared,
+        Some((48, 48)),
+        "a PNG candidate must state what it claims to be"
+    );
+    assert_eq!(broken_png(&photo).declared, Some((1600, 40)));
+
+    // Which is what the floor then acts on.
+    let icon_break = broken_png(&icon);
+    assert!(
+        !icon_break.clears(300),
+        "a 48-pixel icon must not be searched at a 300-pixel floor"
+    );
+    assert!(
+        icon_break.clears(0),
+        "and a run that asked for everything must still get it"
+    );
+    assert!(
+        broken_png(&photo).clears(300),
+        "a photograph-sized frame must still be searched"
+    );
+}
+
+#[test]
 fn a_two_fragment_image_is_reassembled_to_the_exact_planted_bytes() {
     let image = jpeg_image();
     // The second fragment sits well past the first, with unrelated filler in

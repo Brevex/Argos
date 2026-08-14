@@ -13,7 +13,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-import type { Inventory, ScanRequest, ScanStarted, Summary } from './dto';
+import type { Gallery, Inventory, ScanRequest, ScanStarted, Summary } from './dto';
 
 /** The Tauri event every engine notification arrives on. */
 const ENGINE_EVENT = 'argos://engine';
@@ -78,6 +78,23 @@ export function scanStart(request: ScanRequest): Promise<ScanStarted> {
 }
 
 /** Stops the running scan, keeping everything recovered so far. */
+/**
+ * One page of a finished session's artifacts, strongest evidence first.
+ *
+ * The order and the filter are the engine's. `standing` is passed through as
+ * the name the engine gave it; this file does not know what the names mean and
+ * must not — which artifact looks like a photograph is a recovery question
+ * (`A-SHELL-NO-DOMAIN`).
+ */
+export function scanGallery(
+  session: string,
+  offset: number,
+  limit: number,
+  standing: string | null,
+): Promise<Gallery> {
+  return invoke('scan_gallery', { session, offset, limit, standing });
+}
+
 export function scanCancel(): Promise<void> {
   return invoke('scan_cancel');
 }

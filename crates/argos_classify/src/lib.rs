@@ -17,6 +17,7 @@
 //! this crate filters, skips or deletes anything (A-TRIAGE-NOT-VERDICT).
 
 pub mod phash;
+pub mod rank;
 pub mod rules;
 
 #[cfg(feature = "test-util")]

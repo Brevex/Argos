@@ -59,6 +59,34 @@ modifiedUnix: number | null,
  */
 recoveredName: string | null, 
 /**
+ * Where the artifact stands in a list, by the evidence it carries:
+ * `camera-named`, `dated`, `photograph-sized`, `unremarkable` or
+ * `cache-neighbour`. A sort key the engine derived; nothing is hidden
+ * by it and a client must not recompute it (`A-SHELL-NO-DOMAIN`).
+ */
+standing: string | null, 
+/**
+ * Decoded pixel width, when the artifact decoded.
+ */
+width: number | null, 
+/**
+ * Decoded pixel height, when the artifact decoded.
+ */
+height: number | null, 
+/**
+ * Camera that took the picture, as recorded: make and model joined.
+ */
+camera: string | null, 
+/**
+ * When the picture was taken, as EXIF stores it.
+ */
+taken: string | null, 
+/**
+ * How many same-sized neighbours it was found among, when it sat in a
+ * run of them — the layout a thumbnail cache has.
+ */
+sameSizeNeighbours: number | null, 
+/**
  * Triage label, when it was scored.
  */
 triageLabel: string | null, 
@@ -150,6 +178,28 @@ offset: number,
  * Range length in bytes.
  */
 length: number, };
+
+/**
+ * One page of a session's artifacts, strongest evidence first.
+ */
+export type Gallery = { 
+/**
+ * Artifacts on this page, already ordered by the engine.
+ */
+artifacts: Array<Artifact>, 
+/**
+ * Artifacts the filter admits across the whole session, so a client
+ * can page without asking twice.
+ */
+total: number, 
+/**
+ * Artifacts the session recorded in all, whatever the filter.
+ */
+recorded: number, 
+/**
+ * Subdirectory holding previews, relative to the session.
+ */
+previewDir: string, };
 
 /**
  * What the engine answers a handshake with.

@@ -81,8 +81,32 @@ impl ScanLog {
             report.reassembled, report.reassembly_attempted
         ));
         self.line(&format!(
-            "unreadable     {} regions",
-            report.unreadable.len()
+            "unreadable     {} regions, {} findings dropped for overlapping one",
+            report.unreadable.len(),
+            report.dropped_unreadable
+        ));
+        self.line(&format!(
+            "not written    {} under the size floor, {} partial prefixes reported, {} \
+             fragmented candidates skipped as too small",
+            report.omitted_assets, report.partial_prefixes, report.reassembly_skipped_small
+        ));
+        // The two figures that say whether the metadata of an earlier
+        // filesystem could be read at all. A residual anchor is the trace of a
+        // format that came before; an unattributed region is a run list that
+        // survived one and could not be resolved for want of the geometry it is
+        // counted against.
+        let residual = report
+            .volumes
+            .iter()
+            .filter(|volume| volume.origin == argos_engine::Origin::Residual)
+            .count();
+        self.line(&format!(
+            "volumes        {} located, {residual} left by earlier formats",
+            report.volumes.len()
+        ));
+        self.line(&format!(
+            "residue        {} orphaned metadata regions could not be tied to a volume",
+            report.unattributed_residue
         ));
         for name in report.ceilings.reached() {
             self.line(&format!(

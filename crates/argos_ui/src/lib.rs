@@ -109,6 +109,7 @@ pub fn run() {
             commands::devices,
             commands::scan_start,
             commands::scan_cancel,
+            commands::scan_gallery,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|err| panic!("the shell could not start: {err}"));

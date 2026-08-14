@@ -26,6 +26,7 @@ fn spanning_carve_over_named_files(count: u64) -> Vec<Finding> {
         extents: Box::from([ByteRange::new(ByteOffset::new(start), len)]),
         declared_size: None,
         timestamps: Timestamps::default(),
+        deleted: None,
         name: None,
         source_object: None,
         parent: None,

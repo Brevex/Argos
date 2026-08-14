@@ -12,8 +12,8 @@ use argos_fs::fixture::{
     APFS_BLOCK, EXT4_BLOCK, FAT_CLUSTER, FilePlan, Image, NTFS_CLUSTER, SECTOR, apfs_container,
     apfs_cyclic_tree, exfat_boot_sector, exfat_volume, ext4_dir_block, ext4_inode_with_extents,
     ext4_volume, fat32_volume, gpt_image, mbr, ntfs_boot_sector, ntfs_indx, ntfs_record,
-    ntfs_record_resident, ntfs_volume, resident_payload_offset, run_list, truncated, usn_journal,
-    with_u16_le, with_u32_le, zero_filled,
+    ntfs_record_resident, ntfs_usn_record, ntfs_volume, resident_payload_offset, run_list,
+    truncated, usn_journal, with_u16_le, with_u32_le, zero_filled,
 };
 use argos_fs::{FsKind, Origin, apfs, ext4, fat, ntfs, part, residue};
 
@@ -139,6 +139,172 @@ fn ntfs_recovers_a_deleted_file_with_name_timestamps_and_extents() {
     assert!(recovered.timestamps.created.is_some());
     assert!(recovered.timestamps.modified.is_some());
     assert_recovers_the_planted_bytes(&image, &file, &recovered.extents);
+}
+
+#[test]
+fn the_boot_sector_copy_resolves_to_the_volume_rather_than_past_it() {
+    // NTFS keeps its boot sector twice: at the volume's first sector and at its
+    // last. A sweep that tests every sector meets both, and they are identical,
+    // so nothing in the bytes says which is which — only where the geometry
+    // they imply lands does.
+    //
+    // Read as a start, the copy puts the volume, and its `$MFT`, almost a
+    // volume's length past where they are. Every extent resolved from it points
+    // at unrelated bytes, and every orphaned record inside the real volume
+    // falls outside the range it reports — which is how a disk full of
+    // surviving metadata reports none of it.
+    let volume_len = 2 * 1024 * 1024;
+    let planted_at = 8 * 1024 * 1024;
+    let file = FilePlan::new("evidence.jpg", 512 * 1024, 9000);
+    let volume = ntfs_volume(volume_len, 64 * NTFS_CLUSTER, &file);
+    // Placed away from zero, so "the volume starts at the anchor" and "the
+    // volume starts at zero" cannot both be right by coincidence.
+    let image = Image::new(16 * 1024 * 1024)
+        .with(planted_at, &volume)
+        .into_bytes();
+    let mut src = Cursor::new(&image);
+
+    let primary = ByteOffset::new(planted_at as u64);
+    let copy = ByteOffset::new((planted_at + volume_len - SECTOR) as u64);
+
+    // Both anchors parse as boot sectors — that is the whole problem.
+    assert!(
+        ntfs::Ntfs::open(&mut src, copy)
+            .expect("in-memory read")
+            .is_some(),
+        "the copy must look exactly like a boot sector, or this test is not the case"
+    );
+
+    // Confirmed against the `$MFT`, both resolve to the same volume.
+    let from_primary = ntfs::locate(&mut src, primary)
+        .expect("in-memory read")
+        .expect("the primary must resolve");
+    let from_copy = ntfs::locate(&mut src, copy)
+        .expect("in-memory read")
+        .expect("the copy must resolve to the volume it belongs to");
+
+    assert_eq!(from_primary.volume_offset, primary);
+    assert_eq!(
+        from_copy.volume_offset, primary,
+        "the copy must name the volume's start, not its own position"
+    );
+    assert_eq!(from_copy.mft_offset, from_primary.mft_offset);
+
+    // And what that buys: the file comes back from either anchor.
+    let found = from_copy.recover_deleted(&mut src).expect("in-memory read");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name.as_deref(), Some("evidence.jpg"));
+}
+
+#[test]
+fn the_change_journal_dates_a_batch_deletion_and_names_what_it_removed() {
+    // The one thing on an NTFS volume that records *when* a file stopped
+    // existing. A `FILE` record keeps creation and modification times, not the
+    // moment of deletion — so a hundred files removed in one action are
+    // recognisable only here, as a hundred entries sharing a timestamp.
+    let volume_len = 2 * 1024 * 1024;
+    let mft_at = 64 * NTFS_CLUSTER;
+    let journal_at = 96 * NTFS_CLUSTER;
+
+    let batch = [
+        ("infancia-001.jpg", 7_u64),
+        ("infancia-002.jpg", 8),
+        ("infancia-003.jpg", 9),
+    ];
+    let journal = usn_journal(&batch);
+    let runs = run_list(&[(
+        journal_at as u64 / NTFS_CLUSTER as u64,
+        (journal.len() as u64).div_ceil(NTFS_CLUSTER as u64),
+    )]);
+
+    // Record 0 is the $MFT; record 1 is $UsnJrnl, whose journal is the named
+    // stream rather than its own content.
+    let mft_run = run_list(&[(mft_at as u64 / NTFS_CLUSTER as u64, 1)]);
+    let mft_record = ntfs_record(true, None, 0, Some(&mft_run), NTFS_CLUSTER as u64);
+    let usn_record = ntfs_usn_record("$J", &runs, journal.len() as u64);
+
+    let image = Image::new(volume_len)
+        .with(0, &ntfs_boot_sector(volume_len, mft_at))
+        .with(mft_at, &mft_record)
+        .with(mft_at + 1024, &usn_record)
+        .with(journal_at, &journal)
+        .into_bytes();
+
+    let mut src = Cursor::new(&image);
+    let volume = ntfs::locate(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the volume must resolve");
+    let events = volume.change_journal(&mut src).expect("in-memory read");
+
+    assert_eq!(events.len(), batch.len(), "every deletion must be reported");
+    let names: Vec<&str> = events
+        .iter()
+        .map(|entry| entry.event.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["infancia-001.jpg", "infancia-002.jpg", "infancia-003.jpg"]
+    );
+
+    // One timestamp across the batch: the signature of a single action.
+    let stamps: std::collections::BTreeSet<_> =
+        events.iter().map(|entry| entry.event.timestamp).collect();
+    assert_eq!(stamps.len(), 1, "a batch deletion shares one moment");
+    assert!(stamps.iter().next().expect("a stamp").is_some());
+
+    // And each event points at where its record sat, which is what ties it to
+    // a recovery rather than to a name that happens to match.
+    assert_eq!(
+        events[0].source_object,
+        (mft_at + 7 * 1024) as u64,
+        "an event must resolve through the volume's own geometry"
+    );
+}
+
+#[test]
+fn a_volume_without_a_change_journal_reports_no_events_rather_than_failing() {
+    let file = FilePlan::new("evidence.jpg", 512 * 1024, 9000);
+    let image = ntfs_volume(2 * 1024 * 1024, 64 * NTFS_CLUSTER, &file);
+    let mut src = Cursor::new(&image);
+    let volume = ntfs::locate(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the volume must resolve");
+
+    assert!(
+        volume
+            .change_journal(&mut src)
+            .expect("in-memory read")
+            .is_empty(),
+        "no journal is not a failure — most residual volumes have none"
+    );
+}
+
+#[test]
+fn a_sector_that_parses_as_a_boot_sector_by_chance_locates_no_volume() {
+    // A sweep of a terabyte meets these in quantity: 512 bytes that satisfy the
+    // structural checks and describe a volume that is not there. Reporting one
+    // costs a scan the time to walk a `$MFT` of noise, and — worse — offers a
+    // geometry that orphaned records would be resolved against.
+    let file = FilePlan::new("evidence.jpg", 512 * 1024, 9000);
+    let volume = ntfs_volume(2 * 1024 * 1024, 64 * NTFS_CLUSTER, &file);
+    // The boot sector alone, with no volume behind it.
+    let image = Image::new(4 * 1024 * 1024)
+        .with(1024 * 1024, &volume[..SECTOR])
+        .into_bytes();
+    let mut src = Cursor::new(&image);
+
+    let stray = ByteOffset::new(1024 * 1024);
+    assert!(
+        ntfs::Ntfs::open(&mut src, stray)
+            .expect("in-memory read")
+            .is_some(),
+        "it must still parse, or the test proves nothing"
+    );
+    assert_eq!(
+        ntfs::locate(&mut src, stray).expect("in-memory read"),
+        None,
+        "no $MFT behind it means no volume to report"
+    );
 }
 
 #[test]

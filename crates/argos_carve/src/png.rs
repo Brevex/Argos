@@ -261,6 +261,63 @@ fn feed_inflater(
     Ok(())
 }
 
+/// Pixel dimensions the candidate's `IHDR` declares, without validating the
+/// rest of it.
+///
+/// A frame states its size before its data, so what a candidate claims to be
+/// is known for the cost of thirty-three bytes. That is what lets a search
+/// spend its budget on photograph-sized frames: a used disk holds two orders
+/// of magnitude more cache entries and icons than pictures, and no reassembly
+/// of a 48x48 icon could produce anything but the icon it already is.
+///
+/// `None` when the signature or the `IHDR` does not verify — including its
+/// CRC, so a coincidence does not get to state a size.
+///
+/// # Errors
+///
+/// Fails only when reading or seeking `src` fails.
+pub fn header_dimensions<R: Read + Seek>(
+    src: &mut R,
+    start: ByteOffset,
+    limit: u64,
+    scratch: &mut Scratch,
+) -> Result<Option<(u32, u32)>, CarveError> {
+    let Scratch { stream, seg, .. } = scratch;
+    let mut bytes = Bytes::new(src, start.get(), limit, stream);
+
+    seg.clear();
+    let ok = bytes
+        .read_into(seg, crate::PNG_SIGNATURE.len())
+        .map_err(|source| CarveError::io(start, source))?;
+    if !ok || seg[..] != crate::PNG_SIGNATURE {
+        return Ok(None);
+    }
+
+    let Some(header) = read_chunk_header(&mut bytes)? else {
+        return Ok(None);
+    };
+    if &header.kind != b"IHDR" || header.length != 13 {
+        return Ok(None);
+    }
+    let mut crc = crc32fast::Hasher::new();
+    crc.update(&header.kind);
+    seg.clear();
+    let ok = bytes
+        .read_into(seg, 13)
+        .map_err(|source| CarveError::io(ByteOffset::new(bytes.pos()), source))?;
+    if !ok {
+        return Ok(None);
+    }
+    crc.update(seg);
+    let Some(ihdr) = Ihdr::parse(seg) else {
+        return Ok(None);
+    };
+    if !check_crc(&mut bytes, crc)? {
+        return Ok(None);
+    }
+    Ok(Some((ihdr.width, ihdr.height)))
+}
+
 /// Reads the stored chunk CRC and compares it to the computed one.
 fn check_crc<R: Read + Seek>(
     bytes: &mut Bytes<'_, R>,

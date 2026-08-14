@@ -183,7 +183,14 @@ fn report_reads_back_every_artifact_the_scan_recorded() {
         .expect("run argos report");
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("recovered 2 artifacts"), "{text}");
+    // Recorded and written are separate counts: the manifest accounts for the
+    // whole medium, the directory holds what the caller asked for. Both
+    // fixtures clear the floor here, so the two agree — and the line has to say
+    // which is which either way.
+    assert!(
+        text.contains("recorded  2 artifacts, 2 of them written"),
+        "{text}"
+    );
     assert!(text.contains("000000.jpg"), "{text}");
     assert!(text.contains("000001.png"), "{text}");
     assert!(text.contains("+preview"), "{text}");

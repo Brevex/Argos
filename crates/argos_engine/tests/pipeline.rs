@@ -178,6 +178,104 @@ fn a_deleted_file_recovered_from_ntfs_keeps_its_name_and_beats_carving() {
 }
 
 #[test]
+fn a_truncated_png_is_recorded_as_a_break_and_never_written_as_a_header() {
+    // PNG verifies per chunk, so a file whose tail is gone has a truncated
+    // `IDAT` that cannot verify and a confirmed prefix that stops at the
+    // `IHDR` — thirty-three bytes describing a picture, with none of it. A
+    // JPEG in the same state has a proven share of its frame, because its
+    // entropy decoder confirms MCU by MCU.
+    //
+    // So the two are not symmetric, and this asserts the honest half: the
+    // break is recorded, the header is not written as a recovery. Reporting
+    // one would be reporting a description as a photograph.
+    // Noise rather than a gradient: a compressible fixture makes a PNG smaller
+    // than the prefix threshold, which would prove nothing.
+    let (width, height) = (96_u32, 96_u32);
+    let mut raw = Vec::new();
+    let mut seed = 0x2E7F_1B93_u32;
+    for _ in 0..height {
+        // Filter byte, then a row of noise.
+        raw.extend_from_slice(&[0]);
+        for _ in 0..width * 3 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            raw.push((seed >> 24) as u8);
+        }
+    }
+    let png = argos_carve::fixture::png_from_raw(width, height, &raw);
+    assert!(
+        png.len() > 2048,
+        "the fixture must be big enough that half of it is a meaningful prefix"
+    );
+    let at = 8192;
+    let image = argos_carve::fixture::Disk::filled(CHUNK * 3)
+        .with(at, &png[..png.len() / 2])
+        .into_bytes();
+
+    let (artifacts, report) = scan(&image);
+
+    assert_eq!(
+        report.partial_prefixes, 0,
+        "a PNG header is not a recovery: {report:?}"
+    );
+    assert!(
+        artifacts.is_empty(),
+        "nothing verified past the header, so nothing may be written"
+    );
+
+    // But the break is recorded with what the frame declares, so a later run
+    // can search it and a reader can see it was there at all.
+    let [point] = report.fragmentation.as_slice() else {
+        panic!("the break must be recorded: {report:?}");
+    };
+    assert_eq!(point.header.get(), at as u64);
+    assert_eq!(point.format, Format::Png);
+    assert_eq!(
+        point.declared,
+        Some((width, height)),
+        "and it must state the size it claims, so a floor can act on it"
+    );
+}
+
+#[test]
+fn a_volume_whose_first_sector_was_overwritten_is_still_found_by_its_copy() {
+    // The shape a re-formatted disk actually has. A later format writes its own
+    // structures over the start of the volume that was there, so the NTFS boot
+    // sector is gone — but the copy in the volume's last sector, thousands of
+    // clusters away, is not, and neither is the `$MFT`.
+    //
+    // Read as a volume start, that copy points a volume's length past itself:
+    // the `$MFT` lands outside the medium, every extent resolves to unrelated
+    // bytes, and the deleted file the metadata still describes is reported by
+    // nobody. Confirming the anchor against the `$MFT` is what turns the copy
+    // back into the volume it belongs to.
+    let jpeg = argos_carve::fixture::Jpeg::new().build();
+    let file = argos_fs::fixture::FilePlan::new("childhood.jpg", 128 * 1024, jpeg.len())
+        .with_content(jpeg.clone());
+    let volume = argos_fs::fixture::ntfs_volume(CHUNK * 6, 32 * 1024, &file);
+
+    // Wipe the primary boot sector, leaving the copy at the last sector.
+    let mut image = volume;
+    let sector = argos_fs::fixture::SECTOR;
+    image[..sector].fill(0);
+    assert_ne!(
+        image[image.len() - sector..],
+        [0; 512],
+        "the copy is the only anchor left, so it has to still be there"
+    );
+
+    let (artifacts, _) = scan(&image);
+
+    let recovered = artifacts
+        .iter()
+        .find(|artifact| artifact.recovered_name.is_some())
+        .expect("the copy must lead back to the volume and its deleted file");
+    assert_eq!(recovered.recovered_name.as_deref(), Some("childhood.jpg"));
+    assert_eq!(recovered.stage, Stage::Filesystem);
+    assert_eq!(recovered.confidence, Confidence::FsMetadata);
+    assert_eq!(recovered.bytes, jpeg);
+}
+
+#[test]
 fn a_fragmented_deleted_file_is_reassembled_from_its_extents_in_order() {
     let jpeg = argos_carve::fixture::Jpeg::new()
         .with_entropy_bytes(8192)
@@ -486,6 +584,88 @@ fn an_unreadable_region_is_reported_and_never_recovered_from() {
     assert!(
         !report.is_complete(),
         "a damaged scan is not a complete one"
+    );
+}
+
+#[test]
+fn a_recovery_lost_to_neighbouring_damage_is_counted_rather_than_vanishing() {
+    // Damage is recorded at retry-span granularity, so a bad sector condemns
+    // the whole span around it — including images that were individually
+    // readable and did validate. Dropping them is right: their bytes overlap a
+    // range whose content is unknown, and reporting one would report zeroes as
+    // evidence. Doing it silently is not, because the run then reads as a
+    // medium that held nothing rather than as one where damage cost a photo.
+    const SPAN: usize = 64 * 1024;
+    let jpeg = argos_carve::fixture::Jpeg::new().build();
+    // Straddling the span boundary: the header lands in the span that reads,
+    // so the sweep still finds it, and the tail lands in the span that does
+    // not, so the finding overlaps the damage.
+    let straddling = SPAN - jpeg.len() / 2;
+    // Far enough past the image that validating it never reads these bytes:
+    // the finding must be lost to the *recorded range*, not to a failed read,
+    // which is already counted as `unrecoverable`.
+    let bad = (SPAN + 55 * 1024) as u64..(SPAN + 55 * 1024 + 512) as u64;
+    assert!(
+        ((straddling + jpeg.len()) as u64) < bad.start,
+        "the fixture must not put the image itself inside the bad sector"
+    );
+
+    let image = argos_carve::fixture::Disk::filled(SPAN * 4)
+        .with(straddling, &jpeg)
+        .into_bytes();
+    let config = ScanConfig::builder()
+        .workers(NonZeroUsize::new(1).expect("at least one worker"))
+        // Four retry spans to a chunk, so the damage costs a span rather than
+        // the whole read and the span before it still yields its signature.
+        .chunk_bytes(SPAN * 4)
+        .min_long_side(0)
+        .build()
+        .expect("valid configuration");
+
+    let session = ScanSession::new(config);
+    let medium = Medium::new(
+        vec![Damaged {
+            inner: Cursor::new(image.clone()),
+            bad,
+        }],
+        image.len() as u64,
+    )
+    .expect("medium");
+    let mut sink = Collector::new();
+    let report = session.start(medium, &mut sink, &Discard).expect("scan");
+
+    assert_eq!(
+        report.dropped_unreadable, 1,
+        "an image that ran into damage must be counted: {report:?}"
+    );
+
+    // The tail is bytes the medium never gave and is not reported. The head
+    // is: those extents read cleanly and are, byte for byte, the start of the
+    // picture — losing them to a bad sector a kilobyte later is losing a
+    // photograph to the granularity of a retry.
+    let [head] = sink.artifacts() else {
+        panic!(
+            "the part before the damage must come back, got {}",
+            sink.artifacts().len()
+        );
+    };
+    assert_eq!(head.confidence, Confidence::PartialOrThumbnail);
+    assert_eq!(head.extents.len(), 1);
+    assert_eq!(head.extents[0].start.get(), straddling as u64);
+    assert_eq!(
+        head.extents[0].end_saturating().get(),
+        SPAN as u64,
+        "it must stop exactly where the damage starts"
+    );
+    assert_eq!(
+        head.bytes,
+        image[straddling..SPAN],
+        "and hold the medium's own bytes, with nothing padded"
+    );
+    assert!(
+        head.expected_length
+            .is_some_and(|whole| whole > head.bytes.len() as u64),
+        "the shortfall must be stated rather than the head presented as whole"
     );
 }
 
@@ -926,6 +1106,7 @@ fn a_name_is_never_reported_against_a_different_filesystem_object() {
         extents: extents.clone(),
         declared_size: Some(16),
         timestamps: argos_core::Timestamps::default(),
+        deleted: None,
         name: Some("IMG_4471.JPG".into()),
         source_object: Some(100),
         parent: None,

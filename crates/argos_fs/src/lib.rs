@@ -68,6 +68,16 @@ impl fmt::Display for FsKind {
     }
 }
 
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Current => "current",
+            Self::Residual => "residual",
+        };
+        f.write_str(name)
+    }
+}
+
 /// What a residue-sweep anchor turned out to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]

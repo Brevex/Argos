@@ -218,6 +218,25 @@ dto! {
         pub modified_unix: Option<i64>,
         /// Name recovered from filesystem metadata, when one survived.
         pub recovered_name: Option<String>,
+        /// Where the artifact stands in a list, by the evidence it carries:
+        /// `camera-named`, `dated`, `photograph-sized`, `unremarkable` or
+        /// `cache-neighbour`. A sort key the engine derived; nothing is hidden
+        /// by it and a client must not recompute it (`A-SHELL-NO-DOMAIN`).
+        pub standing: Option<String>,
+        /// Decoded pixel width, when the artifact decoded.
+        #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
+        pub width: Option<u32>,
+        /// Decoded pixel height, when the artifact decoded.
+        #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
+        pub height: Option<u32>,
+        /// Camera that took the picture, as recorded: make and model joined.
+        pub camera: Option<String>,
+        /// When the picture was taken, as EXIF stores it.
+        pub taken: Option<String>,
+        /// How many same-sized neighbours it was found among, when it sat in a
+        /// run of them — the layout a thumbnail cache has.
+        #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
+        pub same_size_neighbours: Option<u32>,
         /// Triage label, when it was scored.
         pub triage_label: Option<String>,
         /// The property that settled the label, when there is one.
@@ -268,6 +287,23 @@ dto! {
         pub triage: Option<Triage>,
         /// One entry per recovered artifact, in manifest order.
         pub artifacts: Vec<Artifact>,
+    }
+}
+
+dto! {
+    /// One page of a session's artifacts, strongest evidence first.
+    pub struct Gallery {
+        /// Artifacts on this page, already ordered by the engine.
+        pub artifacts: Vec<Artifact>,
+        /// Artifacts the filter admits across the whole session, so a client
+        /// can page without asking twice.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub total: u32,
+        /// Artifacts the session recorded in all, whatever the filter.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub recorded: u32,
+        /// Subdirectory holding previews, relative to the session.
+        pub preview_dir: String,
     }
 }
 

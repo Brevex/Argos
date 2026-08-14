@@ -8,6 +8,7 @@
 //! Printing lives in [`console`]; this module defines the commands and
 //! dispatches them.
 
+mod acquire;
 mod console;
 mod destination;
 mod export;
@@ -17,6 +18,7 @@ mod scan;
 mod scanlog;
 mod serve;
 mod source;
+mod standing;
 
 use std::path::PathBuf;
 
@@ -95,6 +97,38 @@ enum Command {
         /// from the artifacts, and no part of the recovery depends on them.
         #[arg(long)]
         previews: bool,
+        /// Scan only this byte range of the medium, as `START..END` or
+        /// `START..` — decimal, or hexadecimal with a `0x` prefix.
+        ///
+        /// A whole-disk scan is hours; a neighbourhood is minutes. Files
+        /// deleted together were usually written together, so the surroundings
+        /// of a photograph that *did* come back are where the rest of its batch
+        /// is — and a narrow range can afford settings a whole disk cannot,
+        /// like `--min-long-side 0` and `--reassembly-budget 0`.
+        ///
+        /// The range bounds every stage: what lies outside it is not scanned,
+        /// and the report counts only what was covered.
+        #[arg(long, value_name = "START..END")]
+        range: Option<String>,
+    },
+    /// Copy a medium into a raw image, then scan the image instead of the disk.
+    ///
+    /// A scan reads the whole surface, and every rerun reads it again. On a
+    /// medium that is failing, each pass is one it may not survive, and the
+    /// sectors lost are lost for good — so a disk worth recovering from is a
+    /// disk worth reading exactly once.
+    ///
+    /// The sweep skips over failing regions to get the healthy majority off
+    /// quickly, then revisits each one sector by sector. Whatever stays
+    /// unreadable is zero-filled in the image and listed at the end: those
+    /// zeroes are placeholders, never presented as data that was read.
+    Acquire {
+        /// Block device or image file to copy (opened read-only).
+        source: PathBuf,
+        /// Path of the raw image to create. Must not already exist, must be an
+        /// ordinary file, and must not be on the source's own disk.
+        #[arg(long)]
+        to: PathBuf,
     },
     /// Run the engine as a JSON-RPC server on stdin/stdout.
     ///
@@ -113,9 +147,19 @@ enum Command {
     /// partitions, or the residue an earlier filesystem left behind.
     Devices,
     /// Print what a finished scan recovered, read back from its manifest.
+    ///
+    /// Artifacts are listed strongest evidence first: the ones naming a camera,
+    /// then the ones carrying a capture date, then photograph-sized frames,
+    /// and last the entries found among same-sized neighbours — the layout a
+    /// thumbnail cache has. A scan of a used disk records hundreds of
+    /// thousands of artifacts, so only the head of that list is printed unless
+    /// `--all` is given; the manifest holds every one of them either way.
     Report {
         /// Session directory a previous scan wrote.
         session: PathBuf,
+        /// Print every artifact rather than the head of the list.
+        #[arg(long)]
+        all: bool,
     },
     /// Copy artifacts out of a session directory, verifying each hash.
     ///
@@ -169,6 +213,14 @@ enum Command {
         /// Export only pictures at least this many pixels on their long side.
         #[arg(long, value_name = "PIXELS")]
         min_long_side: Option<u32>,
+        /// Export only pictures standing at least this strongly.
+        ///
+        /// In increasing order: `cache-neighbour`, `unremarkable`,
+        /// `photograph-sized`, `dated`, `camera-named`. `--standing dated`
+        /// is the narrow "pictures that say when they were taken" set;
+        /// `--standing photograph-sized` is the wide net.
+        #[arg(long, value_name = "STANDING")]
+        standing: Option<String>,
         /// Export only pictures whose recorded camera make or model contains
         /// this text, matched without regard to case.
         #[arg(long, value_name = "TEXT")]
@@ -197,6 +249,7 @@ fn main() -> anyhow::Result<()> {
             min_long_side,
             reassembly_budget,
             previews,
+            range,
         } => run_scan(
             &source,
             &out,
@@ -211,9 +264,11 @@ fn main() -> anyhow::Result<()> {
                 min_long_side,
                 reassembly_budget: reassembly_budget.map(std::time::Duration::from_secs),
                 previews,
+                range: range.as_deref().map(scan::parse_range).transpose()?,
                 resume_from: None,
             },
         ),
+        Command::Acquire { source, to } => acquire::run(&source, &to, &console::Console),
         Command::Serve => {
             serve::run();
             Ok(())
@@ -222,11 +277,11 @@ fn main() -> anyhow::Result<()> {
             console::devices();
             Ok(())
         }
-        Command::Report { session } => {
+        Command::Report { session, all } => {
             let manifest = argos_report::Manifest::read(&session).with_context(|| {
                 format!("cannot read the session manifest in {}", session.display())
             })?;
-            console::manifest(&manifest);
+            console::manifest(&manifest, all);
             Ok(())
         }
         Command::Reassemble {
@@ -251,20 +306,31 @@ fn main() -> anyhow::Result<()> {
             to,
             hashes,
             min_long_side,
+            standing,
             camera,
             taken_from,
             taken_until,
-        } => run_export(
-            &from,
-            &to,
-            &export::Filter {
-                hashes,
-                min_long_side,
-                camera,
-                taken_from,
-                taken_until,
-            },
-        ),
+        } => {
+            run_export(
+                &from,
+                &to,
+                &export::Filter {
+                    hashes,
+                    min_long_side,
+                    standing: standing.as_deref().map(str::parse).transpose().map_err(
+                        |_unknown| {
+                            anyhow::anyhow!(
+                                "not a standing: expected one of cache-neighbour, unremarkable, \
+                             photograph-sized, dated, camera-named"
+                            )
+                        },
+                    )?,
+                    camera,
+                    taken_from,
+                    taken_until,
+                },
+            )
+        }
     }
 }
 
@@ -339,6 +405,8 @@ fn run_reassemble(
             min_long_side,
             reassembly_budget: reassembly_budget.map(std::time::Duration::from_secs),
             previews,
+            // The points carry their own offsets; a range would only cut them.
+            range: None,
             resume_from: Some(broken),
         },
     )

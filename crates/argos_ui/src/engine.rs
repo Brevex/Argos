@@ -276,6 +276,15 @@ pub fn started(reply: Reply) -> Option<dto::ScanStarted> {
     }
 }
 
+/// Narrows a reply to one page of a gallery.
+#[must_use]
+pub fn page(reply: Reply) -> Option<dto::Gallery> {
+    match reply {
+        Reply::Page(page) => Some(*page),
+        _ => None,
+    }
+}
+
 /// Narrows a reply to a bare acknowledgement.
 #[must_use]
 #[expect(

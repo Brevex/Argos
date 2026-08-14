@@ -35,6 +35,11 @@ pub struct Finding {
     pub declared_size: Option<u64>,
     /// Timestamps recovered from the source metadata, never invented.
     pub timestamps: Timestamps,
+    /// When the change journal says the file was deleted, when it said.
+    ///
+    /// The only timestamp on an NTFS volume that is about the *removal* rather
+    /// than the file. A run of findings sharing one is a batch deletion.
+    pub deleted: Option<std::time::SystemTime>,
     /// Name recovered from filesystem metadata, when one survived. It always
     /// belongs to [`Finding::source_object`].
     pub name: Option<Box<str>>,
@@ -120,6 +125,7 @@ impl fmt::Debug for Finding {
             .field("extents", &self.extents)
             .field("declared_size", &self.declared_size)
             .field("timestamps", &self.timestamps)
+            .field("deleted", &self.deleted)
             .field("name", &self.name.as_ref().map(|_| "<redacted>"))
             .field("source_object", &self.source_object)
             .field("parent", &self.parent)
@@ -179,6 +185,14 @@ pub struct ScanReport {
     /// Findings whose claimed bytes could not be read back from the medium,
     /// so they were dropped rather than reported from whatever was there.
     pub unrecoverable: u64,
+    /// Findings dropped because their bytes overlap a range the medium refused.
+    ///
+    /// Distinct from [`ScanReport::unrecoverable`], which is about a read that
+    /// failed at report time; this is about bytes the sweep already knew it
+    /// never got. Counted because the signature that started each of them was
+    /// real: damage that costs recoveries must not read as a medium that held
+    /// nothing (A-CONFIDENCE-HONEST).
+    pub dropped_unreadable: u64,
     /// Artifacts recognised, recorded and deliberately not written, because
     /// the run was asked to leave synthetic assets out of the directory. They
     /// are in the manifest with their extents: the account stays complete.
@@ -214,6 +228,11 @@ pub struct ScanReport {
     pub reassembly_skipped_small: u64,
     /// Which of the run's ceilings were reached, if any.
     pub ceilings: Ceilings,
+    /// Deletion events the change journals recorded.
+    ///
+    /// Names and moments, never extents: an event says a file was removed,
+    /// which is not evidence its bytes survived (A-CONFIDENCE-HONEST).
+    pub journal_deletions: u64,
     /// Residual `FILE`-record regions that could not be attributed to an NTFS
     /// volume, so their extents could not be resolved. They are counted, not
     /// guessed at.
@@ -233,6 +252,13 @@ pub struct ScanReport {
     /// Whether the classifier failed mid-run, leaving artifacts unscored that
     /// a healthy one would have scored.
     pub triage_degraded: bool,
+    /// Where each written artifact stands in a list, keyed by content hash.
+    ///
+    /// A sort key, not a verdict: a recovery of a used disk writes hundreds of
+    /// thousands of artifacts and a few hundred photographs, and this is what
+    /// lets a reader put the photographs first. Every written artifact has one
+    /// and nothing is removed by it (A-TRIAGE-NOT-VERDICT).
+    pub standings: Vec<(argos_core::artifact::Digest, argos_classify::rank::Standing)>,
     /// Artifacts found among same-sized neighbours, with how many there were.
     ///
     /// The signature of a thumbnail cache, which a used medium holds far more

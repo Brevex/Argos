@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The four commands the window may call, the engine event channel, the window controls it draws itself, and a folder picker. No shell, no filesystem, no network, and no path into a session directory: the window shows counts and progress, never recovered content.",
+  "description": "The five commands the window may call, the engine event channel, the window controls it draws itself, and a folder picker. No shell, no network, no filesystem access. The one path the window can read is the session's previews/ subdirectory, granted at runtime once the engine names it: those are derived thumbnails, and the recovered artifacts themselves stay unreachable from the web view. The static scope is empty on purpose, so nothing is readable before a scan grants it.",
   "windows": ["main"],
   "permissions": [
     "core:default",

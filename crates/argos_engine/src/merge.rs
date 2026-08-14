@@ -22,14 +22,36 @@ use crate::finding::Finding;
 /// thumbnails survive coverage — a thumbnail always lies inside its parent and
 /// is a separate artifact.
 ///
+/// Returns how many were dropped for touching an unreadable range. That one is
+/// counted and the others are not, because it is the only drop here that is
+/// about the *medium* rather than about the findings: the signature that
+/// started each of them was real, and a run that lost recoveries to damage must
+/// not read as one that found the medium empty (A-CONFIDENCE-HONEST).
+///
 /// The resulting order is a total order over the findings' own fields, so two
 /// runs over the same medium produce the same manifest.
-pub(crate) fn consolidate(findings: &mut Vec<Finding>, unreadable: &[ByteRange]) {
-    findings.retain(|finding| {
-        !finding.extents.is_empty()
-            && finding.length() > 0
-            && !unreadable.iter().any(|range| finding.intersects(*range))
+pub(crate) fn consolidate(findings: &mut Vec<Finding>, unreadable: &[ByteRange]) -> u64 {
+    let mut dropped_unreadable = 0_u64;
+    let mut truncated = Vec::new();
+    findings.retain_mut(|finding| {
+        if finding.extents.is_empty() || finding.length() == 0 {
+            return false;
+        }
+        if !unreadable.iter().any(|range| finding.intersects(*range)) {
+            return true;
+        }
+        // The bytes before the damage are still the medium's own, and they are
+        // still the start of this image. Damage is recorded at retry-span
+        // granularity, so a bad sector condemns a whole span around it and the
+        // photograph that reached into it loses everything — including the
+        // part that read cleanly.
+        dropped_unreadable += 1;
+        if let Some(head) = head_before_damage(finding, unreadable) {
+            truncated.push(head);
+        }
+        false
     });
+    findings.append(&mut truncated);
 
     findings.sort_by(|a, b| {
         a.start()
@@ -121,4 +143,67 @@ pub(crate) fn consolidate(findings: &mut Vec<Finding>, unreadable: &[ByteRange])
         }
     }
     *findings = kept;
+    dropped_unreadable
+}
+
+/// The part of `finding` that lies before the first damage it meets.
+///
+/// Damage is recorded at the granularity a failed read is retried at, so one
+/// bad sector condemns a whole span around it. A photograph reaching into that
+/// span used to lose everything — including the extents that read cleanly and
+/// are, byte for byte, the start of the picture.
+///
+/// So the head is kept and the rest is not. What comes back is the medium's
+/// own bytes up to the damage, at the weakest tier and with the length the
+/// metadata expected recorded beside it, exactly as a decoder-truncated
+/// recovery is. Nothing is padded and no zero is ever presented as data
+/// (`A-CONFIDENCE-HONEST`).
+///
+/// `None` when the damage starts at or before the first extent: there is no
+/// head, only a finding whose bytes are unknown.
+fn head_before_damage(finding: &Finding, unreadable: &[ByteRange]) -> Option<Finding> {
+    let first_damage = unreadable
+        .iter()
+        .filter(|range| finding.intersects(**range))
+        .map(|range| range.start.get())
+        .min()?;
+
+    let mut extents = Vec::new();
+    for extent in &finding.extents {
+        let start = extent.start.get();
+        if start >= first_damage {
+            break;
+        }
+        let len = extent.len.min(first_damage.saturating_sub(start));
+        if len == 0 {
+            break;
+        }
+        extents.push(ByteRange::new(extent.start, len));
+        // A later extent may sit before the damage on the medium while a
+        // earlier one already reached it; stopping here keeps the head a
+        // prefix of the *file* rather than of the disk.
+        if len < extent.len {
+            break;
+        }
+    }
+    if extents.is_empty() {
+        return None;
+    }
+
+    Some(Finding {
+        format: finding.format,
+        stage: finding.stage,
+        // Never above the weakest tier: what this describes is a file that
+        // stops, and how it was found does not change that.
+        confidence: argos_core::Confidence::PartialOrThumbnail,
+        extents: extents.into_boxed_slice(),
+        // What the file was supposed to be, so the shortfall is stated rather
+        // than the head presented as whole.
+        declared_size: finding.declared_size.or_else(|| Some(finding.length())),
+        timestamps: finding.timestamps,
+        deleted: finding.deleted,
+        name: finding.name.clone(),
+        source_object: finding.source_object,
+        parent: finding.parent,
+    })
 }

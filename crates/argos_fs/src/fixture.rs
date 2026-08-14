@@ -285,6 +285,10 @@ pub fn ntfs_volume(len: usize, mft_offset: usize, file: &FilePlan) -> Vec<u8> {
     file.place(
         Image::new(len)
             .with(0, &boot)
+            // The copy NTFS keeps in the volume's last sector. A fixture
+            // without it is not an NTFS volume, and a sweep that tests every
+            // sector meets both — which is the case that has to work.
+            .with(len - SECTOR, &boot)
             .with(mft_offset, &mft_record)
             .with(mft_offset + NTFS_RECORD, &deleted),
     )
@@ -456,6 +460,77 @@ pub fn ntfs_record(
 
     apply_fixups(&mut record, usize::from(usa_at), usize::from(usa_count));
     record
+}
+
+/// A `FILE` record for `$UsnJrnl`, whose change journal is a named `$DATA`
+/// stream rather than the file's own content.
+///
+/// The shape a reader has to handle to reach a change journal at all: the
+/// unnamed `$DATA` is empty, and everything is in the alternate stream.
+#[must_use]
+pub fn ntfs_usn_record(stream: &str, runs: &[u8], size: u64) -> Vec<u8> {
+    let mut record = vec![0_u8; NTFS_RECORD];
+    record[0..4].copy_from_slice(b"FILE");
+    let usa_at = 48_u16;
+    let usa_count = (NTFS_RECORD / SECTOR + 1) as u16;
+    record[4..6].copy_from_slice(&usa_at.to_le_bytes());
+    record[6..8].copy_from_slice(&usa_count.to_le_bytes());
+    record[20..22].copy_from_slice(&64_u16.to_le_bytes());
+    record[22..24].copy_from_slice(&1_u16.to_le_bytes()); // in use
+
+    let mut at = 64_usize;
+    let mut si = vec![0_u8; 48];
+    si[0..8].copy_from_slice(&132_000_000_000_000_000_u64.to_le_bytes());
+    si[8..16].copy_from_slice(&132_100_000_000_000_000_u64.to_le_bytes());
+    at = push_resident_attr(&mut record, at, 0x10, &si);
+
+    let units: Vec<u16> = "$UsnJrnl".encode_utf16().collect();
+    let mut fname = vec![0_u8; 66 + units.len() * 2];
+    fname[8..16].copy_from_slice(&132_000_000_000_000_000_u64.to_le_bytes());
+    fname[16..24].copy_from_slice(&132_100_000_000_000_000_u64.to_le_bytes());
+    fname[64] = u8::try_from(units.len()).unwrap_or(u8::MAX);
+    fname[65] = 1;
+    for (index, unit) in units.iter().enumerate() {
+        fname[66 + index * 2..68 + index * 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    at = push_resident_attr(&mut record, at, 0x30, &fname);
+
+    at = push_named_nonresident_data(&mut record, at, stream, runs, size);
+
+    record[at..at + 4].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+    let used = (at + 8) as u32;
+    record[24..28].copy_from_slice(&used.to_le_bytes());
+    record[28..32].copy_from_slice(&(NTFS_RECORD as u32).to_le_bytes());
+
+    apply_fixups(&mut record, usize::from(usa_at), usize::from(usa_count));
+    record
+}
+
+/// Appends a non-resident `$DATA` attribute carrying a stream name.
+fn push_named_nonresident_data(
+    record: &mut [u8],
+    at: usize,
+    stream: &str,
+    runs: &[u8],
+    size: u64,
+) -> usize {
+    let units: Vec<u16> = stream.encode_utf16().collect();
+    let name_at = 64_usize;
+    let runs_at = name_at + units.len() * 2;
+    let len = (runs_at + runs.len()).next_multiple_of(8);
+    record[at..at + 4].copy_from_slice(&0x80_u32.to_le_bytes());
+    record[at + 4..at + 8].copy_from_slice(&(len as u32).to_le_bytes());
+    record[at + 8] = 1; // non-resident
+    record[at + 9] = u8::try_from(units.len()).unwrap_or(u8::MAX);
+    record[at + 10..at + 12].copy_from_slice(&(name_at as u16).to_le_bytes());
+    record[at + 32..at + 34].copy_from_slice(&(runs_at as u16).to_le_bytes());
+    record[at + 48..at + 56].copy_from_slice(&size.to_le_bytes());
+    for (index, unit) in units.iter().enumerate() {
+        let to = at + name_at + index * 2;
+        record[to..to + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    record[at + runs_at..at + runs_at + runs.len()].copy_from_slice(runs);
+    at + len
 }
 
 fn push_resident_attr(record: &mut [u8], at: usize, kind: u32, value: &[u8]) -> usize {

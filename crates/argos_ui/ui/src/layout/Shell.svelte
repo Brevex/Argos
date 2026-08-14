@@ -22,6 +22,7 @@
   import DriveTable from './parts/DriveTable.svelte';
   import Destination from './parts/Destination.svelte';
   import Activity from './parts/Activity.svelte';
+  import Gallery from './parts/Gallery.svelte';
   import ThemeDialog from './parts/ThemeDialog.svelte';
 
   /** How often the elapsed clock advances while a scan runs. */
@@ -33,6 +34,10 @@
   let busy = $state(false);
   let refreshing = $state(false);
   let themeOpen = $state(false);
+  /** Session directory of the run that finished, and its previews folder. */
+  let finished = $state<{ session: string; previewDir: string } | null>(null);
+  /** The same, for the run in progress: promoted once the engine says done. */
+  let pending: { session: string; previewDir: string } | null = null;
 
   const ready = $derived(source !== '' && destination !== '' && !busy);
 
@@ -118,9 +123,18 @@
         // does not fill the destination folder. This is the same run as
         // `argos scan … ` with no `--min-long-side` given.
         minLongSide: null,
-        previews: false,
+        // On, because this window now shows what was recovered and a preview
+        // is what it draws. They are derived files, reproducible from the
+        // artifacts at any time, and the only part of a session this window is
+        // ever granted a path to.
+        previews: true,
       });
+      finished = null;
       session.begin(started.source);
+      // Kept from the moment the engine names them: the results view needs the
+      // session directory and its previews folder, and asking for them again
+      // after the run would be a second source for one fact.
+      pending = { session: started.out, previewDir: started.previewDir };
     } catch (err) {
       session.problem = String(err);
       session.phase = 'failed';
@@ -144,6 +158,17 @@
       busy = false;
     }
   }
+
+  // A run that ends — finished or stopped early — has a session directory
+  // worth showing. Both write a manifest, so both have results to read.
+  $effect(() => {
+    const ended =
+      session.phase === 'done' || session.phase === 'cancelled' || session.phase === 'failed';
+    if (ended && pending !== null) {
+      finished = pending;
+      pending = null;
+    }
+  });
 
   onMount(() => {
     void remembered().then(apply);
@@ -187,6 +212,10 @@
     </div>
 
     <Activity />
+
+    {#if finished !== null}
+      <Gallery session={finished.session} previewDir={finished.previewDir} />
+    {/if}
 
     <button class="action" disabled={!action.enabled} onclick={session.running ? stop : start}>
       {action.label}

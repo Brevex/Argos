@@ -377,6 +377,82 @@ fn results_and_export_read_a_session_the_scan_already_wrote() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn the_gallery_pages_a_session_and_orders_it_without_the_client_deciding() {
+    // What makes a results view possible at all: the engine orders and pages,
+    // so a window never receives — or ranks — hundreds of thousands of records.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    fixture(&image);
+    let session = dir.path().join("session");
+
+    let mut engine = Engine::spawn();
+    engine.handshake();
+    engine.call(
+        "scan.start",
+        &serde_json::json!({
+            "source": image, "out": session,
+            "filesystem": true, "carving": true, "reassembly": true,
+            "triage": false, "minLongSide": 0, "previews": true,
+        }),
+    );
+    engine.drain_until_finished();
+
+    let first = engine.call(
+        "scan.gallery",
+        &serde_json::json!({ "session": session, "offset": 0, "limit": 1, "standing": null }),
+    );
+    let page = &first["result"];
+    assert_eq!(
+        page["artifacts"].as_array().map(Vec::len),
+        Some(1),
+        "the limit must bound the page: {first}"
+    );
+    assert_eq!(page["total"], 2, "and the total must count past it");
+    assert_eq!(page["recorded"], 2);
+    assert_eq!(page["previewDir"], "previews");
+    // Every artifact carries the sort key the engine derived, so a client can
+    // show it without deriving anything (`A-SHELL-NO-DOMAIN`).
+    assert!(
+        page["artifacts"][0]["standing"].is_string(),
+        "a page must carry the standing: {first}"
+    );
+
+    let second = engine.call(
+        "scan.gallery",
+        &serde_json::json!({ "session": session, "offset": 1, "limit": 10, "standing": null }),
+    );
+    assert_eq!(
+        second["result"]["artifacts"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_ne!(
+        first["result"]["artifacts"][0]["sha256"], second["result"]["artifacts"][0]["sha256"],
+        "paging must advance rather than repeat"
+    );
+
+    // A filter narrows without the client knowing what the names mean, and a
+    // name the engine does not have is refused at the edge rather than guessed.
+    let narrowed = engine.call(
+        "scan.gallery",
+        &serde_json::json!({
+            "session": session, "offset": 0, "limit": 10, "standing": "camera-named",
+        }),
+    );
+    assert!(
+        narrowed["result"]["total"].as_u64().is_some_and(|n| n <= 2),
+        "{narrowed}"
+    );
+    let refused = engine.call(
+        "scan.gallery",
+        &serde_json::json!({
+            "session": session, "offset": 0, "limit": 10, "standing": "photograph",
+        }),
+    );
+    assert!(refused["error"].is_object(), "{refused}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
 fn a_scan_that_cannot_open_its_source_fails_the_call_rather_than_the_process() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut engine = Engine::spawn();

@@ -159,6 +159,37 @@ impl Engine {
             Call::ScanResults { session } => Manifest::read(&session)
                 .map(|manifest| Reply::Results(Box::new(translate::results(&manifest))))
                 .map_err(|err| (ErrorCode::InvalidParams, err.to_string())),
+            Call::ScanGallery {
+                session,
+                offset,
+                limit,
+                standing,
+                include_unwritten,
+            } => {
+                let floor = standing
+                    .as_deref()
+                    .map(str::parse::<argos_classify::rank::Standing>)
+                    .transpose()
+                    .map_err(|_unknown| {
+                        (
+                            ErrorCode::InvalidParams,
+                            "not a standing: expected one of cache-neighbour, unremarkable, \
+                             photograph-sized, dated, camera-named"
+                                .to_owned(),
+                        )
+                    })?;
+                Manifest::read(&session)
+                    .map(|manifest| {
+                        Reply::Page(Box::new(translate::gallery(
+                            &manifest,
+                            offset,
+                            limit,
+                            floor,
+                            include_unwritten,
+                        )))
+                    })
+                    .map_err(|err| (ErrorCode::InvalidParams, err.to_string()))
+            }
             Call::ExportCopy {
                 session,
                 to,

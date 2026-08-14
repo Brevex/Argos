@@ -84,6 +84,13 @@ pub struct Artifact<'a> {
     pub sha256: Digest,
     /// Timestamps recovered from the source metadata, never invented.
     pub timestamps: Timestamps,
+    /// When a change journal recorded the file being deleted, when one did.
+    ///
+    /// The only timestamp about the *removal* rather than about the file: a
+    /// `FILE` record keeps when its file was made and last written, not when
+    /// it stopped existing. A run of artifacts sharing this moment is a batch
+    /// deletion — files removed in one action.
+    pub deleted: Option<std::time::SystemTime>,
     /// Name recovered from filesystem metadata, when one survived.
     ///
     /// It belongs to the object named by [`Artifact::source_object`]; the two

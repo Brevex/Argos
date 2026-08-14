@@ -15,6 +15,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use argos_core::geometry::ByteOffset;
 use argos_core::progress::ProgressSink;
 use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession, Stages};
 
@@ -38,6 +39,12 @@ pub struct Options {
     pub reassembly_budget: Option<std::time::Duration>,
     /// Whether to render a preview of every artifact that decodes.
     pub previews: bool,
+    /// Byte range of the medium to cover, or `None` for all of it.
+    ///
+    /// An end of `None` means "to the end of the medium". The range bounds
+    /// every stage, so a report of a ranged scan describes that range and not
+    /// the medium (`A-CONFIDENCE-HONEST`).
+    pub range: Option<(u64, Option<u64>)>,
     /// Fragmentation points a previous run located, to search again without
     /// sweeping the medium.
     ///
@@ -119,6 +126,13 @@ where
     if let Some(jobs) = options.jobs {
         config = config.workers(jobs);
     }
+    if let Some((start, end)) = options.range {
+        let start = ByteOffset::new(start);
+        config = match end {
+            Some(end) => config.range(start..ByteOffset::new(end)),
+            None => config.range(start..),
+        };
+    }
     let config = config.build().context("invalid scan settings")?;
 
     let opened = source::open(source, config.workers().get())
@@ -172,10 +186,32 @@ where
         (None, None) => session.start(medium, &mut store, progress),
     };
 
-    // The manifest is written whatever happened. Artifacts already on disk
-    // without one would be bytes nothing can attribute to a sector, which is
-    // the situation provenance exists to prevent.
     let report = outcome.as_ref().ok();
+    let manifest = write_manifest(store, report, &description, triage_disabled.as_deref())?;
+    match report {
+        Some(report) => log.summary(report),
+        None => log.line("scan failed before it could report"),
+    }
+
+    Ok(Finished {
+        report: outcome.ok(),
+        manifest,
+    })
+}
+
+/// Annotates what was stored and writes the manifest describing it.
+///
+/// Written whatever happened, including for a run that failed partway:
+/// artifacts already on disk without one would be bytes nothing can attribute
+/// to a sector, which is the situation provenance exists to prevent
+/// (`A-PROVENANCE`).
+fn write_manifest(
+    store: argos_report::Store,
+    report: Option<&ScanReport>,
+    description: &str,
+    triage_disabled: Option<&str>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let mut store = store;
     let unreadable: Vec<argos_report::ExtentRecord> = report
         .map(|report| {
             report
@@ -199,29 +235,76 @@ where
             .map(|run| (run.sha256.to_string(), run.neighbours))
             .collect();
         store.annotate_same_size_runs(&runs);
+        // The sort key, so a reader of this directory can put the photographs
+        // first without deriving anything itself.
+        let standings: Vec<(String, String)> = report
+            .standings
+            .iter()
+            .map(|(sha256, standing)| (sha256.to_string(), standing.to_string()))
+            .collect();
+        store.annotate_standings(&standings);
     }
-    let triage_record = report.map(|report| triage_record(report, triage_disabled.as_deref()));
+    let triage_record = report.map(|report| triage_record(report, triage_disabled));
+    let coverage = report.map(coverage);
+    let volumes = report.map(volumes).unwrap_or_default();
     let fragmentation = report.map(fragmentation).unwrap_or_default();
-    let manifest = store
+    store
         .finish(argos_report::Summary {
             tool_version: env!("CARGO_PKG_VERSION"),
-            source: &description,
+            source: description,
             state: &report.map_or_else(|| "failed".to_owned(), |report| report.state.to_string()),
             rejected_candidates: report.map_or(0, |report| report.rejected_candidates),
             unreadable: &unreadable,
             triage: triage_record.as_ref(),
+            coverage: coverage.as_ref(),
+            volumes: &volumes,
             fragmentation: &fragmentation,
         })
-        .context("cannot write manifest")?;
-    match report {
-        Some(report) => log.summary(report),
-        None => log.line("scan failed before it could report"),
-    }
+        .context("cannot write manifest")
+}
 
-    Ok(Finished {
-        report: outcome.ok(),
-        manifest,
-    })
+/// Parses a `START..END` byte range, decimal or `0x`-prefixed hexadecimal.
+///
+/// `START..` runs to the end of the medium. Underscores are allowed as digit
+/// separators, because these are disk offsets and a person types them from a
+/// report: `53_350_498_304` is the offset a photograph was found at.
+///
+/// # Errors
+///
+/// Fails when the text is not a range, when a bound is not a number, or when
+/// the range covers nothing. A misparsed range would scan the wrong part of a
+/// medium and report the result as the medium's, so it is refused rather than
+/// interpreted generously.
+pub fn parse_range(text: &str) -> anyhow::Result<(u64, Option<u64>)> {
+    let (start, end) = text
+        .split_once("..")
+        .with_context(|| format!("{text} is not a range: write it as START..END or START.."))?;
+    let number = |part: &str| -> anyhow::Result<u64> {
+        let cleaned = part.trim().replace('_', "");
+        let parsed = match cleaned
+            .strip_prefix("0x")
+            .or_else(|| cleaned.strip_prefix("0X"))
+        {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => cleaned.parse::<u64>(),
+        };
+        parsed.with_context(|| format!("{part} is not a byte offset"))
+    };
+
+    let start = if start.trim().is_empty() {
+        0
+    } else {
+        number(start)?
+    };
+    let end = if end.trim().is_empty() {
+        None
+    } else {
+        Some(number(end)?)
+    };
+    if let Some(end) = end {
+        anyhow::ensure!(end > start, "the range {text} covers no bytes");
+    }
+    Ok((start, end))
 }
 
 /// Reads a manifest's fragmentation points back into what the search takes.
@@ -232,7 +315,6 @@ where
 ///
 #[must_use]
 pub fn fragmentation_points(manifest: &argos_report::Manifest) -> Vec<argos_engine::Broken> {
-    use argos_core::geometry::ByteOffset;
     manifest
         .fragmentation
         .iter()
@@ -269,6 +351,51 @@ fn fragmentation(report: &argos_engine::ScanReport) -> Vec<argos_report::Fragmen
             declared_height: broken.declared.map(|(_, height)| height),
             decoded: broken.decoded,
             required: broken.required,
+        })
+        .collect()
+}
+
+/// Turns the engine's own account of the run into a manifest record.
+///
+/// These are the figures that separate "the medium held nothing more" from
+/// "the run did not look there": what was recognised and deliberately not
+/// written, what the search skipped, what damage cost, and which ceilings were
+/// reached. The console prints them and the scan log keeps them, but neither
+/// survives into a session directory a later run — or a person — has to read
+/// (A-CONFIDENCE-HONEST).
+fn coverage(report: &ScanReport) -> argos_report::CoverageRecord {
+    argos_report::CoverageRecord {
+        bytes_swept: report.bytes_swept,
+        duplicates: report.duplicates,
+        unrecoverable: report.unrecoverable,
+        dropped_unreadable: report.dropped_unreadable,
+        omitted_assets: report.omitted_assets,
+        partial_prefixes: report.partial_prefixes,
+        reassembly_attempted: report.reassembly_attempted,
+        reassembled: report.reassembled,
+        reassembly_skipped_small: report.reassembly_skipped_small,
+        journal_deletions: report.journal_deletions,
+        unattributed_residue: report.unattributed_residue,
+        ceilings: report.ceilings.reached().map(str::to_owned).collect(),
+    }
+}
+
+/// Turns the volumes the sweep located into manifest records.
+///
+/// Residual volumes are the point: a medium re-formatted more than once
+/// carries the anchors of what came before, and which of them were found is
+/// what decides whether the metadata of the filesystem that held a deleted
+/// file could be read at all.
+fn volumes(report: &ScanReport) -> Vec<argos_report::VolumeRecord> {
+    report
+        .volumes
+        .iter()
+        .map(|volume| argos_report::VolumeRecord {
+            kind: volume.kind.to_string(),
+            origin: volume.origin.to_string(),
+            offset: volume.range.start.get(),
+            length: volume.range.len,
+            allocation_bytes: volume.allocation_bytes,
         })
         .collect()
 }

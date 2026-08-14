@@ -67,6 +67,13 @@ pub struct Filter {
     /// a prefix like `2009` is a whole year and needs no date arithmetic.
     pub taken_from: Option<String>,
     pub taken_until: Option<String>,
+    /// Weakest standing an artifact may have and still be exported.
+    ///
+    /// This is the "give me the photographs" filter: the evidence a picture
+    /// carries about itself, in the order the report lists it. A session that
+    /// recorded no standing is not waived — the standing is derived from the
+    /// record's own fields, so an older session filters as a new one does.
+    pub standing: Option<argos_classify::rank::Standing>,
 }
 
 impl Filter {
@@ -77,6 +84,7 @@ impl Filter {
             && self.camera.is_none()
             && self.taken_from.is_none()
             && self.taken_until.is_none()
+            && self.standing.is_none()
     }
 
     /// Whether `record` satisfies every criterion but the hashes.
@@ -96,6 +104,13 @@ impl Filter {
             // Nothing measured clears the floor, as it does during a scan: a
             // decoder that gave up is not evidence the bytes are worthless.
             if long_side > 0 && long_side < floor {
+                return false;
+            }
+        }
+        if let Some(floor) = self.standing {
+            // Derived when the session did not record one, so an older
+            // session filters exactly as a new one does.
+            if crate::standing::of(record) < floor {
                 return false;
             }
         }
@@ -192,6 +207,12 @@ pub fn run(from: &Path, to: &Path, filter: &Filter) -> anyhow::Result<Exported> 
         rejected_candidates: manifest.rejected_candidates,
         unreadable: manifest.unreadable.clone(),
         triage: manifest.triage.clone(),
+        // Both describe the run that produced these files rather than the
+        // files, and both stay true of a subset: a reader of the export still
+        // needs to know the scan omitted eleven thousand artifacts under its
+        // floor, and which volumes it found them among (A-CONFIDENCE-HONEST).
+        coverage: manifest.coverage.clone(),
+        volumes: manifest.volumes.clone(),
         // An export describes the files it carried, and a fragmentation point
         // is a place on the source medium rather than a file. It stays with
         // the session that can still reach that medium.

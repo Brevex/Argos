@@ -47,6 +47,112 @@ pub fn inventory() -> dto::Inventory {
     }
 }
 
+/// Artifacts one gallery page may carry.
+///
+/// A page is materialized as JSON and parsed on whatever thread draws the
+/// window, so it is bounded here rather than trusted from the client: a
+/// request for the whole session would be the megabytes of JSON the paging
+/// exists to avoid (`M-DOCUMENTED-MAGIC`, A-BOUNDED-ALLOC).
+const MAX_PAGE: u32 = 500;
+
+/// One page of a session's artifacts, strongest evidence first.
+///
+/// The ordering lives here and not in the client: which artifact most looks
+/// like a photograph is a recovery question, and a window that answered it
+/// would hold recovery logic (`A-SHELL-NO-DOMAIN`). Ties go to the larger
+/// picture, then to the longer file, so the order is total and two calls over
+/// one session agree.
+///
+/// Artifacts the run recorded but did not write are excluded unless asked for:
+/// they have no file and no preview, so a gallery cannot show them. They stay
+/// in the manifest, and `recorded` counts them, so nothing is hidden.
+pub fn gallery(
+    manifest: &Manifest,
+    offset: u32,
+    limit: u32,
+    standing: Option<argos_classify::rank::Standing>,
+    include_unwritten: bool,
+) -> dto::Gallery {
+    let admits = |record: &&argos_report::ArtifactRecord| {
+        if !include_unwritten && !record.written {
+            return false;
+        }
+        let Some(floor) = standing else {
+            return true;
+        };
+        // A session written before standings existed carries none; the
+        // standing is derived from its own record rather than waived, so an
+        // older session filters exactly as a new one does.
+        crate::standing::of(record) >= floor
+    };
+
+    let mut chosen: Vec<&argos_report::ArtifactRecord> =
+        manifest.artifacts.iter().filter(admits).collect();
+    chosen.sort_by(|left, right| {
+        crate::standing::rank(right)
+            .cmp(&crate::standing::rank(left))
+            .then(crate::standing::long_side(right).cmp(&crate::standing::long_side(left)))
+            .then(right.length.cmp(&left.length))
+            .then(left.sha256.cmp(&right.sha256))
+    });
+
+    let total = u32::try_from(chosen.len()).unwrap_or(u32::MAX);
+    let from = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(chosen.len());
+    let take = usize::try_from(limit.min(MAX_PAGE)).unwrap_or(0);
+    dto::Gallery {
+        artifacts: chosen[from..]
+            .iter()
+            .take(take)
+            .map(|record| artifact(record))
+            .collect(),
+        total,
+        recorded: u32::try_from(manifest.artifacts.len()).unwrap_or(u32::MAX),
+        preview_dir: argos_report::PREVIEW_DIR.to_owned(),
+    }
+}
+
+/// One artifact record as a client sees it.
+fn artifact(record: &argos_report::ArtifactRecord) -> dto::Artifact {
+    dto::Artifact {
+        name: record.name.clone(),
+        sha256: record.sha256.clone(),
+        stage: record.stage.clone(),
+        format: record.format.clone(),
+        confidence: record.confidence.clone(),
+        length: record.length,
+        expected_length: record.expected_length,
+        missing_bytes: record.missing_bytes,
+        extents: record.extents.iter().map(extent).collect(),
+        created_unix: record.created_unix,
+        modified_unix: record.modified_unix,
+        recovered_name: record.recovered_name.clone(),
+        standing: Some(crate::standing::of(record).to_string()),
+        width: record.width,
+        height: record.height,
+        // Joined here rather than in the window: two fields that are one fact
+        // to a reader, and a client that assembled them would be deciding how
+        // a camera is named.
+        camera: camera(record),
+        taken: record.taken.clone(),
+        same_size_neighbours: record.same_size_neighbours,
+        triage_label: record.triage_label.clone(),
+        triage_decided_by: record.triage_decided_by.clone(),
+        near_duplicate_of: record.near_duplicate_of.clone(),
+        preview: record.preview.clone(),
+    }
+}
+
+/// The camera a record names, make and model joined, when it names one.
+fn camera(record: &argos_report::ArtifactRecord) -> Option<String> {
+    match (&record.camera_make, &record.camera_model) {
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (Some(text), None) | (None, Some(text)) => Some(text.clone()),
+        (None, None) => None,
+    }
+}
+
 /// What a session directory holds, as a client sees it.
 pub fn results(manifest: &Manifest) -> dto::Results {
     dto::Results {
@@ -63,28 +169,7 @@ pub fn results(manifest: &Manifest) -> dto::Results {
             unscored: triage.unscored,
             degraded: triage.degraded,
         }),
-        artifacts: manifest
-            .artifacts
-            .iter()
-            .map(|record| dto::Artifact {
-                name: record.name.clone(),
-                sha256: record.sha256.clone(),
-                stage: record.stage.clone(),
-                format: record.format.clone(),
-                confidence: record.confidence.clone(),
-                length: record.length,
-                expected_length: record.expected_length,
-                missing_bytes: record.missing_bytes,
-                extents: record.extents.iter().map(extent).collect(),
-                created_unix: record.created_unix,
-                modified_unix: record.modified_unix,
-                recovered_name: record.recovered_name.clone(),
-                triage_label: record.triage_label.clone(),
-                triage_decided_by: record.triage_decided_by.clone(),
-                near_duplicate_of: record.near_duplicate_of.clone(),
-                preview: record.preview.clone(),
-            })
-            .collect(),
+        artifacts: manifest.artifacts.iter().map(artifact).collect(),
     }
 }
 
@@ -213,6 +298,10 @@ pub fn options(request: &dto::ScanRequest) -> crate::scan::Options {
         // it yet.
         reassembly_budget: None,
         previews: request.previews,
+        // The wire carries no range: a client that could scan part of a medium
+        // and report it as the medium is a client that can mislead, and adding
+        // it is a schema change made on purpose (`A-DTO-VERSIONED`).
+        range: None,
         // Not on the wire: resuming a search names a session directory, which
         // is a path, and the protocol deliberately carries none.
         resume_from: None,

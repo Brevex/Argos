@@ -26,7 +26,8 @@ fn healthy_medium_is_acquired_bit_identical() {
     let mut src = MemDisk::new(SECTOR, data.clone());
     let mut dest = Cursor::new(Vec::new());
 
-    let report = acquire::run(&mut src, &mut dest, acquire::Options::new()).expect("dest is ram");
+    let report = acquire::run(&mut src, &mut dest, acquire::Options::new(), &mut |_| {})
+        .expect("dest is ram");
 
     assert!(report.is_complete());
     assert_eq!(report.recovered_sectors(), 300);
@@ -43,7 +44,8 @@ fn bad_sectors_are_zero_filled_and_mapped_exactly() {
         .with_bad_sector(Lba::new(130));
     let mut dest = Cursor::new(Vec::new());
 
-    let report = acquire::run(&mut src, &mut dest, acquire::Options::new()).expect("dest is ram");
+    let report = acquire::run(&mut src, &mut dest, acquire::Options::new(), &mut |_| {})
+        .expect("dest is ram");
     let image = dest.into_inner();
 
     assert_eq!(
@@ -83,11 +85,66 @@ fn small_chunks_and_trailing_partial_chunk_are_handled() {
     let mut dest = Cursor::new(Vec::new());
     let options = acquire::Options::new().with_chunk_sectors(4);
 
-    let report = acquire::run(&mut src, &mut dest, options).expect("dest is ram");
+    let report = acquire::run(&mut src, &mut dest, options, &mut |_| {}).expect("dest is ram");
 
     assert_eq!(report.unreadable(), [SectorRange::new(Lba::new(9), 1)]);
     assert_eq!(
         dest.into_inner()[..9 * SECTOR_BYTES],
         data[..9 * SECTOR_BYTES]
+    );
+}
+
+#[test]
+fn both_passes_report_progress_that_reaches_their_own_total() {
+    // A pass over a terabyte takes hours, and one that emits nothing is
+    // indistinguishable from one that has stopped. The two passes count
+    // different things: the sweep's denominator is the medium, refinement's is
+    // only what the sweep could not read.
+    let sectors = 4_000;
+    let data = patterned(sectors);
+    let mut src = MemDisk::new(SECTOR, data)
+        .with_bad_sector(Lba::new(500))
+        .with_bad_sector(Lba::new(2_000));
+    let mut dest = Cursor::new(Vec::new());
+
+    let mut swept = Vec::new();
+    let mut refined = Vec::new();
+    let report = acquire::run(
+        &mut src,
+        &mut dest,
+        acquire::Options::new(),
+        &mut |progress| match progress {
+            acquire::Progress::Swept { done, total } => swept.push((done, total)),
+            acquire::Progress::Refined { done, total } => refined.push((done, total)),
+        },
+    )
+    .expect("dest is ram");
+
+    assert_eq!(
+        swept.last().copied(),
+        Some((sectors, sectors)),
+        "the sweep must finish at the medium's own size: {swept:?}"
+    );
+    // Two failing sectors in different sweep chunks, so refinement revisits
+    // both chunks entirely — the denominator is the suspect sectors, not two.
+    let suspects = report
+        .unreadable()
+        .iter()
+        .map(|range| range.sectors)
+        .sum::<u64>();
+    assert!(suspects > 0, "the fixture must leave something to refine");
+    let (done, total) = refined.last().copied().expect("refinement must report");
+    assert_eq!(done, total, "refinement must finish at its own total");
+    assert!(
+        total < sectors,
+        "refinement counts what the sweep could not read, not the medium: {total} of {sectors}"
+    );
+
+    // Bounded, or a medium of two billion sectors emits two billion callbacks.
+    assert!(
+        swept.len() <= 201 && refined.len() <= 201,
+        "progress must be capped: {} sweep, {} refine",
+        swept.len(),
+        refined.len()
     );
 }

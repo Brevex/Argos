@@ -84,6 +84,8 @@ pub(crate) struct Emitted {
     pub offset: u64,
     /// Decoded dimensions, when it decoded.
     pub pixels: Option<(u32, u32)>,
+    /// What the report stage established about the picture, for ordering.
+    pub evidence: argos_classify::rank::Evidence,
 }
 
 /// What this pass has been asked to produce.

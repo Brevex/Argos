@@ -212,6 +212,319 @@ impl Ntfs {
     }
 }
 
+/// Name of the file whose change journal Windows keeps.
+///
+/// It lives in `$Extend`, and its journal is the alternate data stream
+/// [`JOURNAL_STREAM`] rather than the file's own content — which is why a
+/// reader looking only at unnamed `$DATA` finds nothing in it.
+const JOURNAL_FILE: &str = "$UsnJrnl";
+
+/// Name of the `$DATA` stream holding the change journal's records.
+///
+/// Written `$UsnJrnl:$J`; the name stored in the attribute is the part after
+/// the colon. **Unverified against real NTFS media** — every fixture here
+/// writes what this constant says, so the tests prove the reader and the
+/// fixture agree and nothing more, exactly as the ioctl request codes in
+/// `docs/DEVICE-SMOKE-CHECKLIST.md` do.
+const JOURNAL_STREAM: &str = "$J";
+
+/// Most of a change journal one volume will read.
+///
+/// `$J` is sparse and grows without bound — Windows sizes it in tens of
+/// megabytes and trims the front — so a reader that took it whole would size
+/// an allocation from a medium (A-BOUNDED-ALLOC). The newest records are at
+/// the end, and the end is what dates a deletion, so this reads the tail.
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A deletion the change journal recorded, tied to the volume it happened on.
+#[derive(Clone, PartialEq, Eq)]
+pub struct JournalDeletion {
+    /// What the journal says about the event.
+    pub event: UsnDeletion,
+    /// Absolute offset of the MFT record the event names, for the geometry it
+    /// was read with. This is what ties an event to a recovery.
+    pub source_object: u64,
+}
+
+impl std::fmt::Debug for JournalDeletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JournalDeletion")
+            .field("event", &self.event)
+            .field("source_object", &self.source_object)
+            .finish()
+    }
+}
+
+/// Resolves a boot-sector anchor to the volume it actually describes.
+///
+/// NTFS keeps a copy of its boot sector in the volume's **last** sector, and a
+/// residue sweep tests every sector, so it meets both. They are byte-identical,
+/// and [`Ntfs::from_boot_sector`] reads whichever it is handed as the volume's
+/// start — which for the copy puts the whole geometry, the `$MFT` above all,
+/// almost a volume's length past where it really is. Every extent resolved
+/// from that anchor then points at the wrong bytes, and every orphaned record
+/// the sweep found inside the real volume falls outside the range it reports.
+///
+/// So the anchor is confirmed rather than trusted, by the one thing that
+/// settles it: whichever reading puts a real `FILE` record where it says the
+/// `$MFT` is, is the volume. Neither reading placing one means the sector
+/// parsed by coincidence — which a sweep of a terabyte produces in quantity —
+/// and nothing is reported for it (`A-CONFIDENCE-HONEST`).
+///
+/// # Errors
+///
+/// Fails only on I/O faults.
+pub fn locate<R: Read + Seek>(src: &mut R, anchor: ByteOffset) -> Result<Option<Ntfs>, FsError> {
+    let mut sector = Vec::new();
+    if !read_at(src, anchor.get(), SECTOR_BYTES, &mut sector)? {
+        return Ok(None);
+    }
+    let Some(primary) = Ntfs::from_boot_sector(&sector, anchor) else {
+        return Ok(None);
+    };
+    if has_mft(src, primary)? {
+        return Ok(Some(primary));
+    }
+
+    // Read instead as the copy in the last sector: the volume then begins a
+    // volume's length back, ending just past this sector.
+    let Some(start) = anchor
+        .get()
+        .checked_add(SECTOR_BYTES as u64)
+        .and_then(|past| past.checked_sub(primary.volume_bytes))
+    else {
+        return Ok(None);
+    };
+    let Some(backup) = Ntfs::from_boot_sector(&sector, ByteOffset::new(start)) else {
+        return Ok(None);
+    };
+    if has_mft(src, backup)? {
+        return Ok(Some(backup));
+    }
+    Ok(None)
+}
+
+/// Bytes of a boot sector, primary or copy.
+const SECTOR_BYTES: usize = 512;
+
+/// Whether `geometry` puts a verifiable `FILE` record where it says the `$MFT`
+/// begins.
+///
+/// Record 0 of any `$MFT` is `$MFT` itself, so a volume that is there has one
+/// here. Unreadable is not confirmation: a geometry that cannot be checked is
+/// one that must not be acted on.
+fn has_mft<R: Read + Seek>(src: &mut R, geometry: Ntfs) -> Result<bool, FsError> {
+    let want = usize::try_from(geometry.record_size.max(DEFAULT_RECORD_SIZE)).unwrap_or(usize::MAX);
+    let mut buf = Vec::new();
+    if !read_at(src, geometry.mft_offset.get(), want, &mut buf)? {
+        return Ok(false);
+    }
+    Ok(is_plausible_record(&buf))
+}
+
+/// Extents of the named `$DATA` stream `stream` in a raw `FILE` record.
+///
+/// The record's own parser takes the *unnamed* `$DATA`, which is a file's
+/// content; an alternate stream is a separate attribute of the same kind,
+/// distinguished only by carrying a name. `None` when the record does not
+/// parse or has no such stream.
+fn named_stream_extents(raw: &[u8], stream: &str, geom: &Ntfs) -> Option<Vec<ByteRange>> {
+    if raw.get(..4)? != FILE_MAGIC {
+        return None;
+    }
+    let mut record = raw.to_vec();
+    apply_fixups(&mut record)?;
+
+    let attrs_at = usize::from(u16_le(&record, 20)?);
+    let used = usize::try_from(u32_le(&record, 24)?).ok()?;
+    if used > record.len() || attrs_at >= used {
+        return None;
+    }
+
+    let mut at = attrs_at;
+    for _ in 0..MAX_ATTRS {
+        let kind = u32_le(&record, at)?;
+        if kind == ATTR_END {
+            break;
+        }
+        let len = usize::try_from(u32_le(&record, at + 4)?).ok()?;
+        if len < 16 || at.checked_add(len)? > used {
+            return None;
+        }
+        let attr = &record[at..at + len];
+        if kind == ATTR_DATA {
+            // Attribute name: length in characters at offset 9, offset to it
+            // at 10. Both are medium-derived, so both are bounds-checked.
+            let name_chars = usize::from(*attr.get(9)?);
+            let name_at = usize::from(u16_le(attr, 10)?);
+            if name_chars > 0
+                && let Some(raw_name) = attr.get(name_at..name_at.checked_add(name_chars * 2)?)
+                && utf16le_name(raw_name, MAX_NAME_CHARS).as_deref() == Some(stream)
+                && *attr.get(8)? != 0
+            {
+                // Non-resident: a journal of any size is never resident.
+                let real_size = u64_le(attr, 48)?;
+                let runs_at = usize::from(u16_le(attr, 32)?);
+                let runs = decode_runs(attr.get(runs_at..)?)?;
+                return Runs { runs, real_size }.extents(geom);
+            }
+        }
+        at = at.checked_add(len)?;
+    }
+    None
+}
+
+/// A non-resident stream's run list and the bytes it really holds.
+struct Runs {
+    runs: Vec<Run>,
+    real_size: u64,
+}
+
+impl Runs {
+    /// Absolute extents, sparse runs contributing none.
+    fn extents(&self, geom: &Ntfs) -> Option<Vec<ByteRange>> {
+        let mut extents = Vec::with_capacity(self.runs.len());
+        let mut remaining = self.real_size;
+        for &run in &self.runs {
+            let bytes = run.clusters.checked_mul(geom.cluster_bytes)?.min(remaining);
+            if let Some(lcn) = run.lcn {
+                let start = geom
+                    .volume_offset
+                    .checked_add(lcn.checked_mul(geom.cluster_bytes)?)?;
+                extents.push(ByteRange::new(start, bytes));
+            }
+            remaining = remaining.saturating_sub(bytes);
+        }
+        Some(extents)
+    }
+}
+
+impl Ntfs {
+    /// Reads this volume's `$UsnJrnl:$J` change journal, when it survived.
+    ///
+    /// The journal is what dates a deletion. Nothing else on an NTFS volume
+    /// records *when* a file was removed — a `FILE` record keeps the times the
+    /// file was created and last written, not the moment it stopped existing —
+    /// so a batch of files deleted in one action is recognisable here and
+    /// nowhere else: hundreds of entries sharing a timestamp.
+    ///
+    /// It names files and dates events. It never produces an extent, and
+    /// nothing here can promote a recovery: an event is evidence that a file
+    /// was deleted, not evidence that its bytes are still there
+    /// (`A-CONFIDENCE-HONEST`).
+    ///
+    /// Returns an empty list when the volume has no journal, when it was
+    /// trimmed to nothing, or when the `$MFT` no longer describes it.
+    ///
+    /// # Errors
+    ///
+    /// Fails only on I/O faults; a record that does not parse is skipped.
+    pub fn change_journal<R: Read + Seek>(
+        &self,
+        src: &mut R,
+    ) -> Result<Vec<JournalDeletion>, FsError> {
+        let record_len = self.record_size as usize;
+        let mut buf = Vec::new();
+        if !read_at(src, self.mft_offset.get(), record_len, &mut buf)? {
+            return Ok(Vec::new());
+        }
+        let Some(mft) = Record::parse(&buf.clone(), self.mft_offset.get()) else {
+            return Ok(Vec::new());
+        };
+        let mft_extents = mft
+            .data_extents(self)
+            .unwrap_or_else(|| vec![ByteRange::new(self.mft_offset, 0)]);
+
+        let Some(journal) = self.find_journal(src, &mft_extents, &mut buf)? else {
+            return Ok(Vec::new());
+        };
+        let raw = Self::read_journal_tail(src, &journal)?;
+
+        Ok(usn_deletions(&raw)
+            .into_iter()
+            .filter_map(|event| {
+                // An event names a record number; a recovery is identified by
+                // where its record sat. They meet through this volume's own
+                // geometry, and an event whose record number does not resolve
+                // names nothing rather than naming by coincidence.
+                let at = event
+                    .mft_record
+                    .checked_mul(u64::from(self.record_size))
+                    .and_then(|offset| self.mft_offset.checked_add(offset))?;
+                Some(JournalDeletion {
+                    event,
+                    source_object: at.get(),
+                })
+            })
+            .collect())
+    }
+
+    /// Extents of `$UsnJrnl:$J`, found by walking the `$MFT` for the file.
+    fn find_journal<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        mft_extents: &[ByteRange],
+        buf: &mut Vec<u8>,
+    ) -> Result<Option<Vec<ByteRange>>, FsError> {
+        let record_len = self.record_size as usize;
+        for extent in mft_extents {
+            let mut at = extent.start.get();
+            let end = at.saturating_add(extent.len);
+            while at.saturating_add(record_len as u64) <= end {
+                if !read_at(src, at, record_len, buf)? {
+                    break;
+                }
+                if Record::parse(buf, at)
+                    .is_some_and(|record| record.name.as_deref() == Some(JOURNAL_FILE))
+                    && let Some(extents) = named_stream_extents(buf, JOURNAL_STREAM, self)
+                    && !extents.is_empty()
+                {
+                    return Ok(Some(extents));
+                }
+                at = at.saturating_add(record_len as u64);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reads at most [`MAX_JOURNAL_BYTES`] from the end of the journal.
+    ///
+    /// The end is where the newest records are, and a journal Windows has been
+    /// trimming has nothing but zeroes at its front.
+    fn read_journal_tail<R: Read + Seek>(
+        src: &mut R,
+        extents: &[ByteRange],
+    ) -> Result<Vec<u8>, FsError> {
+        let total: u64 = extents
+            .iter()
+            .fold(0, |sum, extent| sum.saturating_add(extent.len));
+        let skip = total.saturating_sub(MAX_JOURNAL_BYTES);
+        let mut raw = Vec::new();
+        let mut passed = 0_u64;
+        let mut chunk = Vec::new();
+        for extent in extents {
+            let end = passed.saturating_add(extent.len);
+            if end <= skip {
+                passed = end;
+                continue;
+            }
+            let from = skip.saturating_sub(passed);
+            let want = extent.len.saturating_sub(from);
+            let want = usize::try_from(want).unwrap_or(usize::MAX);
+            if read_at(
+                src,
+                extent.start.get().saturating_add(from),
+                want,
+                &mut chunk,
+            )? {
+                raw.extend_from_slice(&chunk);
+            }
+            passed = end;
+        }
+        Ok(raw)
+    }
+}
+
 /// Whether `raw` is a `FILE` record whose update-sequence array verifies.
 ///
 /// The residue sweep uses this to recognise orphaned records by internal

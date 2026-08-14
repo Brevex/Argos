@@ -53,6 +53,41 @@ impl Default for Options {
     }
 }
 
+/// How far an acquisition has got.
+///
+/// Two passes with different characters, so they count different things: the
+/// sweep's denominator is the medium, the refinement's is only what the sweep
+/// could not read. One figure spanning both would need an exchange rate
+/// between a healthy sector and a dying one.
+///
+/// A run over a terabyte takes hours, and a stage that emits nothing is
+/// indistinguishable from one that has stopped
+/// (`docs/defects/01-reassembly-unbounded.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Progress {
+    /// Sequential sweep: `done` of `total` sectors passed.
+    Swept {
+        /// Sectors the sweep has passed.
+        done: u64,
+        /// Sectors the medium holds.
+        total: u64,
+    },
+    /// Refinement: `done` of `total` suspect sectors revisited one by one.
+    Refined {
+        /// Suspect sectors revisited.
+        done: u64,
+        /// Suspect sectors the sweep left behind.
+        total: u64,
+    },
+}
+
+/// Progress reports one pass will emit, at most.
+///
+/// A medium of two billion sectors must not produce two billion callbacks
+/// (`M-LOG-OVERHEAD`); at this cap a bar still moves in steps too small for an
+/// eye to catch.
+const PROGRESS_STEPS: u64 = 200;
+
 /// Outcome of an acquisition: how much was recovered and exactly what was not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
@@ -152,6 +187,10 @@ impl Error for AcquireError {
 /// image is written from byte 0 of `dest`; `dest` is rewound before the sweep and
 /// all later seeks are absolute.
 ///
+/// `progress` is called as each pass advances, at most [`PROGRESS_STEPS`] times
+/// per pass. It reports the shape of the work and nothing about its content
+/// (`A-NO-CONTENT-IN-LOGS`).
+///
 /// # Errors
 ///
 /// Fails only when writing or seeking `dest` fails; source damage is reported, not
@@ -161,7 +200,12 @@ impl Error for AcquireError {
 ///
 /// Panics if `options` sets a sweep chunk whose byte size does not fit `usize`
 /// for this medium's sector size — an absurd configuration is a caller bug.
-pub fn run<S, W>(src: &mut S, dest: &mut W, options: Options) -> Result<Report, AcquireError>
+pub fn run<S, W>(
+    src: &mut S,
+    dest: &mut W,
+    options: Options,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<Report, AcquireError>
 where
     S: BlockSource,
     W: Write + Seek,
@@ -184,6 +228,7 @@ where
 
     // Pass 1: sequential sweep.
     dest.seek(SeekFrom::Start(0))?;
+    let sweep_stride = stride(sector_count);
     let mut lba = Lba::new(0);
     while lba.get() < sector_count {
         let sectors = options.chunk_sectors.min(sector_count - lba.get());
@@ -201,10 +246,25 @@ where
         lba = lba.checked_add(sectors).unwrap_or_else(|| {
             panic!("sweep position {lba}+{sectors} overflowed past sector count {sector_count}")
         });
+        let done = lba.get();
+        if done.is_multiple_of(sweep_stride) || done >= sector_count {
+            progress(Progress::Swept {
+                done,
+                total: sector_count,
+            });
+        }
     }
 
     // Pass 2: refine each suspect chunk sector by sector.
     let mut unreadable = Vec::new();
+    // The denominator is what the sweep could not read, not the medium: a disk
+    // with one bad chunk and one with a thousand spend very different amounts
+    // of time here, and only this number predicts which.
+    let suspect_sectors: u64 = suspects
+        .iter()
+        .fold(0, |sum, range| sum.saturating_add(range.sectors));
+    let refine_stride = stride(suspect_sectors);
+    let mut refined = 0_u64;
     let sector_buf = &mut buf[..sector_bytes];
     for suspect in suspects {
         for step in 0..suspect.sectors {
@@ -231,6 +291,13 @@ where
                 }
                 Err(_) => push_merged(&mut unreadable, sector),
             }
+            refined += 1;
+            if refined.is_multiple_of(refine_stride) || refined >= suspect_sectors {
+                progress(Progress::Refined {
+                    done: refined,
+                    total: suspect_sectors,
+                });
+            }
         }
     }
     dest.seek(SeekFrom::End(0))?;
@@ -240,6 +307,11 @@ where
         sector_count,
         unreadable,
     })
+}
+
+/// Sectors between two progress reports over a pass of `total`, never zero.
+fn stride(total: u64) -> u64 {
+    total.div_ceil(PROGRESS_STEPS).max(1)
 }
 
 /// Appends `sector` to `runs`, extending the last run when adjacent. Sectors

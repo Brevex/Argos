@@ -61,6 +61,18 @@ pub struct Manifest {
     /// How triage ran over this scan, when the caller reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage: Option<TriageRecord>,
+    /// What the run reached and what it left behind, when the caller reported
+    /// it. This is what separates "the medium held nothing more" from "the run
+    /// did not look" (A-CONFIDENCE-HONEST).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageRecord>,
+    /// Volumes the run located, current and residual.
+    ///
+    /// A medium re-formatted more than once carries the anchors of the
+    /// filesystems that came before, and which of them were found is what
+    /// decides whether their metadata could be read at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<VolumeRecord>,
     /// One record per fragmentation point carving localized.
     ///
     /// Where the search can be picked up without sweeping the medium again.
@@ -71,6 +83,83 @@ pub struct Manifest {
     pub fragmentation: Vec<FragmentRecord>,
     /// One record per recovered artifact.
     pub artifacts: Vec<ArtifactRecord>,
+}
+
+/// What a run reached, and what it stopped short of.
+///
+/// Every field here is a count the run already keeps; recording them is what
+/// makes the difference between a recovery that failed and one that was never
+/// attempted answerable after the fact, from the manifest alone. Without them
+/// the only account of a scan's own reach is its console output, which a
+/// window discards.
+///
+/// Plain numbers rather than the engine's own vocabulary, like every other
+/// record here: this crate writes the manifest and depends on nothing that
+/// recovers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageRecord {
+    /// Bytes of the medium the sweep covered.
+    pub bytes_swept: u64,
+    /// Findings dropped because an identical content hash was already stored.
+    pub duplicates: u64,
+    /// Findings whose claimed bytes could not be read back, so they were
+    /// dropped rather than reported from whatever was there.
+    pub unrecoverable: u64,
+    /// Findings dropped because their bytes lie in a range the medium refused.
+    ///
+    /// Their content is unknown and nothing was fabricated for it, but the
+    /// signature that started them was real: a high count here means damage
+    /// cost recoveries, not that the medium held nothing.
+    pub dropped_unreadable: u64,
+    /// Artifacts recognised, recorded and deliberately not written because
+    /// they fell under the run's size floor. Each is in `artifacts` with its
+    /// extents and dimensions, so a rerun with a lower floor produces them.
+    pub omitted_assets: u64,
+    /// Images reported as the part of themselves that decodes.
+    pub partial_prefixes: u64,
+    /// Broken candidates reassembly was offered.
+    pub reassembly_attempted: u64,
+    /// Images recovered by reassembling fragments.
+    pub reassembled: u64,
+    /// Broken candidates the search left alone because the frame declares a
+    /// picture below the size floor. Not lost — a run with a lower floor
+    /// searches them.
+    pub reassembly_skipped_small: u64,
+    /// Deletion events read from the volumes' change journals.
+    ///
+    /// Names and moments, never extents. A run of artifacts sharing one
+    /// `deleted_unix` is a batch deletion — files removed in one action, which
+    /// nothing else on an NTFS volume records.
+    pub journal_deletions: u64,
+    /// Residual `FILE`-record regions that could not be attributed to a
+    /// located volume, so their extents could not be resolved.
+    ///
+    /// These are run lists — the exact map of a deleted file's fragments —
+    /// that survived a re-format and could not be read for want of the volume
+    /// geometry they are counted against. They are counted, never guessed at.
+    pub unattributed_residue: u64,
+    /// Ceilings the run reached, named. Each means it looked at less than it
+    /// set out to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ceilings: Vec<String>,
+}
+
+/// One filesystem volume a run located.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeRecord {
+    /// Filesystem family detected at the anchor, as its canonical name.
+    pub kind: String,
+    /// `current` when the partition table lists it, `residual` when only the
+    /// residue sweep found it — the anchor of a filesystem an earlier format
+    /// left behind.
+    pub origin: String,
+    /// Where the volume starts on the medium.
+    pub offset: u64,
+    /// Length the anchor claims, capped at the medium.
+    pub length: u64,
+    /// Bytes in the unit this filesystem allocates in. Zero when the anchor
+    /// did not state a usable one.
+    pub allocation_bytes: u64,
 }
 
 /// One image that started decoding on the medium and stopped.
@@ -260,6 +349,14 @@ pub struct ArtifactRecord {
     /// Unix epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_unix: Option<i64>,
+    /// When a change journal recorded this file being deleted, in seconds
+    /// since the Unix epoch. Absent when no journal named it.
+    ///
+    /// The only timestamp about the *removal* rather than about the file. A
+    /// run of artifacts sharing this moment is a batch deletion — files
+    /// removed in one action, which nothing else on a volume records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_unix: Option<i64>,
     /// File name recovered from filesystem metadata, when one survived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovered_name: Option<String>,
@@ -305,6 +402,20 @@ pub struct ArtifactRecord {
     /// count of neighbours, never a verdict about this artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub same_size_neighbours: Option<u32>,
+    /// Where this artifact stands in a list, named by the strongest fact that
+    /// put it there.
+    ///
+    /// A sort key, and only that. A recovery of a used disk writes hundreds of
+    /// thousands of artifacts and a few hundred photographs; without an order
+    /// the photographs are present and unreachable. Every stored artifact
+    /// carries one, the weakest is still one, and nothing is removed or hidden
+    /// by it (A-TRIAGE-NOT-VERDICT).
+    ///
+    /// Derived from fields recorded beside it — dimensions, camera, capture
+    /// date, same-size neighbours — so it can be recomputed from this record
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing: Option<String>,
     /// Perceptual hash of the decoded image, 16 hex digits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perceptual_hash: Option<String>,
@@ -485,10 +596,12 @@ impl Store {
                 .collect(),
             created_unix: artifact.timestamps.created.map(unix_seconds),
             modified_unix: artifact.timestamps.modified.map(unix_seconds),
+            deleted_unix: artifact.deleted.map(unix_seconds),
             recovered_name: artifact.recovered_name.map(str::to_owned),
             source_object: artifact.source_object,
             parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
             sha256,
+            standing: None,
             same_size_neighbours: None,
             triage_label: None,
             triage_decided_by: None,
@@ -580,6 +693,7 @@ impl Store {
                 .collect(),
             created_unix: artifact.timestamps.created.map(unix_seconds),
             modified_unix: artifact.timestamps.modified.map(unix_seconds),
+            deleted_unix: artifact.deleted.map(unix_seconds),
             recovered_name: artifact.recovered_name.map(str::to_owned),
             source_object: artifact.source_object,
             parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
@@ -587,12 +701,31 @@ impl Store {
             written: false,
             triage_label: None,
             triage_decided_by: None,
+            standing: None,
             same_size_neighbours: None,
             perceptual_hash: None,
             near_duplicate_of: None,
             preview: None,
             omitted_because: Some(reason.to_owned()),
         });
+    }
+
+    /// Records where each named artifact stands in a list.
+    ///
+    /// Annotation only, like the triage labels and the neighbour counts: it
+    /// adds a sort key to records already written and can remove nothing
+    /// (A-TRIAGE-NOT-VERDICT). A standing for an artifact this store never
+    /// saved is dropped rather than creating a record.
+    pub fn annotate_standings(&mut self, standings: &[(String, String)]) {
+        for (sha256, standing) in standings {
+            if let Some(record) = self
+                .records
+                .iter_mut()
+                .find(|record| record.sha256 == *sha256)
+            {
+                record.standing = Some(standing.clone());
+            }
+        }
     }
 
     /// Records how many same-sized neighbours each named artifact was found
@@ -671,6 +804,8 @@ impl Store {
             rejected_candidates: summary.rejected_candidates,
             unreadable: summary.unreadable.to_vec(),
             triage: summary.triage.cloned(),
+            coverage: summary.coverage.cloned(),
+            volumes: summary.volumes.to_vec(),
             fragmentation: summary.fragmentation.to_vec(),
             artifacts: std::mem::take(&mut self.records),
         };
@@ -732,6 +867,10 @@ pub struct Summary<'a> {
     pub unreadable: &'a [ExtentRecord],
     /// How triage ran, when the caller has anything to say about it.
     pub triage: Option<&'a TriageRecord>,
+    /// What the run reached and what it stopped short of.
+    pub coverage: Option<&'a CoverageRecord>,
+    /// Volumes located, current and residual.
+    pub volumes: &'a [VolumeRecord],
     /// Fragmentation points, so a later run can start from them.
     pub fragmentation: &'a [FragmentRecord],
 }

@@ -35,6 +35,7 @@ fn artifact<'a>(extents: &'a [ByteRange], length: u64, sha256: &str) -> Artifact
         expected_length: None,
         sha256: digest(sha256),
         timestamps: argos_core::Timestamps::default(),
+        deleted: None,
         recovered_name: None,
         source_object: None,
         parent: None,
@@ -91,6 +92,23 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
         offset: 4096,
         length: 512,
     }];
+    // The run's own account of its reach, which is what separates a medium
+    // that held nothing more from a run that stopped short of looking.
+    let coverage = argos_report::CoverageRecord {
+        bytes_swept: 1 << 20,
+        dropped_unreadable: 2,
+        omitted_assets: 11,
+        unattributed_residue: 5,
+        ceilings: vec!["reassembly decode budget".to_owned()],
+        ..argos_report::CoverageRecord::default()
+    };
+    let volumes = [argos_report::VolumeRecord {
+        kind: "ntfs".to_owned(),
+        origin: "residual".to_owned(),
+        offset: 1_048_576,
+        length: 1 << 30,
+        allocation_bytes: 4096,
+    }];
     let manifest_path = store
         .finish(Summary {
             tool_version: "9.9.9",
@@ -99,6 +117,8 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
             rejected_candidates: 7,
             unreadable: &unreadable,
             triage: None,
+            coverage: Some(&coverage),
+            volumes: &volumes,
             fragmentation: &[],
         })
         .expect("manifest");
@@ -117,6 +137,18 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
     assert_eq!(json["artifacts"][0]["recovered_name"], "holiday.png");
     assert_eq!(json["artifacts"][0]["source_object"], 77);
     assert_eq!(json["scan_state"], "finished");
+    // The run's reach, so a reader can tell a medium that held nothing from a
+    // run that stopped short of looking. Each of these was previously visible
+    // only on a console the window discards.
+    assert_eq!(json["coverage"]["omitted_assets"], 11);
+    assert_eq!(json["coverage"]["dropped_unreadable"], 2);
+    assert_eq!(json["coverage"]["unattributed_residue"], 5);
+    assert_eq!(json["coverage"]["ceilings"][0], "reassembly decode budget");
+    // And the volumes it found them among: a residual anchor is the trace of a
+    // filesystem an earlier format left behind.
+    assert_eq!(json["volumes"][0]["kind"], "ntfs");
+    assert_eq!(json["volumes"][0]["origin"], "residual");
+    assert_eq!(json["volumes"][0]["offset"], 1_048_576);
     // A short recovery states what is missing rather than reading as whole.
     assert_eq!(json["artifacts"][0]["expected_length"], 6);
     assert_eq!(json["artifacts"][0]["missing_bytes"], 2);
@@ -200,6 +232,8 @@ fn recovered_files_are_given_to_the_account_that_asked() {
             rejected_candidates: 0,
             unreadable: &[],
             triage: None,
+            coverage: None,
+            volumes: &[],
             fragmentation: &[],
         })
         .expect("write the manifest");
