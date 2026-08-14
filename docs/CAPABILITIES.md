@@ -34,8 +34,8 @@ is one sample: the ordering between stages is dependable, the absolute figures a
 | C04 | Report each medium's class (HDD/SSD/NVMe), TRIM state, model and current mounts | CLI, GUI | instant |
 | C05 | List shadow copies, where the platform has them | CLI, GUI | instant |
 | C06 | Warn that a medium is mounted writable, or that the target is one partition rather than a disk | CLI, GUI | — |
-| C07 | Copy a medium to a raw image in multiple passes, skipping failing regions and revisiting each sector by sector | CLI | hours, once |
-| C08 | Zero-fill what stayed unreadable and list it, never presenting those zeroes as data that was read | CLI | — |
+| C07 | Copy a medium to a raw image in multiple passes, skipping failing regions and revisiting each sector by sector | CLI, GUI | hours, once |
+| C08 | Zero-fill what stayed unreadable and list it, never presenting those zeroes as data that was read | CLI, GUI | — |
 
 **Never**: a write path to the source medium. Devices are opened read-only at the lowest layer.
 
@@ -125,8 +125,8 @@ and what was only recorded are counted apart.
 | | Count |
 | --- | --- |
 | Reachable from the command line | **47** — every one except C48 and C49, which are the window itself |
-| Reachable from the window | **39** |
-| Reachable from the command line but not the window | **10** — C07, C08, C21, C22, C34, C37, C38, C40, C41, C47 |
+| Reachable from the window | **41** |
+| Reachable from the command line but not the window | **8** — C21, C22, C34, C37, C38, C40, C41, C47 |
 | Expressible on the wire but called by no client | **1** — C37 |
 
 The command line reaches every capability the tool has, headless, before any interface exposes it

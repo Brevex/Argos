@@ -13,7 +13,16 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-import type { Exported, Gallery, Inventory, ScanRequest, ScanStarted, Summary } from './dto';
+import type {
+  Acquired,
+  AcquireStarted,
+  Exported,
+  Gallery,
+  Inventory,
+  ScanRequest,
+  ScanStarted,
+  Summary,
+} from './dto';
 
 /** The Tauri event every engine notification arrives on. */
 const ENGINE_EVENT = 'argos://engine';
@@ -27,6 +36,8 @@ export type EngineMessage =
   | { method: 'state'; params: { state: string } }
   | { method: 'unreadable'; params: { regions: number; bytes: number } }
   | { method: 'warning'; params: { text: string } }
+  | { method: 'acquireProgress'; params: { pass: string; done: number; total: number } }
+  | { method: 'acquired'; params: Acquired }
   | { method: 'finished'; params: Summary };
 
 /**
@@ -122,6 +133,21 @@ export function exportCopy(
   standing: string | null,
 ): Promise<Exported> {
   return invoke('export_copy', { session, to, standing });
+}
+
+/**
+ * Copies a medium into a raw image at `to`.
+ *
+ * A disk worth recovering from is a disk worth reading exactly once: every scan
+ * reads the whole surface, and on a failing medium each pass is one it may not
+ * survive. This does not scan the image afterwards — copying and recovering are
+ * two jobs, asked for one at a time.
+ *
+ * Resolves once the medium's size is known; progress arrives on the event
+ * channel.
+ */
+export function acquireStart(source: string, to: string): Promise<AcquireStarted> {
+  return invoke('acquire_start', { source, to });
 }
 
 /** Stops the running scan, keeping everything recovered so far. */

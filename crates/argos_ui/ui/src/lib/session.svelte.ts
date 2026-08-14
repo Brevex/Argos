@@ -14,7 +14,7 @@
  * would overstate the result (`A-CONFIDENCE-HONEST`).
  */
 
-import type { Summary } from './dto';
+import type { Acquired, Summary } from './dto';
 import { onEngineMessage, type EngineMessage } from './ipc';
 
 /** What the window is doing, as far as the user is concerned. */
@@ -50,6 +50,10 @@ const STAGE_NAMES: Record<string, string> = {
   report: 'Writing recovered images',
   preview: 'Rendering previews',
   triage: 'Labelling recovered images',
+  // The two passes of an acquisition. Named the same way, because to a person
+  // watching they are the same thing: the machine is working through a disk.
+  sweep: 'Copying the disk',
+  refine: 'Retrying the sectors that failed',
 };
 
 /** Progress of one stage, as last reported. */
@@ -61,6 +65,18 @@ interface StageProgress {
 class Session {
   /** Lifecycle, as the engine last reported it. */
   phase = $state<Phase>('idle');
+
+  /**
+   * Which job is running: recovering images, or copying the disk to an image.
+   *
+   * They share a screen and a progress ring because to a person waiting they
+   * are the same thing — the machine is working through a disk — but what they
+   * produce is different, and what is shown at the end has to say which.
+   */
+  job = $state<'scan' | 'acquire'>('scan');
+
+  /** What an acquisition produced, once one has finished. */
+  acquired = $state<Acquired | null>(null);
 
   /** One line naming the source being scanned, as the engine described it. */
   source = $state('');
@@ -202,7 +218,9 @@ class Session {
   }
 
   /** Resets everything a new run replaces. */
-  begin(source: string): void {
+  begin(source: string, job: 'scan' | 'acquire' = 'scan'): void {
+    this.job = job;
+    this.acquired = null;
     this.phase = 'scanning';
     this.source = source;
     this.stage = '';
@@ -267,6 +285,20 @@ class Session {
         // every time rather than latched.
         if (message.params.state === 'paused') this.paused = true;
         if (message.params.state === 'running') this.paused = false;
+        break;
+      case 'acquireProgress': {
+        const { pass, done, total } = message.params;
+        this.stage = pass;
+        this.work = { done, total };
+        break;
+      }
+      case 'acquired':
+        // Stopped here rather than at the next tick, so the time shown is the
+        // copy's and not the copy's plus part of a poll.
+        this.now = Date.now();
+        this.stage = '';
+        this.acquired = message.params;
+        this.phase = 'done';
         break;
       case 'warning':
         this.warnings = [...this.warnings, message.params.text];

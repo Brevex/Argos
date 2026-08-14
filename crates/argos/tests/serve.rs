@@ -112,6 +112,20 @@ impl Engine {
 
     /// Reads messages until the scan reports it finished, collecting the
     /// method names seen on the way.
+    /// Reads until the notification named `method` arrives, and returns it.
+    ///
+    /// Everything before it is discarded, which is what a caller waiting on a
+    /// terminal message wants: the progress ahead of it is the point of the
+    /// channel, not of the assertion.
+    fn wait_for(&mut self, method: &str) -> serde_json::Value {
+        loop {
+            let message = self.read();
+            if message["method"].as_str() == Some(method) {
+                return message;
+            }
+        }
+    }
+
     fn drain_until_finished(&mut self) -> (Vec<String>, serde_json::Value) {
         let mut seen = Vec::new();
         loop {
@@ -331,6 +345,90 @@ fn a_scan_over_the_wire_recovers_exactly_what_the_command_line_does() {
             "{name} differs between the two paths"
         );
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn an_acquisition_over_the_wire_copies_the_medium_and_says_what_it_read() {
+    // A disk worth recovering from is a disk worth reading exactly once. The
+    // copy has to be bit-identical, and the account of it has to be the
+    // engine's own — a client that counted sectors itself would be describing a
+    // read it did not do.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    let planted = fixture(&image);
+    let copy = dir.path().join("copy.img");
+
+    let mut engine = Engine::spawn();
+    engine.handshake();
+    let started = engine.call(
+        "acquire.start",
+        &serde_json::json!({ "source": image, "to": copy }),
+    );
+    let sectors = started["result"]["sectors"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the reply must name the medium's size: {started}"));
+    assert_eq!(
+        sectors,
+        planted.len() as u64 / 512,
+        "the size reported must be the medium's"
+    );
+
+    let acquired = engine.wait_for("acquired");
+    assert_eq!(acquired["params"]["recovered"], sectors);
+    assert_eq!(acquired["params"]["unreadableRegions"], 0);
+    assert_eq!(acquired["params"]["complete"], true);
+
+    assert_eq!(
+        std::fs::read(&copy).expect("the acquired image"),
+        planted,
+        "an acquisition that is not bit-identical is not evidence"
+    );
+
+    // And the image it produced is a medium in its own right: scanning it must
+    // reach the same artifacts as scanning the original.
+    let session = dir.path().join("session");
+    engine.call(
+        "scan.start",
+        &serde_json::json!({
+            "source": copy, "out": session,
+            "filesystem": true, "carving": true, "reassembly": true,
+            "triage": false, "minLongSide": 0, "previews": false,
+        }),
+    );
+    engine.drain_until_finished();
+    let results = engine.call("scan.results", &serde_json::json!({ "session": session }));
+    assert_eq!(
+        results["result"]["artifacts"].as_array().map(Vec::len),
+        Some(2),
+        "the copy must recover what the original does: {results}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn acquiring_onto_a_path_that_already_exists_is_refused_by_the_call() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    fixture(&image);
+    let copy = dir.path().join("copy.img");
+    std::fs::write(&copy, b"an earlier acquisition").expect("write the existing image");
+
+    let mut engine = Engine::spawn();
+    engine.handshake();
+    let refused = engine.call(
+        "acquire.start",
+        &serde_json::json!({ "source": image, "to": copy }),
+    );
+    assert!(
+        refused["error"].is_object(),
+        "an existing destination must fail the call, not a notification: {refused}"
+    );
+    assert_eq!(
+        std::fs::read(&copy).expect("the earlier image"),
+        b"an earlier acquisition",
+        "the earlier acquisition must survive untouched"
+    );
 }
 
 #[test]

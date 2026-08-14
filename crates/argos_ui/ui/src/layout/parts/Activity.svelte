@@ -43,6 +43,16 @@
         return percent === null ? `${session.doing}…` : `${session.doing} — ${percent}%`;
       }
       case 'done': {
+        // An acquisition recovered no images and examined no candidates; it
+        // copied sectors. Saying otherwise would describe a job that did not
+        // happen (`A-CONFIDENCE-HONEST`).
+        if (session.job === 'acquire') {
+          const copy = session.acquired;
+          if (copy === null) return 'Finished — the disk was copied';
+          return copy.complete
+            ? 'Finished — every sector was read into the image'
+            : `Finished — ${count(copy.sectors - copy.recovered)} sectors in ${count(copy.unreadableRegions)} runs could not be read and are zero-filled in the image`;
+        }
         const examined = 'Finished — every candidate on the medium was examined';
         // What was left unwritten is said here or nowhere. The manifest in the
         // destination folder records every one of them with its extents and
@@ -54,9 +64,9 @@
       case 'cancelled':
         return 'Stopped early — what had been recovered was written, the rest was not examined';
       case 'failed':
-        return 'The scan failed';
+        return session.job === 'acquire' ? 'The copy failed' : 'The scan failed';
       default:
-        return 'Select a drive and a destination folder';
+        return 'Select a drive and a destination';
     }
   });
 
@@ -73,23 +83,42 @@
   </p>
 
   <div class="rings">
-    <Ring label="Scan" fraction={session.scanned} />
-    <Ring label="Recovery" fraction={session.recovered} />
+    {#if session.job === 'acquire'}
+      <Ring label="Copy" fraction={session.scanned} />
+    {:else}
+      <Ring label="Scan" fraction={session.scanned} />
+      <Ring label="Recovery" fraction={session.recovered} />
+    {/if}
   </div>
 
   <dl class="stats">
-    <div>
-      <dt>Images recovered</dt>
-      <dd>{count(session.artifacts)}</dd>
-    </div>
-    <div>
-      <dt>Data analyzed</dt>
-      <dd>{bytes(session.sweep.done)}</dd>
-    </div>
-    <div>
-      <dt>Data recovered</dt>
-      <dd>{bytes(session.stored)}</dd>
-    </div>
+    {#if session.job === 'acquire'}
+      <div>
+        <dt>Sectors copied</dt>
+        <dd>{count(session.acquired?.recovered ?? session.work.done)}</dd>
+      </div>
+      <div>
+        <dt>Sectors on the disk</dt>
+        <dd>{count(session.acquired?.sectors ?? session.work.total)}</dd>
+      </div>
+      <div>
+        <dt>Unreadable runs</dt>
+        <dd>{count(session.acquired?.unreadableRegions ?? 0)}</dd>
+      </div>
+    {:else}
+      <div>
+        <dt>Images recovered</dt>
+        <dd>{count(session.artifacts)}</dd>
+      </div>
+      <div>
+        <dt>Data analyzed</dt>
+        <dd>{bytes(session.sweep.done)}</dd>
+      </div>
+      <div>
+        <dt>Data recovered</dt>
+        <dd>{bytes(session.stored)}</dd>
+      </div>
+    {/if}
     <div>
       <dt>Elapsed</dt>
       <dd>{duration(session.elapsed)}</dd>

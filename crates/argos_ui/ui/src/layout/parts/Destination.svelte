@@ -1,49 +1,75 @@
 <script lang="ts">
   /**
-   * Block two: where recovered images are written.
+   * Block two: where the job's output is written.
+   *
+   * A recovery writes images into a folder; an acquisition writes one image
+   * file. Both are the same question — where does this go — so they are the
+   * same block rather than two, and only the picker and the words change.
    *
    * Required, and required for a reason the engine enforces rather than this
    * field: a destination inside the medium under analysis would write onto the
    * evidence, and the engine refuses that before it creates anything. Browsing
-   * to a folder here grants the window no filesystem access — the picker
-   * returns a path, and the path is a string like any other.
+   * here grants the window no filesystem access — the picker returns a path,
+   * and the path is a string like any other.
    */
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { open, save } from '@tauri-apps/plugin-dialog';
 
   import * as ipc from '../../lib/ipc';
 
   let {
     value,
     disabled,
+    kind = 'folder',
     onChange,
-  }: { value: string; disabled: boolean; onChange: (path: string) => void } = $props();
+  }: {
+    value: string;
+    disabled: boolean;
+    /** `folder` for recovered images, `image` for a disk copy. */
+    kind?: 'folder' | 'image';
+    onChange: (path: string) => void;
+  } = $props();
+
+  const words = $derived(
+    kind === 'image'
+      ? {
+          title: 'Image file',
+          hint: 'Choose where to write the copy — not on the drive being copied',
+          picker: 'Write the disk copy to',
+        }
+      : {
+          title: 'Destination folder',
+          hint: 'Choose a folder outside the drive being scanned',
+          picker: 'Destination folder',
+        },
+  );
 
   async function browse(): Promise<void> {
     // The window runs as an administrator, so a picker left to its own devices
     // opens in the administrator's home rather than in the home of the person
     // looking at it.
     const start = value !== '' ? value : await ipc.invokerHome().catch(() => '');
-    const picked = await open({
-      directory: true,
-      multiple: false,
-      title: 'Destination folder',
-      defaultPath: start === '' ? undefined : start,
-    });
+    const defaultPath = start === '' ? undefined : start;
+    // An acquisition names a file that must not exist yet, which is a save
+    // dialog; a recovery names a folder that must, which is an open dialog.
+    const picked =
+      kind === 'image'
+        ? await save({ title: words.picker, defaultPath })
+        : await open({ directory: true, multiple: false, title: words.picker, defaultPath });
     if (typeof picked === 'string') onChange(picked);
   }
 </script>
 
 <section>
-  <h2>Destination folder <span class="required">(required)</span></h2>
+  <h2>{words.title} <span class="required">(required)</span></h2>
 
   <div class="field" class:disabled>
     <input
       value={value}
       {disabled}
-      placeholder="Choose a folder outside the drive being scanned"
+      placeholder={words.hint}
       spellcheck="false"
       oninput={(event) => onChange(event.currentTarget.value)}
-      aria-label="Destination folder"
+      aria-label={words.title}
     />
     <button {disabled} onclick={browse}>Browse</button>
   </div>

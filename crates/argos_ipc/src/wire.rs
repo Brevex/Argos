@@ -107,6 +107,19 @@ pub enum Call {
         #[serde(default)]
         include_unwritten: bool,
     },
+    /// Copy a medium into a raw image, so the scan can read a file instead of
+    /// the disk.
+    ///
+    /// A scan reads the whole surface and every rerun reads it again; on a
+    /// failing medium each pass is one it may not survive. One acquisition at a
+    /// time per engine process, on the same terms as a scan.
+    #[serde(rename = "acquire.start")]
+    AcquireStart {
+        /// Block device or image file to copy, opened read-only.
+        source: String,
+        /// Path of the raw image to create. Must not already exist.
+        to: String,
+    },
     /// Copy artifacts out of a session directory, verifying each hash.
     #[serde(rename = "export.copy")]
     ExportCopy {
@@ -196,6 +209,8 @@ pub enum Reply {
     Results(Box<dto::Results>),
     /// Answer to `scan.gallery`.
     Page(Box<dto::Gallery>),
+    /// Answer to `acquire.start`.
+    Acquiring(dto::AcquireStarted),
     /// Answer to `export.copy`.
     Exported(dto::Exported),
     /// Answer to a call that produces nothing but success.
@@ -277,6 +292,11 @@ pub enum Notification {
     Unreadable(dto::Unreadable),
     /// Something the user should know before trusting the result.
     Warning(dto::Warning),
+    /// An acquisition covered more of the medium.
+    AcquireProgress(dto::AcquireProgress),
+    /// An acquisition ended; the image is on disk and this says what reached
+    /// it.
+    Acquired(dto::Acquired),
     /// The scan ended; its results are readable from the session directory.
     Finished(Box<dto::Summary>),
 }

@@ -35,12 +35,24 @@
   let busy = $state(false);
   let refreshing = $state(false);
   let settingsOpen = $state(false);
+  /**
+   * Which job the button runs.
+   *
+   * Two, and only two, because they are the two things this tool does to a
+   * disk: read it for images, or copy it so it never has to be read again.
+   * They are a choice rather than two screens — the drive and the destination
+   * are the same two questions either way.
+   */
+  let job = $state<'scan' | 'acquire'>('scan');
+  /** Where each job writes, kept apart so switching does not lose either. */
+  let imagePath = $state('');
   /** Session directory of the run that finished, and its previews folder. */
   let finished = $state<{ session: string; previewDir: string } | null>(null);
   /** The same, for the run in progress: promoted once the engine says done. */
   let pending: { session: string; previewDir: string } | null = null;
 
-  const ready = $derived(source !== '' && destination !== '' && !busy);
+  const target = $derived(job === 'acquire' ? imagePath : destination);
+  const ready = $derived(source !== '' && target !== '' && !busy);
 
   /**
    * The single button: what it says, and whether it can be pressed.
@@ -54,8 +66,8 @@
     session.stopping
       ? { label: 'Stopping…', enabled: false }
       : session.running
-        ? { label: 'Cancel', enabled: !busy }
-        : { label: 'Start scan', enabled: ready },
+        ? { label: 'Cancel', enabled: !busy && session.job === 'scan' }
+        : { label: job === 'acquire' ? 'Copy disk' : 'Start scan', enabled: ready },
   );
 
   /**
@@ -110,6 +122,15 @@
       // `argos scan <source> --out <destination>` runs, and one that has been
       // touched runs the same scan the equivalent flags would (`A-CLI-FIRST`).
       // Every field is a field of `ScanRequest`; nothing is decided here.
+      if (job === 'acquire') {
+        // Copying does not scan what it copied. Two jobs, asked for one at a
+        // time, so the person choosing to read a failing disk exactly once is
+        // not then made to read it again by the same button.
+        const copy = await ipc.acquireStart(source, imagePath);
+        finished = null;
+        session.begin(copy.source, 'acquire');
+        return;
+      }
       const started = await ipc.scanStart(settings.request(source, destination));
       finished = null;
       session.begin(started.source);
@@ -208,10 +229,40 @@
         onRefresh={() => void refresh()}
         onConfig={() => (settingsOpen = true)}
       />
+      <!--
+        The two things this tool does to a disk. A choice rather than two
+        screens: the drive and the destination are the same two questions
+        either way, and only the words on them change.
+      -->
+      <div class="job" role="group" aria-label="What to do with this drive">
+        <button
+          type="button"
+          class:on={job === 'scan'}
+          aria-pressed={job === 'scan'}
+          disabled={session.running}
+          onclick={() => (job = 'scan')}
+        >
+          <span class="what">Recover images</span>
+          <span class="why">Reads the drive and writes back what it finds.</span>
+        </button>
+        <button
+          type="button"
+          class:on={job === 'acquire'}
+          aria-pressed={job === 'acquire'}
+          disabled={session.running}
+          onclick={() => (job = 'acquire')}
+        >
+          <span class="what">Copy to an image</span>
+          <span class="why">
+            Reads the drive once into a file, so nothing has to read it again.
+          </span>
+        </button>
+      </div>
       <Destination
-        value={destination}
+        value={target}
+        kind={job === 'acquire' ? 'image' : 'folder'}
         disabled={session.running}
-        onChange={(path) => (destination = path)}
+        onChange={(path) => (job === 'acquire' ? (imagePath = path) : (destination = path))}
       />
     </div>
 
@@ -304,6 +355,52 @@
     border: 1px solid var(--form-pane-border);
     border-radius: var(--pane-radius);
     box-shadow: var(--form-pane-shadow);
+  }
+
+  /* Two cards, equal weight: neither job is the advanced one. */
+  .job {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .job button {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.14rem;
+    padding: 0.6rem 0.7rem;
+    text-align: left;
+    font: inherit;
+    color: var(--text);
+    background: var(--inset);
+    border: 1px solid var(--inset-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  .job button:hover:not(:disabled) {
+    background: var(--row-hover);
+  }
+
+  .job button.on {
+    background: var(--row-selected);
+    border-color: var(--row-selected-border);
+  }
+
+  .job button:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+
+  .job .what {
+    font-size: 0.82rem;
+  }
+
+  .job .why {
+    font-size: 0.7rem;
+    line-height: 1.35;
+    color: var(--text-dim);
   }
 
   /* The button row. `main` centres its children, so this keeps the pair

@@ -142,6 +142,27 @@ pub async fn scan_resume(shell: State<'_, Shell>) -> Result<(), String> {
     shell.call(Call::ScanResume, engine::done).await
 }
 
+/// Copies a medium into a raw image, so a scan can read a file instead of a
+/// disk.
+///
+/// A scan reads the whole surface, and every rerun reads it again. On a medium
+/// that is failing, each pass is one it may not survive — so a disk worth
+/// recovering from is a disk worth reading exactly once, and everything
+/// afterwards works from the copy.
+///
+/// This does not scan the image. Copying and recovering are two jobs, and the
+/// window asks for them one at a time.
+#[tauri::command]
+pub async fn acquire_start(
+    shell: State<'_, Shell>,
+    source: String,
+    to: String,
+) -> Result<dto::AcquireStarted, String> {
+    shell
+        .call(Call::AcquireStart { source, to }, engine::acquiring)
+        .await
+}
+
 /// Copies a session's artifacts out, verifying each hash on the way.
 ///
 /// `standing` is the same filter the gallery is showing, passed straight

@@ -83,6 +83,9 @@ struct Engine {
     ready: Mutex<bool>,
     /// The thread running the scan, kept so shutdown can wait for it.
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Whether an acquisition is under way. An acquisition holds the medium
+    /// exactly as a scan does, and this process reads one medium at a time.
+    acquiring: Arc<Mutex<bool>>,
 }
 
 impl Engine {
@@ -93,6 +96,7 @@ impl Engine {
             session: Arc::new(Mutex::new(None)),
             ready: Mutex::new(false),
             worker: Mutex::new(None),
+            acquiring: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -179,6 +183,9 @@ impl Engine {
                     })
                     .map_err(|err| (ErrorCode::InvalidParams, err.to_string()))
             }
+            Call::AcquireStart { source, to } => {
+                self.acquire_start(&source, &to).map(Reply::Acquiring)
+            }
             Call::ExportCopy {
                 session,
                 to,
@@ -202,6 +209,89 @@ impl Engine {
                 .map_err(|err| (ErrorCode::InvalidParams, format!("{err:#}")))
             }
         }
+    }
+
+    /// Copies a medium into a raw image, reporting each pass as it goes.
+    ///
+    /// The reply waits for the first progress report, because that is the first
+    /// moment the medium's size is known and a client needs a denominator
+    /// before it can draw anything. A failure before then — the image already
+    /// exists, the destination is a device, the source will not open — is the
+    /// reply instead, so the client is told by the call it made rather than by
+    /// a notification it has to correlate.
+    fn acquire_start(
+        &self,
+        source: &str,
+        to: &str,
+    ) -> Result<dto::AcquireStarted, (ErrorCode, String)> {
+        if self.lock_session().is_some() || self.is_acquiring() {
+            return Err((
+                ErrorCode::Busy,
+                "this engine process is already reading a medium".to_owned(),
+            ));
+        }
+        *self
+            .acquiring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+
+        let source = PathBuf::from(source);
+        let to = PathBuf::from(to);
+        // Taken before the paths move into the worker; both are what the caller
+        // named, and the reply repeats them back.
+        let described = source_line(&source);
+        let written_to = to.display().to_string();
+        let (sized_tx, sized_rx) = mpsc::sync_channel::<Result<u64, String>>(1);
+        let failed_tx = sized_tx.clone();
+
+        let wire = Arc::clone(&self.out);
+        let image = written_to.clone();
+        let acquiring = Arc::clone(&self.acquiring);
+        let worker = std::thread::spawn(move || {
+            let notice = Acquisition {
+                out: Arc::clone(&wire),
+                image,
+                sized: Mutex::new(Some(sized_tx)),
+            };
+            let outcome = crate::acquire::run(&source, &to, &notice);
+            *acquiring
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+            if let Err(err) = outcome {
+                let message = format!("{err:#}");
+                if failed_tx.try_send(Err(message.clone())).is_err() {
+                    wire.send(&Notification::Warning(dto::Warning { text: message }));
+                    wire.send(&Notification::State(dto::State {
+                        state: "failed".to_owned(),
+                    }));
+                }
+            }
+        });
+        *self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+
+        match sized_rx.recv() {
+            Ok(Ok(sectors)) => Ok(dto::AcquireStarted {
+                source: described,
+                to: written_to,
+                sectors,
+            }),
+            Ok(Err(message)) => Err((ErrorCode::ScanFailed, message)),
+            Err(_) => Err((
+                ErrorCode::ScanFailed,
+                "the acquisition stopped before it started".to_owned(),
+            )),
+        }
+    }
+
+    /// Whether an acquisition is running in this process.
+    fn is_acquiring(&self) -> bool {
+        *self
+            .acquiring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// One standing name from the wire, or `None` when the client sent none.
@@ -400,6 +490,65 @@ struct Events {
 impl ProgressSink for Events {
     fn emit(&self, event: ScanEvent) {
         self.pacer.emit(event);
+    }
+}
+
+/// One line naming the medium an acquisition is reading.
+///
+/// The path and nothing else: this is a device node or a file the caller
+/// already named, never a recovered file name (`A-NO-CONTENT-IN-LOGS`).
+fn source_line(source: &std::path::Path) -> String {
+    source.display().to_string()
+}
+
+/// Turns what an acquisition says into notifications.
+///
+/// No pacer: `argos_device::acquire` already caps what it reports to a couple
+/// of hundred callbacks per pass, so every one of them can go straight out.
+struct Acquisition {
+    out: Arc<Wire>,
+    /// Path of the image being written. The report says what was read, not
+    /// where it went, so the caller's own answer is carried here.
+    image: String,
+    /// Answers the `acquire.start` call, once, with the medium's size.
+    ///
+    /// Taken on the first progress report: that is the first moment the size is
+    /// known, and the client is waiting on it. `None` afterwards, so the reply
+    /// is sent once however many reports follow.
+    sized: Mutex<Option<mpsc::SyncSender<Result<u64, String>>>>,
+}
+
+impl crate::acquire::Notice for Acquisition {
+    fn progress(&self, progress: argos_device::acquire::Progress) {
+        use argos_device::acquire::Progress;
+        let (pass, done, total) = match progress {
+            Progress::Swept { done, total } => ("sweep", done, total),
+            Progress::Refined { done, total } => ("refine", done, total),
+        };
+        if let Some(sized) = self
+            .sized
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = sized.try_send(Ok(total));
+        }
+        self.out
+            .send(&Notification::AcquireProgress(dto::AcquireProgress {
+                pass: pass.to_owned(),
+                done,
+                total,
+            }));
+    }
+
+    fn finished(&self, report: &argos_device::acquire::Report) {
+        self.out.send(&Notification::Acquired(dto::Acquired {
+            image: self.image.clone(),
+            sectors: report.sector_count(),
+            recovered: report.recovered_sectors(),
+            unreadable_regions: report.unreadable().len() as u64,
+            complete: report.is_complete(),
+        }));
     }
 }
 

@@ -181,6 +181,65 @@ dto! {
 }
 
 dto! {
+    /// What a started acquisition tells its client before it copies anything.
+    pub struct AcquireStarted {
+        /// One line naming the medium being copied.
+        pub source: String,
+        /// Path of the raw image being written.
+        pub to: String,
+        /// Sectors the medium holds, so a client has a denominator from the
+        /// first frame.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub sectors: u64,
+    }
+}
+
+dto! {
+    /// How far an acquisition has got.
+    ///
+    /// Counted in sectors rather than bytes because that is the unit a medium
+    /// fails in: the sweep skips a failing region and the refinement revisits
+    /// it one sector at a time, and both are reported against the same
+    /// denominator.
+    pub struct AcquireProgress {
+        /// `sweep` for the sequential pass, `refine` for the sector-by-sector
+        /// revisit of what the sweep skipped.
+        pub pass: String,
+        /// Sectors this pass has covered.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub done: u64,
+        /// Sectors this pass has to cover.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub total: u64,
+    }
+}
+
+dto! {
+    /// What an acquisition produced.
+    ///
+    /// `recovered` is never presented as the whole medium when it is not:
+    /// whatever stayed unreadable is zero-filled in the image and counted here,
+    /// because those zeroes are placeholders and a client that showed them as
+    /// data would be reporting bytes that were never read
+    /// (`A-CONFIDENCE-HONEST`).
+    pub struct Acquired {
+        /// Path of the image that was written.
+        pub image: String,
+        /// Sectors the medium holds.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub sectors: u64,
+        /// Sectors actually read off the medium and into the image.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub recovered: u64,
+        /// Runs of sectors that stayed unreadable after both passes.
+        #[cfg_attr(feature = "bindings", ts(type = "number"))]
+        pub unreadable_regions: u64,
+        /// Whether every sector was read.
+        pub complete: bool,
+    }
+}
+
+dto! {
     /// A byte range, absolute in the medium.
     pub struct Extent {
         /// Offset of the range's first byte.
