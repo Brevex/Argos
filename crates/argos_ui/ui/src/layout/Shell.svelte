@@ -345,7 +345,27 @@
 <style>
   /* The frame. The system draws no decorations, so the edge, the corner and
      the shadow around this application are this rule and nothing else. */
+  /*
+   * The layout's own scale.
+   *
+   * Every measure that dominates the window's height is derived from the
+   * window's height, with a floor and a ceiling: the blocks shrink together as
+   * the window does, so the content fits at the smallest size the window can
+   * take and nothing ever has to scroll. `vh` rather than a media query
+   * because the frame is continuous — there is no size at which the layout
+   * becomes a different layout.
+   *
+   * These are the layout's, not a theme's. A theme decides colour, edge,
+   * corner, texture and typeface; where a control sits and how big it is are
+   * the same under all of them.
+   */
   .window {
+    --block-gap: clamp(0.5rem, 1.45vh, 1.1rem);
+    --pane-pad: clamp(0.65rem, 1.6vh, 1.2rem);
+    --row-height: clamp(2rem, 3.5vh, 2.7rem);
+    --ring-size: clamp(4.6rem, 14.5vh, 9.6rem);
+    --ring-gap: clamp(1.5rem, 7vw, 5.5rem);
+
     position: relative;
     display: flex;
     flex-direction: column;
@@ -374,9 +394,9 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 1.1rem;
+    gap: var(--block-gap);
     margin: 0 var(--window-inset) var(--window-inset);
-    padding: 1.35rem 2.3rem 1.5rem;
+    padding: var(--pane-pad) clamp(0.9rem, 3vw, 2.3rem);
     background: var(--main-surface);
     border: 1px solid var(--main-border);
     border-radius: var(--main-radius);
@@ -394,8 +414,8 @@
     flex: none;
     display: flex;
     flex-direction: column;
-    gap: 1.1rem;
-    padding: 1.2rem 1.375rem;
+    gap: var(--block-gap);
+    padding: var(--pane-pad) clamp(0.8rem, 2vw, 1.375rem);
     background: var(--scanlines), var(--form-pane);
     border: 1px solid var(--form-pane-border);
     border-radius: var(--pane-radius);
@@ -442,9 +462,12 @@
     font-size: 0.82rem;
   }
 
+  /* Two lines' worth whether the typeface takes one or two: a theme changes
+     the face, never where a control sits (`themes/contract.ts`). */
   .job .why {
     font-size: 0.7rem;
     line-height: 1.35;
+    min-height: 2.7em;
     color: var(--text-dim);
   }
 

@@ -312,26 +312,32 @@
     -webkit-backdrop-filter: blur(2px);
   }
 
+  /* Sized against the window rather than in fixed measures: the window can be
+     small, and a panel that outgrew it would be a panel with no way out. */
   .dialog {
-    width: min(46rem, calc(100vw - 4rem));
+    display: flex;
+    flex-direction: column;
+    width: min(44rem, calc(100vw - 3rem));
+    max-height: calc(100vh - 3rem);
     background: var(--pane);
     backdrop-filter: var(--pane-blur);
     -webkit-backdrop-filter: var(--pane-blur);
     border: 1px solid var(--pane-border);
     border-radius: var(--pane-radius);
     box-shadow: var(--pane-shadow);
-    padding: 1rem;
+    padding: 1.1rem 1.25rem 1.25rem;
   }
 
   header {
     display: flex;
     align-items: center;
-    margin-bottom: 0.75rem;
+    flex: none;
+    margin-bottom: 0.9rem;
   }
 
   h2 {
     margin: 0;
-    font-size: 0.875rem;
+    font-size: 0.9rem;
     font-weight: 500;
     color: var(--text);
   }
@@ -364,25 +370,29 @@
 
   .body {
     display: flex;
-    gap: 1.2rem;
-    align-items: flex-start;
+    flex: 1;
+    min-height: 0;
+    gap: 1.4rem;
+    align-items: stretch;
   }
 
-  /* The rail. Narrow and quiet: it names three places, and the panel beside it
-     is what the eye should land on. */
+  /* The rail names three places and should do nothing else. A hairline carries
+     the separation so the buttons themselves can stay quiet. */
   nav {
     display: flex;
     flex: none;
-    width: 8.4rem;
+    width: 8rem;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.1rem;
+    padding-right: 1.1rem;
+    border-right: 1px solid var(--inset-border);
   }
 
   nav button {
-    padding: 0.44rem 0.6rem;
+    padding: 0.46rem 0.55rem;
     text-align: left;
     font: inherit;
-    font-size: 0.79rem;
+    font-size: 0.8rem;
     color: var(--text-dim);
     background: none;
     border: 1px solid transparent;
@@ -401,31 +411,24 @@
     border-color: var(--row-selected-border);
   }
 
-  /* One section's height should not make the next one jump, and a long section
-     scrolls inside itself rather than growing the dialog past the screen. */
   .panel {
     flex: 1;
     min-width: 0;
-    /* Tall enough that the longest section does not scroll on the window's own
-       minimum height, and capped so a short screen still shows the header and
-       the way out. */
-    min-height: 24rem;
-    max-height: min(38rem, calc(100vh - 11rem));
+    min-height: min(21rem, 40vh);
     overflow-y: auto;
-    padding-right: 0.3rem;
   }
 
   .lead {
     display: flex;
     align-items: baseline;
-    gap: 0.6rem;
-    margin-bottom: 0.6rem;
+    gap: 0.8rem;
+    margin-bottom: 0.9rem;
   }
 
   .lead p {
     margin: 0;
-    font-size: 0.73rem;
-    line-height: 1.4;
+    font-size: 0.76rem;
+    line-height: 1.45;
     color: var(--text-dim);
   }
 
@@ -437,7 +440,7 @@
     background: none;
     color: var(--accent-strong);
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 0.74rem;
     white-space: nowrap;
     cursor: pointer;
   }
@@ -448,8 +451,8 @@
   }
 
   .note {
-    margin: 0 0 0.5rem;
-    font-size: 0.72rem;
+    margin: 0 0 0.7rem;
+    font-size: 0.74rem;
     color: var(--text-dim);
   }
 
@@ -457,25 +460,27 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
+  }
+
+  /* Flat rows on a hairline, not a stack of filled boxes. Seven of those was
+     the panel's whole problem: every one drew an edge, and the edges added up
+     to more of the screen than the words did. */
+  li + li {
+    border-top: 1px solid var(--inset-border);
   }
 
   li > label,
   .field {
     display: flex;
     align-items: flex-start;
-    gap: 0.75rem;
-    padding: 0.72rem 0.85rem;
-    background: var(--inset);
-    border: 1px solid transparent;
-    border-radius: var(--radius);
+    gap: 0.85rem;
+    padding: 0.75rem 0.5rem;
     color: var(--text);
   }
 
   li > label {
     cursor: pointer;
+    border-radius: var(--radius);
   }
 
   li > label:hover {
@@ -484,7 +489,7 @@
 
   .field {
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 0.35rem;
   }
 
   /* A stage that will not run is dimmed rather than removed: what a scan is
@@ -497,18 +502,22 @@
      Still a real checkbox — focusable, keyboard-operable, announced as one —
      with `appearance: none` turning the control itself into the track and its
      `::after` into the thumb. One element, so nothing can drift out of step
-     with what the input actually holds. */
+     with what the input actually holds.
+
+     Every colour and both corners come from the theme: a pill is right for one
+     generation of interface and wrong for another, and a terminal's toggle is
+     square. The measurements are the layout's and are the same everywhere. */
   input[type='checkbox'] {
     appearance: none;
     -webkit-appearance: none;
     position: relative;
     flex: none;
-    margin: 0.1rem 0 0;
-    width: 2.3rem;
-    height: 1.3rem;
-    border-radius: 999px;
-    background: var(--inset-border);
-    border: 1px solid var(--inset-border);
+    margin: 0.08rem 0 0;
+    width: 2.2rem;
+    height: 1.2rem;
+    border-radius: var(--switch-radius);
+    background: var(--switch-track);
+    border: 1px solid var(--switch-border);
     cursor: pointer;
     transition:
       background 130ms ease,
@@ -519,23 +528,22 @@
     content: '';
     position: absolute;
     top: 50%;
-    left: 0.15rem;
+    left: 0.13rem;
     transform: translateY(-50%);
-    width: 0.95rem;
-    height: 0.95rem;
-    border-radius: 50%;
-    background: var(--text);
+    width: 0.86rem;
+    height: 0.86rem;
+    border-radius: var(--switch-thumb-radius);
+    background: var(--switch-thumb);
     transition: left 130ms ease;
   }
 
   input[type='checkbox']:checked {
-    background: var(--accent-strong);
-    border-color: var(--accent-strong);
+    background: var(--switch-track-on);
+    border-color: var(--switch-border-on);
   }
 
   input[type='checkbox']:checked::after {
-    left: calc(100% - 1.1rem);
-    background: var(--accent-text);
+    left: calc(100% - 0.99rem);
   }
 
   input[type='checkbox']:disabled {
@@ -551,7 +559,7 @@
   .text {
     display: flex;
     flex-direction: column;
-    gap: 0.1rem;
+    gap: 0.15rem;
     min-width: 0;
   }
 
@@ -561,8 +569,8 @@
 
   .about {
     margin: 0;
-    font-size: 0.74rem;
-    line-height: 1.42;
+    font-size: 0.75rem;
+    line-height: 1.45;
     color: var(--text-dim);
   }
 
@@ -570,55 +578,57 @@
     margin-left: auto;
     flex: none;
     padding-top: 0.15rem;
-    font-size: 0.72rem;
+    font-size: 0.73rem;
     white-space: nowrap;
     color: var(--text-faint);
   }
 
-  /* Indented under the stage it belongs to, and hung off it by a rule, so it
-     reads as part of that choice rather than as a fourth one. */
+  /* Indented under the stage it bounds, carried by space alone — a rule here
+     would be a third edge in a row that already has enough. */
   .nested {
-    margin: 0.3rem 0 0 3.05rem;
-    padding-left: 0.7rem;
-    border-left: 1px solid var(--inset-border);
+    padding: 0 0.5rem 0.8rem 3.55rem;
   }
 
   .inline {
     display: flex;
     align-items: baseline;
-    gap: 0.4rem;
+    gap: 0.45rem;
     padding: 0;
     background: none;
     border: 0;
   }
 
   .unit {
-    font-size: 0.73rem;
+    font-size: 0.75rem;
     color: var(--text-faint);
   }
 
   .number {
-    width: 4.4rem;
-    padding: 0.2rem 0.4rem;
-    background: var(--pane);
+    width: 4.6rem;
+    padding: 0.24rem 0.45rem;
+    background: var(--inset);
     border: 1px solid var(--inset-border);
     border-radius: var(--radius);
     color: var(--text);
     font: inherit;
-    font-size: 0.78rem;
-    accent-color: var(--accent-strong);
+    font-size: 0.8rem;
   }
 
   .nested .about {
-    margin-top: 0.25rem;
+    margin-top: 0.35rem;
+  }
+
+  .themes li {
+    border-top: 0;
   }
 
   .themes li button.theme {
     display: flex;
     align-items: center;
-    gap: 0.7rem;
+    gap: 0.75rem;
     width: 100%;
-    padding: 0.62rem 0.7rem;
+    margin-bottom: 0.4rem;
+    padding: 0.66rem 0.75rem;
     text-align: left;
     background: var(--inset);
     border: 1px solid transparent;

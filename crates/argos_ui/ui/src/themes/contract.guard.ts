@@ -77,6 +77,13 @@ const complete: Record<ThemeToken, string> = {
   '--ok': '#0f0',
   '--warn': '#ff0',
   '--danger': '#f00',
+  '--switch-track': '#111',
+  '--switch-track-on': '#4d94ff',
+  '--switch-border': '#222',
+  '--switch-border-on': '#4d94ff',
+  '--switch-thumb': '#fff',
+  '--switch-radius': '999px',
+  '--switch-thumb-radius': '50%',
   '--radius': '0',
   '--font': 'sans-serif',
 };

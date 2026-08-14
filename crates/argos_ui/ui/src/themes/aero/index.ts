@@ -144,6 +144,15 @@ export default theme({
     '--warn': '#a5761b',
     '--danger': '#c0392b',
 
+    // A bevelled rectangle, not a pill: this generation of interface had
+    // square-shouldered controls with a gradient down them.
+    '--switch-track': 'linear-gradient(180deg, #c9d9e8 0%, #e6f0f8 100%)',
+    '--switch-track-on': 'linear-gradient(180deg, #4aa3e8 0%, #1b7fd4 100%)',
+    '--switch-border': '#a6c8e6',
+    '--switch-border-on': '#1a629f',
+    '--switch-thumb': 'linear-gradient(180deg, #ffffff 0%, #e4eff9 100%)',
+    '--switch-radius': '0.28rem',
+    '--switch-thumb-radius': '0.18rem',
     '--radius': '0.24rem',
     '--font':
       '"Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif',

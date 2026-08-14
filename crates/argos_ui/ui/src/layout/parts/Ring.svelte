@@ -121,8 +121,8 @@
 <style>
   .ring {
     position: relative;
-    width: 9.6rem;
-    height: 9.6rem;
+    width: var(--ring-size, 9.6rem);
+    height: var(--ring-size, 9.6rem);
   }
 
   /* The arc, seen through whatever the theme's surface is made of.

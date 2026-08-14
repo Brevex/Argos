@@ -113,6 +113,14 @@ export default theme({
     '--warn': '#c8d94a',
     '--danger': '#ff5a5a',
 
+    // Square, like everything else. A phosphor block that slides.
+    '--switch-track': '#020803',
+    '--switch-track-on': '#0b3a12',
+    '--switch-border': '#3ca84c',
+    '--switch-border-on': '#6dff6d',
+    '--switch-thumb': '#6dff6d',
+    '--switch-radius': '0',
+    '--switch-thumb-radius': '0',
     '--radius': '0',
     '--font': 'ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, Menlo, monospace',
   },

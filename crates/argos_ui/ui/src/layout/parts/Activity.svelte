@@ -177,6 +177,10 @@
     flex: 1 1 auto;
     min-height: 0;
     width: 100%;
+    /* A block squeezed to nothing centres its content across its own edges and
+       paints over what is above it. Clipping is the difference between a tight
+       window and a broken one. */
+    overflow: hidden;
   }
 
   /* The one part of the screen that gives way. On a window too short to show a
@@ -207,8 +211,8 @@
 
   .rings {
     display: flex;
-    gap: 5.5rem;
-    margin-bottom: 1.2rem;
+    gap: var(--ring-gap);
+    margin-bottom: var(--block-gap);
   }
 
   .stats {
@@ -217,7 +221,7 @@
     width: 100%;
     max-width: 56.25rem;
     margin: 0;
-    padding: 0.9rem 0;
+    padding: clamp(0.5rem, 1.3vh, 0.9rem) 0;
     background: var(--scanlines), var(--pane);
     backdrop-filter: var(--pane-blur);
     -webkit-backdrop-filter: var(--pane-blur);

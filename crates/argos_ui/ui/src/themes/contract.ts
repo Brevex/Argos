@@ -160,6 +160,18 @@ export const THEME_TOKENS = [
   '--danger',
 
   // Shape and rhythm.
+  // A switch: the control the settings panel uses for anything that is on or
+  // off. Shape as well as colour, because a rounded pill is right for one
+  // generation of interface and wrong for another — a terminal has square
+  // toggles and a glossy desktop has bevelled ones.
+  '--switch-track',
+  '--switch-track-on',
+  '--switch-border',
+  '--switch-border-on',
+  '--switch-thumb',
+  '--switch-radius',
+  '--switch-thumb-radius',
+
   '--radius',
   '--font',
 ] as const;

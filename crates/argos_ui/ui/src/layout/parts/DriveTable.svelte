@@ -140,13 +140,14 @@
   }
 
   .table {
-    /* Rows have a set height and the list stops after three of them, so this
-       block's height is the same on every window and a scrollbar appears only
-       when a machine actually has a fourth disk. */
-    --row-height: 2.7rem;
-    /* Four rows on the window's own minimum height. The extra pixel keeps a
-       list of exactly four from showing a scrollbar for a rounding error. */
-    max-height: calc(var(--row-height) * 4 + 3px);
+    /* Rows have a set height and the list stops after four of them, so this
+       block is a known height on every window and a scrollbar appears only when
+       a machine has a fifth disk. The row height scales with the window, so the
+       block shrinks with everything else rather than forcing the window open.
+       The quarter-rem of slack absorbs the rounding a fractional row height
+       leaves behind, which is what would otherwise show a scrollbar for a list
+       that fits. */
+    max-height: calc(var(--row-height) * 4 + 0.25rem);
     border: 1px solid var(--inset-border);
     border-radius: var(--radius);
     background: var(--scanlines), var(--inset);

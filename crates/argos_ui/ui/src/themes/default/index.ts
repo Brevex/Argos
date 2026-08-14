@@ -96,6 +96,14 @@ export default theme({
     '--warn': '#d9a441',
     '--danger': '#e5534b',
 
+    // A pill, because everything else here is rounded.
+    '--switch-track': 'rgba(255, 255, 255, 0.12)',
+    '--switch-track-on': '#4d94ff',
+    '--switch-border': 'rgba(255, 255, 255, 0.16)',
+    '--switch-border-on': '#4d94ff',
+    '--switch-thumb': '#eef1f5',
+    '--switch-radius': '999px',
+    '--switch-thumb-radius': '50%',
     '--radius': '0.5rem',
     '--font':
       'system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif',
