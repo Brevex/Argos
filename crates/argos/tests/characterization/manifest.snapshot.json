@@ -1,0 +1,228 @@
+{
+  "artifacts": [
+    {
+      "confidence": "contiguous-carve",
+      "extents": [
+        {
+          "length": 3239,
+          "offset": 65536
+        }
+      ],
+      "format": "jpeg",
+      "length": 3239,
+      "name": "000000.jpg",
+      "sha256": "44bd28d64c8742cb510c7f6520eab542711dfc0326fae10d1ebac720f78cc0c0",
+      "source_offset": 65536,
+      "stage": "carve",
+      "standing": "unremarkable",
+      "written": true
+    },
+    {
+      "camera_make": "Argos",
+      "camera_model": "Fixture One",
+      "confidence": "contiguous-carve",
+      "declared_height": 1200,
+      "declared_width": 1600,
+      "extents": [
+        {
+          "length": 3379,
+          "offset": 524288
+        }
+      ],
+      "format": "jpeg",
+      "length": 3379,
+      "name": "000001.jpg",
+      "sha256": "70c44419165aa02d06781a6031e659bbd95a13d017c17f45f7a05067bac9072e",
+      "source_offset": 524288,
+      "stage": "carve",
+      "standing": "camera-named",
+      "taken": "2016:07:04 11:22:33",
+      "written": true
+    },
+    {
+      "confidence": "contiguous-carve",
+      "extents": [
+        {
+          "length": 4993,
+          "offset": 1048576
+        }
+      ],
+      "format": "jpeg",
+      "length": 4993,
+      "name": "000002.jpg",
+      "sha256": "3ae31cf0a9fcad8f210df7a6eed6a14cf536fdeb03d45162ddb41469075a63cc",
+      "source_offset": 1048576,
+      "stage": "carve",
+      "standing": "unremarkable",
+      "written": true
+    },
+    {
+      "confidence": "partial-or-thumbnail",
+      "extents": [
+        {
+          "length": 653,
+          "offset": 1048662
+        }
+      ],
+      "format": "jpeg",
+      "length": 653,
+      "name": "000003.jpg",
+      "parent_offset": 1048576,
+      "sha256": "6d9964cf481cfd3a99617093a8a260c0eda0350abc611b3c4be8dfe87a429eed",
+      "source_offset": 1048662,
+      "stage": "carve",
+      "standing": "unremarkable",
+      "written": true
+    },
+    {
+      "confidence": "contiguous-carve",
+      "extents": [
+        {
+          "length": 592,
+          "offset": 1572864
+        }
+      ],
+      "format": "png",
+      "height": 48,
+      "length": 592,
+      "name": "000004.png",
+      "perceptual_hash": "6db6db4d24924924",
+      "preview": "previews/4a94016d7e6788f45cf0245af25510af6c791c87672a593564e765c390f88fd1.jpg",
+      "sha256": "4a94016d7e6788f45cf0245af25510af6c791c87672a593564e765c390f88fd1",
+      "source_offset": 1572864,
+      "stage": "carve",
+      "standing": "unremarkable",
+      "triage_decided_by": "inconclusive",
+      "triage_label": "ambiguous",
+      "width": 64,
+      "written": true
+    },
+    {
+      "confidence": "contiguous-carve",
+      "extents": [
+        {
+          "length": 547319,
+          "offset": 2097152
+        }
+      ],
+      "format": "jpeg",
+      "height": 480,
+      "length": 547319,
+      "name": "000005.jpg",
+      "perceptual_hash": "ffffffb000000c0c",
+      "preview": "previews/ea670c28a728181159a441796e220af74e99c13559590d8c286eaf513600acc6.jpg",
+      "sha256": "ea670c28a728181159a441796e220af74e99c13559590d8c286eaf513600acc6",
+      "source_offset": 2097152,
+      "stage": "carve",
+      "standing": "photograph-sized",
+      "triage_decided_by": "flat-fill",
+      "triage_label": "synthetic-asset",
+      "width": 640,
+      "written": true
+    },
+    {
+      "confidence": "contiguous-carve",
+      "extents": [
+        {
+          "length": 680090,
+          "offset": 3145728
+        }
+      ],
+      "format": "jpeg",
+      "height": 600,
+      "length": 680090,
+      "name": "000006.jpg",
+      "perceptual_hash": "ffffff5500000000",
+      "preview": "previews/5f5fb7bca2fa0c7bde2155e393543cc9021006dd9541c313e6bac119bf31960b.jpg",
+      "sha256": "5f5fb7bca2fa0c7bde2155e393543cc9021006dd9541c313e6bac119bf31960b",
+      "source_offset": 3145728,
+      "stage": "carve",
+      "standing": "photograph-sized",
+      "triage_decided_by": "flat-fill",
+      "triage_label": "synthetic-asset",
+      "width": 800,
+      "written": true
+    },
+    {
+      "confidence": "partial-or-thumbnail",
+      "extents": [
+        {
+          "length": 50326,
+          "offset": 4194304
+        }
+      ],
+      "format": "jpeg",
+      "height": 480,
+      "length": 50326,
+      "name": "000007.jpg",
+      "perceptual_hash": "fffffffb00000000",
+      "preview": "previews/ea0aa3a60dc496ed48fee5d0298ccf74c13c61887153a06e83529421a3a470f9.jpg",
+      "sha256": "ea0aa3a60dc496ed48fee5d0298ccf74c13c61887153a06e83529421a3a470f9",
+      "source_offset": 4194304,
+      "stage": "carve",
+      "standing": "photograph-sized",
+      "triage_decided_by": "flat-fill",
+      "triage_label": "synthetic-asset",
+      "width": 640,
+      "written": true
+    },
+    {
+      "confidence": "contiguous-carve",
+      "extents": [
+        {
+          "length": 118,
+          "offset": 4718592
+        }
+      ],
+      "format": "png",
+      "height": 32,
+      "length": 118,
+      "name": "000008.png",
+      "perceptual_hash": "0303030303030303",
+      "preview": "previews/d8e51e9c8fc771af1371432175f4dc165e561dc7849eeaf9d28593d197ad52d2.jpg",
+      "sha256": "d8e51e9c8fc771af1371432175f4dc165e561dc7849eeaf9d28593d197ad52d2",
+      "source_offset": 4718592,
+      "stage": "carve",
+      "standing": "unremarkable",
+      "triage_decided_by": "flat-fill",
+      "triage_label": "synthetic-asset",
+      "width": 32,
+      "written": true
+    }
+  ],
+  "coverage": {
+    "bytes_swept": 8388608,
+    "dropped_unreadable": 0,
+    "duplicates": 0,
+    "journal_deletions": 0,
+    "omitted_assets": 0,
+    "partial_prefixes": 1,
+    "reassembled": 0,
+    "reassembly_attempted": 1,
+    "reassembly_skipped_small": 0,
+    "unattributed_residue": 0,
+    "unrecoverable": 0
+  },
+  "fragmentation": [
+    {
+      "break_at": 4244631,
+      "declared_height": 480,
+      "declared_width": 640,
+      "decoded": 4800,
+      "decoded_end": 4244630,
+      "format": "jpeg",
+      "offset": 4194304,
+      "required": 4800
+    }
+  ],
+  "rejected_candidates": 1,
+  "scan_state": "finished",
+  "triage": {
+    "degraded": false,
+    "model_version": "rules-v1",
+    "scored": 5,
+    "status": "scored",
+    "unscored": 4
+  },
+  "unreadable": []
+}

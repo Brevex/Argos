@@ -29,11 +29,6 @@ impl Ctrl {
         }
     }
 
-    /// Replaces the backing disk.
-    pub fn set_disk(&self, disk: MemDisk) {
-        self.lock().disk = disk;
-    }
-
     /// Number of `read_at` calls the mocked device has served.
     #[must_use]
     pub fn reads(&self) -> u64 {

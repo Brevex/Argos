@@ -48,13 +48,6 @@ impl MemDisk {
         self
     }
 
-    /// Overrides the reported device class.
-    #[must_use]
-    pub fn with_class(mut self, class: DeviceClass) -> Self {
-        self.class = class;
-        self
-    }
-
     /// The full backing buffer, including bytes hidden behind bad sectors.
     #[must_use]
     pub fn data(&self) -> &[u8] {

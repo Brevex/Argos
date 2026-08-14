@@ -41,12 +41,6 @@ impl ScanError {
         }
     }
 
-    /// Whether the medium changed underneath the scan.
-    #[must_use]
-    pub fn is_unstable_medium(&self) -> bool {
-        matches!(self.kind, ScanErrorKind::UnstableMedium { .. })
-    }
-
     /// Whether the artifact sink was what failed.
     #[must_use]
     pub fn is_sink(&self) -> bool {
