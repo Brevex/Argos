@@ -51,13 +51,13 @@ is one sample: the ordering between stages is dependable, the absolute figures a
 | C14 | Reassemble images the medium stored in pieces | CLI, GUI | **2 h 00 m** — a ceiling reached, not a completion |
 | C15 | Report the decodable prefix of a photograph whose remainder was overwritten | CLI, GUI | in C13 |
 | C16 | Read `$UsnJrnl:$J` for deletion names and moments | CLI, GUI | in C10 |
-| C17 | Skip the filesystem stage (`--carve-only`) | CLI, wire | saves 32 m |
-| C18 | Skip carving (`--metadata-only`) | CLI, wire | saves 2 h 01 m |
-| C19 | Skip reassembly (`--no-reassemble`) | CLI, wire | saves up to 2 h |
+| C17 | Skip the filesystem stage (`--carve-only`) | CLI, GUI | saves 32 m |
+| C18 | Skip carving (`--metadata-only`) | CLI, GUI | saves 2 h 01 m |
+| C19 | Skip reassembly (`--no-reassemble`) | CLI, GUI | saves up to 2 h |
 | C20 | Bound reassembly by wall clock (`--reassembly-budget`), or let it search every candidate | CLI | sets the ceiling |
 | C21 | Scan one byte range of the medium rather than all of it (`--range`) | CLI | hours → minutes |
 | C22 | Search a previous session's fragmentation points again without re-reading the medium (`reassemble --from`) | CLI | saves the whole sweep |
-| C23 | Choose the worker count (`--jobs`) | CLI, wire | — |
+| C23 | Choose the worker count (`--jobs`) | CLI, GUI | — |
 
 **Formats carved**: JPEG and PNG. Nothing else is claimed.
 
@@ -72,8 +72,8 @@ refused. Both are counted in the report instead.
 | C25 | Mark near-duplicates by perceptual hash. Both copies are kept | CLI, GUI | in C24 |
 | C26 | Collapse artifacts with identical SHA-256 | CLI, GUI | in C13 |
 | C27 | Order artifacts by the evidence they carry: `camera-named`, `dated`, `photograph-sized`, `unremarkable`, `cache-neighbour` | CLI, GUI | in C30 |
-| C28 | Skip triage (`--no-triage`); nothing recovered changes, only the labels | CLI, wire | saves 3 m |
-| C29 | Set the smallest long side an image is written to disk for (`--min-long-side`, default 300 px) | CLI, wire | changes what fills the output directory |
+| C28 | Skip triage (`--no-triage`); nothing recovered changes, only the labels | CLI, GUI | saves 3 m |
+| C29 | Set the smallest long side an image is written to disk for (`--min-long-side`, default 300 px) | CLI, GUI | changes what fills the output directory |
 
 **Evidence tiers** recorded per artifact, weakest first: `partial-or-thumbnail`, `reassembled`,
 `contiguous-carve`, `journal-residue`, `fs-metadata`.
@@ -107,7 +107,7 @@ and what was only recorded are counted apart.
 | --- | --- | --- | --- |
 | C42 | Report progress per stage as it happens, pushed rather than polled, with the unit named so a candidate count is never read as a byte count | CLI, GUI | — |
 | C43 | Stop a running scan, keeping everything recovered so far | CLI, GUI | — |
-| C44 | Pause a running scan and resume it | CLI (`p`/`r`), wire | — |
+| C44 | Pause a running scan and resume it | CLI (`p`/`r`), GUI | — |
 | C45 | Report a running total of regions the medium refused | CLI, GUI | — |
 | C46 | Warn about anything the user should know before trusting the result | CLI, GUI | — |
 | C47 | Run the engine as a JSON-RPC server on stdin/stdout (`serve`) | CLI | — |
@@ -125,9 +125,9 @@ and what was only recorded are counted apart.
 | | Count |
 | --- | --- |
 | Reachable from the command line | **47** — every one except C48 and C49, which are the window itself |
-| Reachable from the window | **29** |
-| Reachable from the command line but not the window | **20** — C07, C08, C17–C23, C28, C29, C34, C36–C41, C44, C47 |
-| Expressible on the wire but called by no client | **8** — C17, C18, C19, C23, C28, C36, C37, C44 |
+| Reachable from the window | **36** |
+| Reachable from the command line but not the window | **13** — C07, C08, C20, C21, C22, C34, C36–C41, C47 |
+| Expressible on the wire but called by no client | **2** — C36, C37 |
 
 The command line reaches every capability the tool has, headless, before any interface exposes it
 (`A-CLI-FIRST`). Where the window reaches fewer, the difference is a surface that has not been

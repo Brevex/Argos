@@ -7,7 +7,7 @@
  * middle of a running scan.
  */
 
-import * as ipc from '../lib/ipc';
+import { load, save } from '../lib/preferences';
 import type { ThemeIcon, ThemeModule } from './contract';
 import { DEFAULT_THEME, loadTheme } from './index';
 
@@ -46,27 +46,13 @@ export async function apply(id: string): Promise<void> {
   }
   root.style.colorScheme = module.scheme;
   active.module = module;
-  // Stored where the person who opened Argos can find it. A window that cannot
-  // persist a preference still has to render, so this is never awaited into a
-  // failure path.
-  void ipc
-    .preferencesWrite(JSON.stringify({ [STORAGE_KEY]: module.id }))
-    .catch(() => undefined);
+  // Stored where the person who opened Argos can find it, merged into whatever
+  // else the file holds so choosing a theme does not erase the rest.
+  save({ [STORAGE_KEY]: module.id });
 }
 
 /** The theme to open with: the one last chosen, or the default. */
 export async function remembered(): Promise<string> {
-  const text = await ipc.preferencesRead().catch(() => '');
-  if (text === '') return DEFAULT_THEME;
-  try {
-    const stored: unknown = JSON.parse(text);
-    const theme =
-      typeof stored === 'object' && stored !== null
-        ? (stored as Record<string, unknown>)[STORAGE_KEY]
-        : undefined;
-    return typeof theme === 'string' ? theme : DEFAULT_THEME;
-  } catch {
-    // A file someone edited by hand into nonsense is not a reason not to draw.
-    return DEFAULT_THEME;
-  }
+  const theme = (await load())[STORAGE_KEY];
+  return typeof theme === 'string' ? theme : DEFAULT_THEME;
 }

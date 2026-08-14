@@ -16,6 +16,7 @@
   import type { Device } from '../lib/dto';
   import * as ipc from '../lib/ipc';
   import { session, subscribe } from '../lib/session.svelte';
+  import { settings } from '../lib/settings.svelte';
   import { active, apply, remembered } from '../themes/active.svelte';
 
   import TitleBar from './parts/TitleBar.svelte';
@@ -23,7 +24,7 @@
   import Destination from './parts/Destination.svelte';
   import Activity from './parts/Activity.svelte';
   import Gallery from './parts/Gallery.svelte';
-  import ThemeDialog from './parts/ThemeDialog.svelte';
+  import SettingsDialog from './parts/SettingsDialog.svelte';
 
   /** How often the elapsed clock advances while a scan runs. */
   const TICK_MS = 500;
@@ -33,7 +34,7 @@
   let destination = $state('');
   let busy = $state(false);
   let refreshing = $state(false);
-  let themeOpen = $state(false);
+  let settingsOpen = $state(false);
   /** Session directory of the run that finished, and its previews folder. */
   let finished = $state<{ session: string; previewDir: string } | null>(null);
   /** The same, for the run in progress: promoted once the engine says done. */
@@ -104,31 +105,12 @@
     session.problem = '';
     session.phase = 'connecting';
     try {
-      // The button runs exactly what `argos scan <source> --out <destination>`
-      // runs, with no options of its own. A window that could ask for a
-      // different recovery than the command line would be a second interface
-      // to the engine rather than a view of it (`A-CLI-FIRST`).
-      const started = await ipc.scanStart({
-        source,
-        out: destination,
-        jobs: null,
-        filesystem: true,
-        carving: true,
-        reassembly: true,
-        triage: true,
-        // The engine's own floor, not a number this window invented: a used
-        // disk holds far more cache entries and icons than photographs, and
-        // they are small. Everything under it is still examined, hashed and
-        // recorded with its extents and dimensions — what changes is that it
-        // does not fill the destination folder. This is the same run as
-        // `argos scan … ` with no `--min-long-side` given.
-        minLongSide: null,
-        // On, because this window now shows what was recovered and a preview
-        // is what it draws. They are derived files, reproducible from the
-        // artifacts at any time, and the only part of a session this window is
-        // ever granted a path to.
-        previews: true,
-      });
+      // The settings panel builds this, and it opens on the engine's own
+      // defaults — so a window nobody has touched runs exactly what
+      // `argos scan <source> --out <destination>` runs, and one that has been
+      // touched runs the same scan the equivalent flags would (`A-CLI-FIRST`).
+      // Every field is a field of `ScanRequest`; nothing is decided here.
+      const started = await ipc.scanStart(settings.request(source, destination));
       finished = null;
       session.begin(started.source);
       // Kept from the moment the engine names them: the results view needs the
@@ -191,6 +173,9 @@
 
   onMount(() => {
     void remembered().then(apply);
+    // The panel opens on whatever was last chosen. Read once, here, so the
+    // button and the panel cannot disagree about what the next scan will run.
+    void settings.restore();
 
     let unlisten: (() => void) | undefined;
     void subscribe().then((stop) => {
@@ -221,7 +206,7 @@
         disabled={session.running}
         onSelect={(path) => (source = path)}
         onRefresh={() => void refresh()}
-        onConfig={() => (themeOpen = true)}
+        onConfig={() => (settingsOpen = true)}
       />
       <Destination
         value={destination}
@@ -253,11 +238,11 @@
   </main>
 </div>
 
-{#if themeOpen}
-  <ThemeDialog
+{#if settingsOpen}
+  <SettingsDialog
     active={active.id}
     onChoose={(id) => void apply(id)}
-    onClose={() => (themeOpen = false)}
+    onClose={() => (settingsOpen = false)}
   />
 {/if}
 
