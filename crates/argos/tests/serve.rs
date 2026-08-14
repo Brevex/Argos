@@ -475,6 +475,47 @@ fn acquiring_onto_a_path_that_already_exists_is_refused_by_the_call() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the compiled binary")]
+fn resuming_a_session_that_located_no_fragmentation_points_is_refused() {
+    // Running the scan anyway would sweep nothing, find nothing and report
+    // nothing — which reads as an answer about the medium rather than as a
+    // request that could not be honoured.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image = dir.path().join("fixture.img");
+    fixture(&image);
+    let session = dir.path().join("session");
+
+    let mut engine = Engine::spawn();
+    engine.handshake();
+    engine.call(
+        "scan.start",
+        &serde_json::json!({
+            "source": image, "out": session,
+            "filesystem": true, "carving": true, "reassembly": true,
+            "triage": false, "minLongSide": 0, "previews": false,
+        }),
+    );
+    engine.drain_until_finished();
+
+    let again = dir.path().join("again");
+    let refused = engine.call(
+        "scan.start",
+        &serde_json::json!({
+            "source": image, "out": again,
+            "filesystem": true, "carving": true, "reassembly": true,
+            "triage": false, "minLongSide": 0, "previews": false,
+            "resumeFrom": session,
+        }),
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("no fragmentation points")),
+        "a session with nothing to search must say so: {refused}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the compiled binary")]
 fn an_export_copies_the_set_the_gallery_filter_admits_and_no_more() {
     // The window exports what it is showing rather than a list of hashes, so
     // the two have to agree about what a standing admits. They agree by using

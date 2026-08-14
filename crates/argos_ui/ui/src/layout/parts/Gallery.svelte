@@ -23,11 +23,17 @@
   let {
     session,
     previewDir,
+    onSearchAgain,
   }: {
     /** Session directory the finished scan wrote. */
     session: string;
     /** Absolute path of that session's previews directory. */
     previewDir: string;
+    /**
+     * Searches this session's fragmentation points again, when the window can.
+     * Absent when there is no medium to read them back from.
+     */
+    onSearchAgain?: (() => void) | undefined;
   } = $props();
 
   /** Artifacts fetched per page. The engine caps this; this is well under it. */
@@ -159,6 +165,16 @@
         {total.toLocaleString()} of {recorded.toLocaleString()} recorded
       {/if}
     </p>
+    {#if onSearchAgain}
+      <!--
+        The scan's hours went into locating the fragmentation points, and the
+        manifest kept them. Trying a longer budget from those is minutes, not
+        another overnight run — so this is a button rather than a rerun.
+      -->
+      <button class="export" type="button" disabled={loading} onclick={onSearchAgain}>
+        Search fragments again…
+      </button>
+    {/if}
     <button
       class="export"
       type="button"

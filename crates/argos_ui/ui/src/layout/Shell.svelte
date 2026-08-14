@@ -12,6 +12,7 @@
    * nothing and loses nothing, including mid-scan.
    */
   import { onMount } from 'svelte';
+  import { open } from '@tauri-apps/plugin-dialog';
 
   import type { Device } from '../lib/dto';
   import * as ipc from '../lib/ipc';
@@ -181,6 +182,42 @@
     }
   }
 
+  /**
+   * Searches the finished session's fragmentation points again.
+   *
+   * The sweep and the validation pass are what those points cost to find, and
+   * the manifest kept them — so this reads the medium for the extents it
+   * reports and nothing else. Worth doing with a longer budget, which is why
+   * the setting for it is in the panel.
+   */
+  async function searchAgain(): Promise<void> {
+    if (finished === null) return;
+    const start = await ipc.invokerHome().catch(() => '');
+    const out = await open({
+      directory: true,
+      multiple: false,
+      title: 'Write the newly reassembled images into',
+      defaultPath: start === '' ? undefined : start,
+    });
+    if (typeof out !== 'string') return;
+
+    busy = true;
+    session.problem = '';
+    session.phase = 'connecting';
+    try {
+      const request = { ...settings.request(source, out), resumeFrom: finished.session };
+      const started = await ipc.scanStart(request);
+      finished = null;
+      session.begin(started.source);
+      pending = { session: started.out, previewDir: started.previewDir };
+    } catch (err) {
+      session.problem = String(err);
+      session.phase = 'failed';
+    } finally {
+      busy = false;
+    }
+  }
+
   // A run that ends — finished or stopped early — has a session directory
   // worth showing. Both write a manifest, so both have results to read.
   $effect(() => {
@@ -269,7 +306,11 @@
     <Activity />
 
     {#if finished !== null}
-      <Gallery session={finished.session} previewDir={finished.previewDir} />
+      <Gallery
+        session={finished.session}
+        previewDir={finished.previewDir}
+        onSearchAgain={source === '' ? undefined : () => void searchAgain()}
+      />
     {/if}
 
     <div class="controls">

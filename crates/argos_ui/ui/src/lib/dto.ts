@@ -430,7 +430,19 @@ previews: boolean,
  * held nothing more. A client that cannot set this cannot ask for the
  * longer search that ceiling exists to bound.
  */
-reassemblyBudgetSeconds: number | null, };
+reassemblyBudgetSeconds: number | null, 
+/**
+ * Session directory whose fragmentation points to search again,
+ * instead of sweeping the medium for them.
+ *
+ * A scan of a large disk spends its hours on the sweep and the
+ * validation pass, and both establish the same fragmentation points
+ * every time — the manifest records them. Trying a longer budget from
+ * those costs minutes rather than another overnight run. The medium is
+ * still read: every extent reported is fetched back and hashed exactly
+ * as a scan's is.
+ */
+resumeFrom: string | null, };
 
 /**
  * What a started scan tells its client before it produces anything.

@@ -146,6 +146,17 @@ dto! {
         #[serde(default)]
         #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
         pub reassembly_budget_seconds: Option<u64>,
+        /// Session directory whose fragmentation points to search again,
+        /// instead of sweeping the medium for them.
+        ///
+        /// A scan of a large disk spends its hours on the sweep and the
+        /// validation pass, and both establish the same fragmentation points
+        /// every time — the manifest records them. Trying a longer budget from
+        /// those costs minutes rather than another overnight run. The medium is
+        /// still read: every extent reported is fetched back and hashed exactly
+        /// as a scan's is.
+        #[serde(default)]
+        pub resume_from: Option<String>,
     }
 }
 
@@ -163,6 +174,7 @@ impl Default for ScanRequest {
             min_long_side: None,
             previews: false,
             reassembly_budget_seconds: None,
+            resume_from: None,
         }
     }
 }

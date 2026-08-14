@@ -312,6 +312,55 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Turns `options` into the ones a resumed search runs under.
+    ///
+    /// The sweep and the filesystem pass are what those points cost to find,
+    /// and skipping them is the whole point; triage is off for the same reason
+    /// `argos reassemble` leaves it off. Everything else the client asked for —
+    /// the budget above all — is kept, because trying a longer one is why a
+    /// search is run again.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the session cannot be read, or when it records no
+    /// fragmentation points: there would be nothing to search, and running a
+    /// scan that found nothing would look like an answer about the medium.
+    fn resume_options(
+        options: &scan::Options,
+        session: &str,
+    ) -> Result<scan::Options, (ErrorCode, String)> {
+        let manifest = Manifest::read(session).map_err(|err| {
+            (
+                ErrorCode::InvalidParams,
+                format!("cannot read the session to resume from: {err}"),
+            )
+        })?;
+        let broken = scan::fragmentation_points(&manifest);
+        if broken.is_empty() {
+            return Err((
+                ErrorCode::InvalidParams,
+                "that session records no fragmentation points; it was written by a scan that \
+                 found none, or by a version of this tool that did not record them"
+                    .to_owned(),
+            ));
+        }
+        Ok(scan::Options {
+            jobs: options.jobs,
+            stages: argos_engine::Stages {
+                filesystem: false,
+                carving: true,
+                reassembly: true,
+            },
+            triage: false,
+            min_long_side: options.min_long_side,
+            reassembly_budget: options.reassembly_budget,
+            previews: options.previews,
+            // The points carry their own offsets; a range would only cut them.
+            range: None,
+            resume_from: Some(broken),
+        })
+    }
+
     /// One standing name from the wire, or `None` when the client sent none.
     ///
     /// One parser for both the gallery and the export, so the set a client is
@@ -372,7 +421,10 @@ impl Engine {
 
         let source = PathBuf::from(&request.source);
         let out = PathBuf::from(&request.out);
-        let options = translate::options(request);
+        let mut options = translate::options(request);
+        if let Some(session) = request.resume_from.as_deref() {
+            options = Self::resume_options(&options, session)?;
+        }
         let (started_tx, started_rx) = mpsc::sync_channel::<Result<String, String>>(1);
         let failed_tx = started_tx.clone();
 

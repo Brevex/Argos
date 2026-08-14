@@ -56,7 +56,7 @@ is one sample: the ordering between stages is dependable, the absolute figures a
 | C19 | Skip reassembly (`--no-reassemble`) | CLI, GUI | saves up to 2 h |
 | C20 | Bound reassembly by wall clock (`--reassembly-budget`), or let it search every candidate | CLI, GUI | sets the ceiling |
 | C21 | Scan one byte range of the medium rather than all of it (`--range`) | CLI | hours → minutes |
-| C22 | Search a previous session's fragmentation points again without re-reading the medium (`reassemble --from`) | CLI | saves the whole sweep |
+| C22 | Search a previous session's fragmentation points again without re-reading the medium (`reassemble --from`) | CLI, GUI | saves the whole sweep |
 | C23 | Choose the worker count (`--jobs`) | CLI, GUI | — |
 
 **Formats carved**: JPEG and PNG. Nothing else is claimed.
@@ -108,6 +108,7 @@ and what was only recorded are counted apart.
 | C42 | Report progress per stage as it happens, pushed rather than polled, with the unit named so a candidate count is never read as a byte count | CLI, GUI | — |
 | C43 | Stop a running scan, keeping everything recovered so far | CLI, GUI | — |
 | C44 | Pause a running scan and resume it | CLI (`p`/`r`), GUI | — |
+| C50 | Stop an acquisition part-way, keeping what was copied and counting what was never reached apart from what the medium refused | CLI (`q`), GUI | — |
 | C45 | Report a running total of regions the medium refused | CLI, GUI | — |
 | C46 | Warn about anything the user should know before trusting the result | CLI, GUI | — |
 | C47 | Run the engine as a JSON-RPC server on stdin/stdout (`serve`) | CLI | — |
@@ -120,13 +121,13 @@ and what was only recorded are counted apart.
 
 ## Totals
 
-49 capabilities.
+50 capabilities.
 
 | | Count |
 | --- | --- |
-| Reachable from the command line | **47** — every one except C48 and C49, which are the window itself |
-| Reachable from the window | **41** |
-| Reachable from the command line but not the window | **8** — C21, C22, C34, C37, C38, C40, C41, C47 |
+| Reachable from the command line | **48** — every one except C48 and C49, which are the window itself |
+| Reachable from the window | **42** |
+| Reachable from the command line but not the window | **7** — C21, C34, C37, C38, C40, C41, C47 |
 | Expressible on the wire but called by no client | **1** — C37 |
 
 The command line reaches every capability the tool has, headless, before any interface exposes it

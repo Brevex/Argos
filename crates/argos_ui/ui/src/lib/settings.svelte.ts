@@ -154,6 +154,9 @@ class Settings {
       // Minutes on screen, seconds on the wire.
       reassemblyBudgetSeconds:
         this.reassemblyBudget === null ? null : this.reassemblyBudget * 60,
+      // A fresh scan resumes nothing. The results view sets this when it asks
+      // for a session's fragmentation points to be searched again.
+      resumeFrom: null,
     };
   }
 
