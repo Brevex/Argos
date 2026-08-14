@@ -124,6 +124,24 @@ pub async fn scan_cancel(shell: State<'_, Shell>) -> Result<(), String> {
     shell.call(Call::ScanCancel, engine::done).await
 }
 
+/// Suspends the running scan at the next chunk boundary.
+///
+/// A scan of a disk runs for hours and holds the machine while it does. Pausing
+/// is what lets it be given back without losing the hours already spent: the
+/// medium stays open, nothing recovered is discarded, and the run carries on
+/// from where it stopped. The command line has had this since it existed
+/// (`p` and `r` at the prompt); this is the same call.
+#[tauri::command]
+pub async fn scan_pause(shell: State<'_, Shell>) -> Result<(), String> {
+    shell.call(Call::ScanPause, engine::done).await
+}
+
+/// Resumes a paused scan.
+#[tauri::command]
+pub async fn scan_resume(shell: State<'_, Shell>) -> Result<(), String> {
+    shell.call(Call::ScanResume, engine::done).await
+}
+
 /// The view preferences this account last stored, as JSON text.
 ///
 /// Empty when there are none. The window parses it; nothing here looks inside

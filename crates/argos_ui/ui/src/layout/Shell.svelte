@@ -159,6 +159,25 @@
     }
   }
 
+  /**
+   * Suspends the run, or lets it carry on.
+   *
+   * Nothing recovered is discarded either way and the medium stays open, so
+   * this is not a smaller Cancel: it is how a scan that runs for hours gives
+   * the machine back without losing the hours. Which way it goes is read from
+   * the engine's own state, never from a flag this window keeps.
+   */
+  async function suspend(): Promise<void> {
+    busy = true;
+    try {
+      await (session.paused ? ipc.scanResume() : ipc.scanPause());
+    } catch (err) {
+      session.problem = String(err);
+    } finally {
+      busy = false;
+    }
+  }
+
   // A run that ends — finished or stopped early — has a session directory
   // worth showing. Both write a manifest, so both have results to read.
   $effect(() => {
@@ -217,9 +236,20 @@
       <Gallery session={finished.session} previewDir={finished.previewDir} />
     {/if}
 
-    <button class="action" disabled={!action.enabled} onclick={session.running ? stop : start}>
-      {action.label}
-    </button>
+    <div class="controls">
+      <!--
+        Only while a run is under way, and never once a stop has been asked
+        for: there is nothing to suspend once the engine is winding down.
+      -->
+      {#if session.running && !session.stopping}
+        <button class="action secondary" disabled={busy} onclick={suspend}>
+          {session.paused ? 'Resume' : 'Pause'}
+        </button>
+      {/if}
+      <button class="action" disabled={!action.enabled} onclick={session.running ? stop : start}>
+        {action.label}
+      </button>
+    </div>
   </main>
 </div>
 
@@ -289,6 +319,25 @@
     border: 1px solid var(--form-pane-border);
     border-radius: var(--pane-radius);
     box-shadow: var(--form-pane-shadow);
+  }
+
+  /* The button row. `main` centres its children, so this keeps the pair
+     centred as one unit rather than stacking them. */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  /* Subordinate to the main button, and narrower: suspending a run is a
+     smaller decision than starting or abandoning one, and the layout says so
+     rather than leaving two equal buttons to be told apart by their words. */
+  .secondary {
+    width: 9.4rem;
+    color: var(--text);
+    background: transparent;
+    border-color: var(--pane-border);
+    box-shadow: none;
   }
 
   .action {

@@ -117,6 +117,17 @@ class Session {
    */
   stopping = $state(false);
 
+  /**
+   * Whether the engine has reported the run suspended.
+   *
+   * Taken from the engine's own lifecycle notification rather than set when the
+   * button is pressed: the engine stops at the next chunk boundary, so between
+   * the press and the pause the run is still reading. Showing it as paused
+   * before it is would be the window inventing a state the engine has not
+   * reached (`A-SHELL-NO-DOMAIN`).
+   */
+  paused = $state(false);
+
   /** When the current run started, for the elapsed clock. */
   startedAt = $state(0);
 
@@ -204,6 +215,7 @@ class Session {
     this.warnings = [];
     this.problem = '';
     this.stopping = false;
+    this.paused = false;
     this.startedAt = Date.now();
     this.now = this.startedAt;
   }
@@ -251,6 +263,10 @@ class Session {
         break;
       case 'state':
         if (message.params.state === 'cancelled') this.phase = 'cancelled';
+        // A run is suspended and resumed any number of times, so these are read
+        // every time rather than latched.
+        if (message.params.state === 'paused') this.paused = true;
+        if (message.params.state === 'running') this.paused = false;
         break;
       case 'warning':
         this.warnings = [...this.warnings, message.params.text];
@@ -277,6 +293,7 @@ class Session {
     this.now = Date.now();
     this.stage = '';
     this.stopping = false;
+    this.paused = false;
     this.artifacts = summary.artifacts;
     this.stored = summary.bytes;
     this.omitted = summary.omitted;

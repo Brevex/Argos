@@ -108,6 +108,8 @@ pub fn run() {
             commands::preferences_write,
             commands::devices,
             commands::scan_start,
+            commands::scan_pause,
+            commands::scan_resume,
             commands::scan_cancel,
             commands::scan_gallery,
         ])

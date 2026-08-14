@@ -77,7 +77,21 @@ export function scanStart(request: ScanRequest): Promise<ScanStarted> {
   return invoke('scan_start', { request });
 }
 
-/** Stops the running scan, keeping everything recovered so far. */
+/**
+ * Suspends the running scan at the next chunk boundary.
+ *
+ * The medium stays open and nothing recovered is discarded; the run carries on
+ * from where it stopped. This is the same call `p` makes at the `argos` prompt.
+ */
+export function scanPause(): Promise<void> {
+  return invoke('scan_pause');
+}
+
+/** Resumes a paused scan. */
+export function scanResume(): Promise<void> {
+  return invoke('scan_resume');
+}
+
 /**
  * One page of a finished session's artifacts, strongest evidence first.
  *
@@ -95,6 +109,7 @@ export function scanGallery(
   return invoke('scan_gallery', { session, offset, limit, standing });
 }
 
+/** Stops the running scan, keeping everything recovered so far. */
 export function scanCancel(): Promise<void> {
   return invoke('scan_cancel');
 }

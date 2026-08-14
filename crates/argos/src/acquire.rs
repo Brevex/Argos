@@ -134,3 +134,128 @@ pub trait Notice {
     /// What the acquisition recovered, and exactly what it did not.
     fn finished(&self, report: &acquire::Report);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::{Notice, Progress, acquire, run};
+
+    /// Sector size every fixture here is sized in multiples of.
+    const SECTOR: usize = 512;
+
+    /// Sectors the fixture medium holds.
+    const SECTORS: u64 = 2048;
+
+    /// Collects what an acquisition reported, in the order it said it.
+    ///
+    /// This is the other implementation of [`Notice`]: the terminal renderer
+    /// shows these to a person, and this one keeps them so a test can assert
+    /// on what a person would have been told.
+    #[derive(Default)]
+    struct Collected {
+        passes: Mutex<Vec<Progress>>,
+        report: Mutex<Option<acquire::Report>>,
+    }
+
+    impl Notice for Collected {
+        fn progress(&self, progress: Progress) {
+            self.passes
+                .lock()
+                .expect("no other thread panicked")
+                .push(progress);
+        }
+
+        fn finished(&self, report: &acquire::Report) {
+            *self.report.lock().expect("no other thread panicked") = Some(report.clone());
+        }
+    }
+
+    /// A medium whose every sector is distinguishable from every other, so a
+    /// copy that reorders or drops one cannot compare equal.
+    fn medium() -> Vec<u8> {
+        (0..SECTORS)
+            .flat_map(|sector| {
+                let mark = u8::try_from(sector % 251).expect("the modulus fits a byte");
+                std::iter::repeat_n(mark, SECTOR)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_acquisition_tells_its_caller_what_it_passed_and_what_it_recovered() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.img");
+        let planted = medium();
+        std::fs::write(&source, &planted).expect("write the source medium");
+        let to = dir.path().join("copy.img");
+
+        let collected = Collected::default();
+        run(&source, &to, &collected).expect("acquire a healthy image file");
+
+        assert_eq!(
+            std::fs::read(&to).expect("the acquired image"),
+            planted,
+            "an acquisition that is not bit-identical is not evidence"
+        );
+
+        // The point of the port: a caller that renders nothing still hears
+        // about every pass, and hears the account at the end.
+        let passes = collected.passes.lock().expect("no other thread panicked");
+        assert!(
+            passes
+                .iter()
+                .any(|pass| matches!(pass, Progress::Swept { .. })),
+            "the sequential sweep must report itself: {passes:?}"
+        );
+        assert!(
+            passes.iter().all(|pass| match pass {
+                Progress::Swept { done, total } | Progress::Refined { done, total } =>
+                    done <= total,
+            }),
+            "no pass may report more work done than it had to do: {passes:?}"
+        );
+
+        let report = collected
+            .report
+            .lock()
+            .expect("no other thread panicked")
+            .clone()
+            .expect("a finished acquisition reports what it recovered");
+        assert_eq!(report.sector_count(), SECTORS);
+        assert_eq!(report.recovered_sectors(), SECTORS);
+        assert!(
+            report.is_complete(),
+            "a healthy image file has nothing unreadable: {:?}",
+            report.unreadable()
+        );
+    }
+
+    #[test]
+    fn acquiring_into_a_path_that_already_exists_is_refused_before_anything_is_written() {
+        // The earlier image may be the only copy of a medium that no longer
+        // reads. Nothing about this may depend on the caller noticing.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.img");
+        std::fs::write(&source, medium()).expect("write the source medium");
+        let to = dir.path().join("copy.img");
+        std::fs::write(&to, b"an earlier acquisition").expect("write the existing image");
+
+        let collected = Collected::default();
+        run(&source, &to, &collected).expect_err("an existing destination must be refused");
+
+        assert_eq!(
+            std::fs::read(&to).expect("the earlier image"),
+            b"an earlier acquisition",
+            "the earlier acquisition must survive untouched"
+        );
+        assert!(
+            collected
+                .report
+                .lock()
+                .expect("no other thread panicked")
+                .is_none(),
+            "a refused acquisition reports no recovery"
+        );
+    }
+}
