@@ -241,6 +241,10 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+    /* Takes the larger share of what is left once a run has ended: the figures
+       above have stopped moving by then, and this is what the person is
+       looking at. The grid inside scrolls, so it never pushes the window. */
+    flex: 2 1 0;
     min-height: 0;
   }
 

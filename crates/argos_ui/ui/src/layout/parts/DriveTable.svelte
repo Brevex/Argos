@@ -144,7 +144,9 @@
        block's height is the same on every window and a scrollbar appears only
        when a machine actually has a fourth disk. */
     --row-height: 2.7rem;
-    max-height: calc(var(--row-height) * 3 + 2px);
+    /* Four rows on the window's own minimum height. The extra pixel keeps a
+       list of exactly four from showing a scrollbar for a rounding error. */
+    max-height: calc(var(--row-height) * 4 + 3px);
     border: 1px solid var(--inset-border);
     border-radius: var(--radius);
     background: var(--scanlines), var(--inset);

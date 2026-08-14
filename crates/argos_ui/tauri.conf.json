@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "Argos",
-        "width": 980,
-        "height": 680,
-        "minWidth": 820,
-        "minHeight": 560,
+        "width": 1120,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 800,
         "decorations": false,
         "transparent": true
       }
@@ -40,7 +40,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/argos"],
+    "externalBin": [
+      "binaries/argos"
+    ],
     "category": "Utility",
     "shortDescription": "Forensic recovery of deleted images",
     "longDescription": "Recovers permanently deleted images from block devices. The medium is opened read-only and never written to; every artifact is recorded with the extents it came from and the hash of what was written.",
@@ -48,13 +50,17 @@
       "deb": {
         "section": "utils",
         "priority": "optional",
-        "depends": ["polkit"],
+        "depends": [
+          "polkit"
+        ],
         "files": {
           "/usr/share/polkit-1/actions/org.argos.shell.policy": "packaging/org.argos.shell.policy"
         }
       },
       "rpm": {
-        "depends": ["polkit"],
+        "depends": [
+          "polkit"
+        ],
         "files": {
           "/usr/share/polkit-1/actions/org.argos.shell.policy": "packaging/org.argos.shell.policy"
         }

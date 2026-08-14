@@ -313,7 +313,7 @@
   }
 
   .dialog {
-    width: min(34rem, calc(100vw - 3rem));
+    width: min(46rem, calc(100vw - 4rem));
     background: var(--pane);
     backdrop-filter: var(--pane-blur);
     -webkit-backdrop-filter: var(--pane-blur);
@@ -364,7 +364,7 @@
 
   .body {
     display: flex;
-    gap: 0.9rem;
+    gap: 1.2rem;
     align-items: flex-start;
   }
 
@@ -373,7 +373,7 @@
   nav {
     display: flex;
     flex: none;
-    width: 7.2rem;
+    width: 8.4rem;
     flex-direction: column;
     gap: 0.15rem;
   }
@@ -406,9 +406,13 @@
   .panel {
     flex: 1;
     min-width: 0;
-    min-height: 17rem;
-    max-height: min(26rem, calc(100vh - 12rem));
+    /* Tall enough that the longest section does not scroll on the window's own
+       minimum height, and capped so a short screen still shows the header and
+       the way out. */
+    min-height: 24rem;
+    max-height: min(38rem, calc(100vh - 11rem));
     overflow-y: auto;
+    padding-right: 0.3rem;
   }
 
   .lead {
@@ -462,8 +466,8 @@
   .field {
     display: flex;
     align-items: flex-start;
-    gap: 0.6rem;
-    padding: 0.6rem 0.7rem;
+    gap: 0.75rem;
+    padding: 0.72rem 0.85rem;
     background: var(--inset);
     border: 1px solid transparent;
     border-radius: var(--radius);
@@ -489,10 +493,59 @@
     opacity: 0.5;
   }
 
+  /* A switch rather than a tick box.
+     Still a real checkbox — focusable, keyboard-operable, announced as one —
+     with `appearance: none` turning the control itself into the track and its
+     `::after` into the thumb. One element, so nothing can drift out of step
+     with what the input actually holds. */
   input[type='checkbox'] {
-    margin: 0.12rem 0 0;
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
     flex: none;
-    accent-color: var(--accent-strong);
+    margin: 0.1rem 0 0;
+    width: 2.3rem;
+    height: 1.3rem;
+    border-radius: 999px;
+    background: var(--inset-border);
+    border: 1px solid var(--inset-border);
+    cursor: pointer;
+    transition:
+      background 130ms ease,
+      border-color 130ms ease;
+  }
+
+  input[type='checkbox']::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 0.15rem;
+    transform: translateY(-50%);
+    width: 0.95rem;
+    height: 0.95rem;
+    border-radius: 50%;
+    background: var(--text);
+    transition: left 130ms ease;
+  }
+
+  input[type='checkbox']:checked {
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+  }
+
+  input[type='checkbox']:checked::after {
+    left: calc(100% - 1.1rem);
+    background: var(--accent-text);
+  }
+
+  input[type='checkbox']:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  input[type='checkbox']:focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 2px;
   }
 
   .text {
@@ -503,21 +556,21 @@
   }
 
   .name {
-    font-size: 0.82rem;
+    font-size: 0.85rem;
   }
 
   .about {
     margin: 0;
-    font-size: 0.71rem;
-    line-height: 1.38;
+    font-size: 0.74rem;
+    line-height: 1.42;
     color: var(--text-dim);
   }
 
   .cost {
     margin-left: auto;
     flex: none;
-    padding-top: 0.05rem;
-    font-size: 0.69rem;
+    padding-top: 0.15rem;
+    font-size: 0.72rem;
     white-space: nowrap;
     color: var(--text-faint);
   }
@@ -525,7 +578,7 @@
   /* Indented under the stage it belongs to, and hung off it by a rule, so it
      reads as part of that choice rather than as a fourth one. */
   .nested {
-    margin: 0.25rem 0 0 1.6rem;
+    margin: 0.3rem 0 0 3.05rem;
     padding-left: 0.7rem;
     border-left: 1px solid var(--inset-border);
   }
