@@ -29,13 +29,15 @@
       case 'connecting':
         return 'Starting the recovery engine…';
       case 'scanning': {
-        // A stop was asked for. The engine finishes the artifact in flight,
-        // writes it and writes the manifest, and saying so is what makes the
-        // wait legible instead of looking like a button that did nothing.
+        // A stop was asked for. The engine stops searching and writes what the
+        // search found, artifact by whole artifact, then the manifest. Saying
+        // so is what makes the wait legible instead of looking like a button
+        // that did nothing — and what tells the user there is something to
+        // wait for rather than something to press again.
         if (session.stopping) {
           return session.job === 'acquire'
             ? 'Stopping — what has been copied so far stays in the image'
-            : 'Stopping — finishing the image being written, then the manifest';
+            : 'Stopping — writing what was found, then the manifest';
         }
         // The stage, named, because a run spends most of its time in passes
         // that are not the read: a screen that only ever said "Scanning" while

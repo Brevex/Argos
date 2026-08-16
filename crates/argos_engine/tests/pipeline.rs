@@ -121,6 +121,45 @@ fn the_result_does_not_depend_on_how_many_workers_ran() {
 }
 
 #[test]
+fn the_search_finds_the_same_images_however_many_threads_ran_it() {
+    // A region's headers are searched across threads, and one recovery changes
+    // which bytes the next header may be offered. What a thread happened to
+    // finish first must not decide that: the region's outcome is settled in
+    // header order, so a run on twelve cores reports exactly what a run on one
+    // reports. The images above are whole, and cover none of this.
+    let block = argos_carve::classify::BLOCK_BYTES;
+    let mut disk = argos_carve::fixture::Disk::noisy(96 * block, 0x51ED_2A11_0000_0001);
+    for nth in 0..4_usize {
+        let photo = argos_carve::fixture::photo_jpeg(320, 240, 0xC0FF_EE00 ^ nth as u64);
+        let at = (8 + nth * 20) * block;
+        disk = disk.with(at, &photo[..block]);
+        // Two of the four have a remainder to find; the others spend the whole
+        // search and recover nothing, which is the medium's usual answer.
+        if nth % 2 == 1 {
+            disk = disk.with(at + 6 * block, &photo[block..]);
+        }
+    }
+    let image = disk.into_bytes();
+
+    let (one, report_one) = scan_with(&image, config(1));
+    let (many, report_many) = scan_with(&image, config(8));
+
+    assert!(
+        report_one.reassembled > 0,
+        "the fixture must reassemble something for this to mean anything"
+    );
+    assert_eq!(
+        one, many,
+        "the same medium searched on more threads must yield the same artifacts"
+    );
+    assert_eq!(report_one.reassembled, report_many.reassembled);
+    assert_eq!(
+        report_one.reassembly_attempted,
+        report_many.reassembly_attempted
+    );
+}
+
+#[test]
 fn two_runs_over_the_same_medium_produce_the_same_manifest() {
     let (image, _) = disk_with_images(3);
 
@@ -766,6 +805,63 @@ fn cancelling_stops_the_stage_that_writes_artifacts() {
         all.len() > 8,
         "the fixture recovers {} artifacts",
         all.len()
+    );
+}
+
+/// A progress sink that cancels the run as a given stage finishes.
+struct CancelWhenStageEnds {
+    session: ScanSession,
+    stage: Stage,
+}
+
+impl ProgressSink for CancelWhenStageEnds {
+    fn emit(&self, event: ScanEvent) {
+        if let ScanEvent::StageFinished { stage, .. } = event
+            && stage == self.stage
+        {
+            self.session.cancel();
+        }
+    }
+}
+
+#[test]
+fn cancelling_the_search_still_writes_what_the_search_found() {
+    // Cancel means "stop searching and write what you have". What the earlier
+    // stages established is what the run has to show for itself — on a large
+    // medium, hours of reading — and a stop aimed at the search must not take
+    // it along. Stopping the writing as well is a second request.
+    let mut disk = argos_carve::fixture::Disk::filled(CHUNK * 6);
+    for index in 0..24 {
+        let jpeg = argos_carve::fixture::Jpeg::new()
+            .with_entropy_bytes(512 + index * 3)
+            .build();
+        disk = disk.with(4096 + index * 8192, &jpeg);
+    }
+    let image = disk.into_bytes();
+
+    let session = ScanSession::new(config(2));
+    // As validation ends: every carved finding exists and none has been
+    // written yet, which is where a cancel during a long search lands.
+    let progress = CancelWhenStageEnds {
+        session: session.clone(),
+        stage: Stage::Validation,
+    };
+    let medium = Medium::new(views(&image, 2), image.len() as u64).expect("medium");
+    let mut sink = Collector::new();
+
+    let report = session.start(medium, &mut sink, &progress).expect("scan");
+
+    assert_eq!(report.state, RunState::Cancelled);
+    let (all, _) = scan(&image);
+    assert!(
+        all.len() > 8,
+        "the fixture recovers {} artifacts",
+        all.len()
+    );
+    assert_eq!(
+        sink.artifacts().len(),
+        all.len(),
+        "a cancelled search must write the findings it had, not discard them"
     );
 }
 

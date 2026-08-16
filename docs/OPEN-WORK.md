@@ -289,23 +289,22 @@ that cannot be confirmed is not reported.
 the existing ext4 recovery tests are unchanged. Against the disk: `volumes` falls from 15,186 to a
 number a person can read.
 
-### 3.7 Reassembly runs on one core
+### 3.7 Reassembly runs on one core — **done**
 
-**Where.** [`pipeline.rs:1312`](../crates/argos_engine/src/pipeline.rs#L1312) —
-`reassemble_broken` takes `views.first_mut()` and searches every region sequentially, while the
-sweep and validation stages both use a worker pool. §4 of the development plan calls for a worker
-pool per header here.
+The parallel unit turned out to be the header, not the region: a region is memory once loaded, so
+every worker takes its own view of the held bytes and its own buffers, and `in_parallel` in
+[`pipeline.rs`](../crates/argos_engine/src/pipeline.rs) hands them the region's headers.
 
-**What it costs.** Twelve cores idle for the two hours the stage is budgeted.
+The gap search consults nothing the headers share, so it splits exactly. The walk does consult the
+claimed set, so every worker is given the set as it stood when the phase began and the region's
+outcome is settled afterwards in header order; a walk that a neighbour's recovery invalidated is run
+again there against everything claimed by then. That is what makes the region's result the
+sequential one for any number of threads, asserted by
+`the_search_finds_the_same_images_however_many_threads_ran_it`.
 
-**How to implement.** Regions are independent once loaded, so the parallel unit is a region, not a
-header. The obstacle is `spoken_for`: extents already claimed are shared mutable state across
-headers, and two workers could claim the same bytes. Either partition it per region — regions are
-disjoint in the bytes they can claim, since a hypothesis is bounded by the held region — or
-reconcile claims after each region and re-run the few that conflict.
-
-**Acceptance.** Same artifacts, same manifest, on one worker and on many — the property
-`the_result_does_not_depend_on_how_many_workers_ran` already asserts for the sweep.
+**Measured**: 28.78 s → 5.02 s, **5.74×** on six physical cores, with identical artifacts and
+identical recovery counts on 1 and 12 workers. The remaining serial work is region loading, which is
+the medium's read speed and not a core count.
 
 ### 3.8 A volume whose anchors are all gone is still unreachable
 
@@ -326,6 +325,46 @@ the format state machine. An inference that produces no confirmed recovery produ
 
 **Whether it is needed** depends on the next run: if `unattributed_residue` falls from 1,512 to
 near zero after §2.5, the anchors were there and this is unnecessary.
+
+### 3.8b Cancelling discards what the run already established
+
+**Where.** `emit` in [`pipeline.rs`](../crates/argos_engine/src/pipeline.rs) breaks on
+`control.is_cancelled()` at the top of its loop, and `report_findings` runs *after* `carve` — which
+contains the reassembly stage.
+
+**What is wrong.** Cancel during a search means the flag is already raised when the report stage
+starts, so the loop breaks on its first iteration and **no artifact is written**. The manifest is
+written with `artifacts: []`. The comment above that line says "cancelling still writes the
+manifest", and it does — empty. On the 12-hour run of `defects/06`, pressing Cancel would have
+discarded every one of the ~47,000 artifacts the reading stages had already established.
+
+**What survives, and why that made the fix optional.** `report.fragmentation` is filled before
+reassembly starts and reaches the manifest through a `Summary` field that does not pass through
+`emit`, so a cancelled run still records where every fragmentation point is. That is what makes a
+later `argos reassemble --from` cheap, and it is why cancelling that run was the right call rather
+than an expensive one.
+
+**How to implement.** The honest meaning of Cancel is "stop searching and write what you have", so
+the report stage must distinguish a stop asked for during the search from one asked for during the
+writing. Give `Control` a cancellation generation that `report_findings` reads on entry and compares
+against, stopping only if it increases — a second press. Keep the existing behaviour for a Cancel
+pressed *while* artifacts are being written, which is the case the current check was written for.
+
+**Acceptance.** A scan cancelled during reassembly writes every artifact the earlier stages
+established; one cancelled during the report stage stops between two artifacts, as it does today.
+
+### 3.8c Pause does nothing outside the sweep
+
+**Where.** `wait_while_paused` is consulted in exactly one place,
+[`pipeline.rs:537`](../crates/argos_engine/src/pipeline.rs#L537), inside the reader loop.
+
+**What is wrong.** The reassembly stage is where a scan of a large medium spends most of its wall
+clock, and the Pause button is inert for all of it — it reports paused and the stage carries on.
+
+**How to implement.** Consult `Control::wait_while_paused` in the region loop of `search_region`,
+beside the cancellation and budget checks, so a pause takes effect within one candidate. Failing
+that, the window must disable the button for stages that cannot honour it, because a control that
+reports a state the engine is not in is worse than no control.
 
 ### 3.9 Smaller open items
 

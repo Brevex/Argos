@@ -211,6 +211,10 @@ pub fn spawn_stop_control(stop: Arc<AtomicBool>) -> Controls {
 
 /// Watches stdin for `p`, `r` and `q` and drives `session` accordingly.
 ///
+/// `q` stops the search and lets the run write what it found; a second `q`,
+/// while it is writing, stops that too. So the reader keeps listening after the
+/// first one.
+///
 /// The thread is detached: it may be parked on a read from a console that
 /// never sends anything, and the process must still be able to exit.
 #[must_use]
@@ -231,10 +235,7 @@ pub fn spawn_console_controls(session: ScanSession) -> Controls {
             match command.trim() {
                 "p" => session.pause(),
                 "r" => session.resume(),
-                "q" => {
-                    session.cancel();
-                    return;
-                }
+                "q" => session.cancel(),
                 _ => {}
             }
         }

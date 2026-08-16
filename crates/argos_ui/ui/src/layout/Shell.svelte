@@ -58,18 +58,21 @@
   /**
    * The single button: what it says, and whether it can be pressed.
    *
-   * Once a stop has been asked for there is nothing left to press: the engine
-   * has been told, and it stops between two artifacts rather than instantly.
-   * Saying so is the difference between a button that is working and a button
-   * that looks ignored.
+   * Cancel stops the search and lets the run write what the search found —
+   * on a large medium, the hours of reading that came before the press. That
+   * writing is itself a stage worth minutes, so the button stays live and a
+   * second press gives it up too. A copy has nothing after its stop, so there
+   * its button is spent.
    */
-  const action = $derived(
-    session.stopping
-      ? { label: 'Stopping…', enabled: false }
-      : session.running
-        ? { label: 'Cancel', enabled: !busy }
-        : { label: job === 'acquire' ? 'Copy disk' : 'Start scan', enabled: ready },
-  );
+  const action = $derived.by(() => {
+    if (session.stopping) {
+      return session.job === 'acquire'
+        ? { label: 'Stopping…', enabled: false }
+        : { label: 'Skip writing', enabled: !busy };
+    }
+    if (session.running) return { label: 'Cancel', enabled: !busy };
+    return { label: job === 'acquire' ? 'Copy disk' : 'Start scan', enabled: ready };
+  });
 
   /**
    * Connects to the engine and lists what this machine has.

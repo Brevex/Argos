@@ -745,7 +745,7 @@ pub fn parallel_unique_path<R: Read + Seek>(
          a header by binary search over them"
     );
     let mut shared = Shared {
-        claimed: spoken_for.to_vec(),
+        claimed: Claimed::over(spoken_for),
         attempts: 0,
     };
     let mut assembled = Vec::new();
@@ -763,7 +763,7 @@ pub fn parallel_unique_path<R: Read + Seek>(
             limits,
             scratch,
         )? {
-            shared.claimed.extend_from_slice(&reassembly.extents);
+            shared.claimed.add(&reassembly.extents);
             assembled.push((header, reassembly));
         }
     }
@@ -784,8 +784,79 @@ struct Shared {
     /// that completed. Whole ranges rather than start offsets: an extent
     /// covers many blocks, and withholding only its first one would let a
     /// later path read the same bytes again.
-    claimed: Vec<ByteRange>,
+    claimed: Claimed,
     attempts: u32,
+}
+
+/// The bytes some other recovery already accounts for, answered in log time.
+///
+/// The walk asks "is this block spoken for?" once per candidate block it
+/// considers — up to 65,536 of them for a 256 MiB region — and the set it asks
+/// about holds one extent per artifact the run has recovered. A scan of a
+/// terabyte handed it 1,639,834. Scanning that list per question makes the
+/// stage cost the *product* of the two, which is a stage that finishes on
+/// every fixture and never finishes on a disk.
+///
+/// Nothing about the answer needs the list to be walked: the ranges are
+/// positions on a medium, so sorting them once turns every later question into
+/// a binary search. They are merged as they are sorted, because overlapping
+/// claims are one claim and a merged list lets the search stop at the single
+/// candidate range instead of continuing past it.
+struct Claimed {
+    /// Disjoint ranges in ascending order.
+    ranges: Vec<ByteRange>,
+}
+
+impl Claimed {
+    /// The set `extents` describes, sorted and merged.
+    fn over(extents: &[ByteRange]) -> Self {
+        let mut ranges: Vec<ByteRange> = extents.iter().copied().filter(|r| r.len > 0).collect();
+        ranges.sort_unstable_by_key(|range| range.start.get());
+        Self::merge(&mut ranges);
+        Self { ranges }
+    }
+
+    /// Collapses touching or overlapping ranges, which the search relies on:
+    /// with them merged, at most one range can contain any offset.
+    fn merge(ranges: &mut Vec<ByteRange>) {
+        let mut kept: Vec<ByteRange> = Vec::with_capacity(ranges.len());
+        for range in ranges.drain(..) {
+            match kept.last_mut() {
+                Some(last) if range.start.get() <= last.end_saturating().get() => {
+                    let end = last
+                        .end_saturating()
+                        .get()
+                        .max(range.end_saturating().get());
+                    last.len = end.saturating_sub(last.start.get());
+                }
+                _ => kept.push(range),
+            }
+        }
+        *ranges = kept;
+    }
+
+    /// Adds what a completed path claimed, keeping the set sorted and merged.
+    ///
+    /// Called once per recovered image rather than once per hypothesis, so the
+    /// re-sort is paid on the rare event and not in the hot loop.
+    fn add(&mut self, extents: &[ByteRange]) {
+        self.ranges
+            .extend(extents.iter().copied().filter(|range| range.len > 0));
+        self.ranges.sort_unstable_by_key(|range| range.start.get());
+        Self::merge(&mut self.ranges);
+    }
+
+    /// Whether `at` falls inside any claimed range.
+    ///
+    /// The ranges are disjoint and ascending, so the only one that can contain
+    /// `at` is the last one starting at or before it.
+    fn covers(&self, at: u64) -> bool {
+        let after = self.ranges.partition_point(|range| range.start.get() <= at);
+        after
+            .checked_sub(1)
+            .and_then(|index| self.ranges.get(index))
+            .is_some_and(|range| at < range.end_saturating().get())
+    }
 }
 
 /// A block that could hold image data, as classification saw it.
@@ -973,21 +1044,27 @@ fn step<R: Read + Seek>(
         if !candidate.profile.class.can_hold_image_data() {
             continue;
         }
+        // Before the tests below, not after them: a spent budget must end the
+        // loop rather than go on paying for questions whose answers it can no
+        // longer act on.
+        if shared.attempts >= walk.limits.max_hypotheses {
+            break;
+        }
         let start = candidate.start.get();
         // A block inside an extent this path already holds, or one another
         // recovery already claimed, is not free space. Testing the whole range
         // rather than the start offset is what stops a path from reading the
         // same bytes twice and reporting a layout no allocator could have
         // produced.
-        if covers(&shared.claimed, start) || covers(&walk.path, start) {
+        //
+        // The claimed set is asked in log time; the path is at most
+        // `max_fragments` extents and is walked.
+        if shared.claimed.covers(start) || covers(&walk.path, start) {
             continue;
         }
         let tail = tail_len(start, walk.medium_len);
         if tail == 0 {
             continue;
-        }
-        if shared.attempts >= walk.limits.max_hypotheses {
-            break;
         }
         shared.attempts += 1;
 

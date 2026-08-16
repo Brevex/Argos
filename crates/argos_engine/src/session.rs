@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io::{Read, Seek};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use argos_core::artifact::ArtifactSink;
@@ -283,6 +283,9 @@ impl ScanSession {
 /// spinning (`M-THROUGHPUT`).
 pub(crate) struct Control {
     state: AtomicU8,
+    /// How many times a stop has been asked for, so a stage can tell a request
+    /// aimed at itself from one an earlier stage was already stopped by.
+    stops: AtomicU64,
     gate: Mutex<()>,
     resumed: Condvar,
 }
@@ -297,6 +300,7 @@ impl Control {
     fn new() -> Self {
         Self {
             state: AtomicU8::new(RUNNING),
+            stops: AtomicU64::new(0),
             gate: Mutex::new(()),
             resumed: Condvar::new(),
         }
@@ -345,12 +349,24 @@ impl Control {
     }
 
     fn cancel(&self) {
+        // Counted before the state is published, so a stage that observes the
+        // cancellation also observes the request that raised it.
+        self.stops.fetch_add(1, Ordering::AcqRel);
         self.state.store(CANCELLED, Ordering::Release);
         self.resumed.notify_all();
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.state.load(Ordering::Acquire) == CANCELLED
+    }
+
+    /// How many stops have been asked for over this run's life.
+    ///
+    /// A stage that must not undo the work of the stages before it reads this
+    /// when it begins and stops only once the count has grown: a cancellation
+    /// raised while an earlier stage was running asked *that* stage to stop.
+    pub(crate) fn stops_requested(&self) -> u64 {
+        self.stops.load(Ordering::Acquire)
     }
 
     /// Blocks while the run is paused. Returns `false` when the run was
