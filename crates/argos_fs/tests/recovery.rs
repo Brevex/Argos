@@ -360,6 +360,53 @@ fn ntfs_orphan_scan_finds_records_outside_any_mft() {
 }
 
 #[test]
+fn an_orphaned_record_names_and_dates_its_file_without_any_volume() {
+    // What survives a re-format when the boot sector does not: the record is
+    // on the surface, the geometry that would place its content is gone, and
+    // its identity does not depend on that geometry. Naming the file is what
+    // says it existed; locating it is a separate claim this must not make.
+    let file = FilePlan::new("carousel.jpg", 700 * 1024, 40960);
+    let volume = ntfs_volume(2 * 1024 * 1024, 64 * NTFS_CLUSTER, &file);
+    let record_at = 64 * NTFS_CLUSTER + 1024;
+    let record = volume[record_at..record_at + 1024].to_vec();
+    let mut image = volume;
+    image[..SECTOR].fill(0);
+    let orphan_at = 1_500_000_usize.next_multiple_of(1024);
+    image[orphan_at..orphan_at + 1024].copy_from_slice(&record);
+
+    let found = ntfs::orphan_records(
+        &mut Cursor::new(&image),
+        ByteRange::new(ByteOffset::new(orphan_at as u64), 1024 * 16),
+    )
+    .expect("in-memory read");
+
+    let [lost] = found.as_slice() else {
+        panic!("expected exactly one orphaned record, got {}", found.len());
+    };
+    assert_eq!(lost.name.as_deref(), Some("carousel.jpg"));
+    assert_eq!(lost.size, 40960, "the record states its own content length");
+    assert_eq!(
+        lost.record_at, orphan_at as u64,
+        "the record's own position is where the lost $MFT lay"
+    );
+    assert!(
+        !lost.timestamps.is_empty(),
+        "a record carries the times the file was made and last written"
+    );
+    // The run list in the volume's own units, which is what makes a candidate
+    // geometry testable: these clusters at this cluster size are that size.
+    assert!(
+        lost.first_lcn.is_some(),
+        "the run list gave a first cluster"
+    );
+    assert_eq!(
+        lost.clusters * NTFS_CLUSTER as u64,
+        40960,
+        "the runs account for exactly the stated size at the true cluster size"
+    );
+}
+
+#[test]
 fn a_record_truncated_at_any_boundary_is_never_misread() {
     let file = FilePlan::new("evidence.jpg", 512 * 1024, 4096);
     let image = ntfs_volume(2 * 1024 * 1024, 64 * NTFS_CLUSTER, &file);

@@ -346,6 +346,52 @@ fn a_fragmented_deleted_file_is_reassembled_from_its_extents_in_order() {
 }
 
 #[test]
+fn a_deleted_file_whose_volume_is_gone_is_still_named_and_dated() {
+    // The state a re-format leaves: the `FILE` record survives on the surface,
+    // the boot sector that said where the volume began does not. Its content
+    // cannot be placed — a run list counts clusters of a volume nobody can
+    // find — but the record still says which file it was, how large, and when.
+    // Losing that is losing the only evidence the file ever existed.
+    let jpeg = argos_carve::fixture::Jpeg::new()
+        .with_entropy_bytes(4096)
+        .build();
+    let file =
+        argos_fs::fixture::FilePlan::new("holiday.jpg", 128 * 1024, jpeg.len()).with_content(jpeg);
+    let mft_at = 32 * 1024;
+    let mut image = argos_fs::fixture::ntfs_volume(CHUNK * 6, mft_at, &file);
+    // Neither boot sector: NTFS keeps one at the volume's first sector and a
+    // copy at its last, and a re-format that leaves either behind leaves a
+    // volume the sweep can still resolve. Both gone is the case with nothing
+    // left to resolve against — and the case the record has to survive.
+    let sector = argos_fs::fixture::SECTOR;
+    image[..sector].fill(0);
+    let end = image.len() - sector;
+    image[end..].fill(0);
+    let record_at = mft_at + 1024;
+
+    let (_, report) = scan(&image);
+
+    assert!(
+        report.unattributed_residue > 0,
+        "the record sits in a region no volume covers"
+    );
+    let named = report
+        .lost_files
+        .iter()
+        .find(|lost| lost.name.as_deref() == Some("holiday.jpg"))
+        .expect("a record no volume covers must still name its file");
+    assert_eq!(named.size, file.content.len() as u64);
+    assert!(
+        !named.timestamps.is_empty(),
+        "the record carries the times the file was made and last written"
+    );
+    assert_eq!(
+        named.record_at, record_at as u64,
+        "where the record lay is where the lost $MFT lay"
+    );
+}
+
+#[test]
 fn a_file_from_the_filesystem_before_the_last_format_still_comes_back() {
     // An ext4 volume re-formatted as NTFS: the new boot sector lands at
     // offset 0, while the ext4 superblock a kibibyte in, its journal and the

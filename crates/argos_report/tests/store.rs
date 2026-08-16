@@ -120,6 +120,7 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
             coverage: Some(&coverage),
             volumes: &volumes,
             fragmentation: &[],
+            lost_files: &[],
         })
         .expect("manifest");
     let json: serde_json::Value =
@@ -235,6 +236,7 @@ fn recovered_files_are_given_to_the_account_that_asked() {
             coverage: None,
             volumes: &[],
             fragmentation: &[],
+            lost_files: &[],
         })
         .expect("write the manifest");
 

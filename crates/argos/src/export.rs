@@ -215,8 +215,10 @@ pub fn run(from: &Path, to: &Path, filter: &Filter) -> anyhow::Result<Exported> 
         volumes: manifest.volumes.clone(),
         // An export describes the files it carried, and a fragmentation point
         // is a place on the source medium rather than a file. It stays with
-        // the session that can still reach that medium.
+        // the session that can still reach that medium. So does a lost file,
+        // which is a place on that medium and no file at all.
         fragmentation: Vec::new(),
+        lost_files: Vec::new(),
         artifacts: kept,
     };
     subset

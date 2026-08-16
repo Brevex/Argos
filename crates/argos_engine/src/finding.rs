@@ -237,6 +237,20 @@ pub struct ScanReport {
     /// volume, so their extents could not be resolved. They are counted, not
     /// guessed at.
     pub unattributed_residue: u64,
+    /// Files an orphaned `FILE` record still names, whose content this run
+    /// could not place.
+    ///
+    /// **Not recoveries, and never counted as artifacts**: no bytes were read
+    /// for them and no extent is claimed. What they are is evidence. A record
+    /// keeps a file's name, size and times long after the boot sector that
+    /// would locate its content is gone, and those three survive without any
+    /// geometry at all — so a run that discards them reports a medium as
+    /// emptier than the medium says it is (`A-CONFIDENCE-HONEST`).
+    ///
+    /// Each also carries its run list in the volume's own units, which is what
+    /// makes a candidate geometry testable afterwards: the right cluster size
+    /// is the one whose clusters account for the size the record states.
+    pub lost_files: Vec<argos_fs::ntfs::LostFile>,
     /// One triage annotation per persisted artifact, in emit order. Empty when
     /// triage did not run. Annotations only: nothing here can remove an
     /// artifact (A-TRIAGE-NOT-VERDICT).

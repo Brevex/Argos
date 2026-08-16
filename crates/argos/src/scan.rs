@@ -248,6 +248,7 @@ fn write_manifest(
     let coverage = report.map(coverage);
     let volumes = report.map(volumes).unwrap_or_default();
     let fragmentation = report.map(fragmentation).unwrap_or_default();
+    let lost = report.map(lost_files).unwrap_or_default();
     store
         .finish(argos_report::Summary {
             tool_version: env!("CARGO_PKG_VERSION"),
@@ -259,6 +260,7 @@ fn write_manifest(
             coverage: coverage.as_ref(),
             volumes: &volumes,
             fragmentation: &fragmentation,
+            lost_files: &lost,
         })
         .context("cannot write manifest")
 }
@@ -351,6 +353,29 @@ fn fragmentation(report: &argos_engine::ScanReport) -> Vec<argos_report::Fragmen
             declared_height: broken.declared.map(|(_, height)| height),
             decoded: broken.decoded,
             required: broken.required,
+        })
+        .collect()
+}
+
+/// Turns records of files the run could not place into manifest records.
+///
+/// Kept out of `artifacts` on purpose: nothing here was read from the medium.
+/// A name, a size and two timestamps are what a `FILE` record states about
+/// itself, and they survive the loss of the volume that would locate its
+/// content — so they are the last evidence that a particular file existed
+/// (`A-CONFIDENCE-HONEST`).
+fn lost_files(report: &ScanReport) -> Vec<argos_report::LostFileRecord> {
+    report
+        .lost_files
+        .iter()
+        .map(|lost| argos_report::LostFileRecord {
+            name: lost.name.clone(),
+            size: lost.size,
+            record_at: lost.record_at,
+            created_unix: lost.timestamps.created.map(argos_report::unix_seconds),
+            modified_unix: lost.timestamps.modified.map(argos_report::unix_seconds),
+            first_cluster: lost.first_lcn,
+            clusters: lost.clusters,
         })
         .collect()
 }

@@ -541,6 +541,85 @@ pub fn is_plausible_record(raw: &[u8]) -> bool {
     fixups_verify(head).is_some()
 }
 
+/// A deleted file an orphaned `FILE` record still describes, whose content
+/// this run could not place.
+///
+/// A record carries its own name, times and size; **where** its content lay is
+/// a run list of volume-relative cluster numbers, and those mean nothing
+/// without the volume's geometry. When no volume can be attributed to the
+/// record, this is everything that survives: evidence the file existed, and
+/// never a claim about any bytes (`A-CONFIDENCE-HONEST`).
+///
+/// `first_lcn` and `clusters` are the run list as the record states it, in the
+/// volume's own units. They are kept because they are what makes a candidate
+/// geometry testable — a cluster size is right when `clusters` times it
+/// accounts for `size`, and wrong when it does not.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LostFile {
+    /// File name, when one survived in the record.
+    pub name: Option<String>,
+    /// Timestamps the record carries.
+    pub timestamps: Timestamps,
+    /// Content length in bytes the record claims.
+    pub size: u64,
+    /// Absolute offset the record itself was read from — where the `$MFT` of
+    /// the filesystem that owned this file lay.
+    pub record_at: u64,
+    /// First logical cluster of the content, when the run list gave one.
+    pub first_lcn: Option<u64>,
+    /// Clusters the run list accounts for. Zero when the content was resident
+    /// in the record itself, or when no run list survived.
+    pub clusters: u64,
+}
+
+impl std::fmt::Debug for LostFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LostFile")
+            .field("name", &self.name.as_ref().map(|_| "<redacted>"))
+            .field("timestamps", &self.timestamps)
+            .field("size", &self.size)
+            .field("record_at", &self.record_at)
+            .field("first_lcn", &self.first_lcn)
+            .field("clusters", &self.clusters)
+            .finish()
+    }
+}
+
+/// Reads every orphaned `FILE` record in `range` for what it says about itself.
+///
+/// The counterpart to [`orphan_scan`] for the case that has no volume: a
+/// re-format leaves `FILE` records on the surface long after the boot sector
+/// that described their geometry is gone, and a record's identity does not
+/// depend on that geometry. What comes back names files and dates them; it
+/// locates nothing.
+///
+/// # Errors
+///
+/// Fails only on I/O faults; anything that does not validate is skipped.
+pub fn orphan_records<R: Read + Seek>(
+    src: &mut R,
+    range: ByteRange,
+) -> Result<Vec<LostFile>, FsError> {
+    let record_len = DEFAULT_RECORD_SIZE as usize;
+    let mut found = Vec::new();
+    let mut buf = Vec::new();
+    let mut at = range.start.get();
+    let end = at.saturating_add(range.len);
+    while at.saturating_add(record_len as u64) <= end {
+        if !read_at(src, at, record_len, &mut buf)? {
+            break;
+        }
+        if buf.get(..4) == Some(FILE_MAGIC)
+            && let Some(record) = Record::parse(&buf, at)
+            && record.deleted
+        {
+            found.push(record.into_lost_file());
+        }
+        at += record_len as u64;
+    }
+    Ok(found)
+}
+
 /// Scans `range` for orphaned `FILE` records.
 ///
 /// Orphans are records outside any known `$MFT` — the survivors of a
@@ -768,6 +847,26 @@ impl Record {
                 }
                 Some(extents)
             }
+        }
+    }
+
+    /// What the record says about itself, with no geometry to place it by.
+    fn into_lost_file(self) -> LostFile {
+        let (first_lcn, clusters) = match &self.data {
+            RecordData::Runs { runs, .. } => (
+                runs.iter().find_map(|run| run.lcn),
+                runs.iter()
+                    .fold(0_u64, |sum, run| sum.saturating_add(run.clusters)),
+            ),
+            RecordData::None | RecordData::Resident { .. } => (None, 0),
+        };
+        LostFile {
+            name: self.name,
+            timestamps: self.timestamps,
+            size: self.size,
+            record_at: self.position,
+            first_lcn,
+            clusters,
         }
     }
 

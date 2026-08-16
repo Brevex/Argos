@@ -81,6 +81,18 @@ pub struct Manifest {
     /// run again with a longer budget or a lower floor.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragmentation: Vec<FragmentRecord>,
+    /// Files a surviving metadata record names, whose content the run could
+    /// not place.
+    ///
+    /// Held apart from `artifacts` and never counted among them: nothing here
+    /// was read from the medium and no extent is claimed. A re-format destroys
+    /// the boot sector that says where a volume began, and without it a run
+    /// list — which counts clusters of that volume — locates nothing. The
+    /// record's own name, size and times survive it, and they are the only
+    /// evidence left that a particular file was ever there
+    /// (`A-CONFIDENCE-HONEST`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost_files: Vec<LostFileRecord>,
     /// One record per recovered artifact.
     pub artifacts: Vec<ArtifactRecord>,
 }
@@ -186,6 +198,37 @@ pub struct FragmentRecord {
     pub decoded: u32,
     /// Units the whole picture requires.
     pub required: u32,
+}
+
+/// A file a surviving metadata record still names, and nothing more.
+///
+/// Deliberately without an extents field: there is no honest value for one.
+/// What is here is what a `FILE` record states about itself, none of which
+/// needs the volume's geometry — plus the run list in the volume's own units,
+/// which is what lets a later run test a candidate geometry against it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LostFileRecord {
+    /// Name the record carries, when one survived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Content length in bytes the record claims.
+    pub size: u64,
+    /// Where the record itself lay — where the lost `$MFT` was.
+    pub record_at: u64,
+    /// Creation time, as Unix seconds, when the record carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_unix: Option<i64>,
+    /// Last modification time, as Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_unix: Option<i64>,
+    /// First logical cluster of the content, in the lost volume's units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_cluster: Option<u64>,
+    /// Clusters the run list accounts for, in the lost volume's units.
+    ///
+    /// With `size`, this is a test of any candidate cluster size: the right
+    /// one is the one whose clusters account for the size stated.
+    pub clusters: u64,
 }
 
 impl Manifest {
@@ -807,6 +850,7 @@ impl Store {
             coverage: summary.coverage.cloned(),
             volumes: summary.volumes.to_vec(),
             fragmentation: summary.fragmentation.to_vec(),
+            lost_files: summary.lost_files.to_vec(),
             artifacts: std::mem::take(&mut self.records),
         };
         let path = self.dir.join(MANIFEST_FILE);
@@ -873,6 +917,8 @@ pub struct Summary<'a> {
     pub volumes: &'a [VolumeRecord],
     /// Fragmentation points, so a later run can start from them.
     pub fragmentation: &'a [FragmentRecord],
+    /// Files a metadata record names that the run could not place.
+    pub lost_files: &'a [LostFileRecord],
 }
 
 /// Writing recovery output failed.
@@ -926,7 +972,13 @@ impl Error for ReportError {
 }
 
 /// Seconds since the Unix epoch, negative for times before it.
-fn unix_seconds(at: std::time::SystemTime) -> i64 {
+///
+/// Public because the record types here state their times this way, so anything
+/// building one needs the same conversion — and a caller writing its own would
+/// have to get the pre-epoch case right to agree with the records this crate
+/// builds itself.
+#[must_use]
+pub fn unix_seconds(at: std::time::SystemTime) -> i64 {
     match at.duration_since(std::time::UNIX_EPOCH) {
         Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
         Err(before) => {

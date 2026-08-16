@@ -215,6 +215,24 @@ pub fn summarize(report: &ScanReport) {
             report.unattributed_residue
         );
     }
+    if !report.lost_files.is_empty() {
+        let named = report
+            .lost_files
+            .iter()
+            .filter(|lost| lost.name.is_some())
+            .count();
+        // Counted apart from the artifacts and said apart from them: not one
+        // byte of these was read. What the medium still remembers is that the
+        // files were there, and that is worth saying out loud — a run that
+        // stayed quiet about them would describe a re-formatted disk as a disk
+        // that never held anything (A-CONFIDENCE-HONEST).
+        println!(
+            "lost      {} deleted files are still named and dated by surviving metadata \
+             ({named} with a name); no bytes of them were recovered — see `lost_files` \
+             in the manifest",
+            report.lost_files.len()
+        );
+    }
     if !report.unreadable.is_empty() {
         let bytes: u64 = report.unreadable.iter().map(|range| range.len).sum();
         println!(

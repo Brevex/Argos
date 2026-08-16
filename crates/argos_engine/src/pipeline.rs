@@ -723,6 +723,15 @@ fn recover_filesystems<V: Read + Seek, P: ProgressSink + ?Sized>(
             })
         else {
             report.unattributed_residue += 1;
+            // No geometry means no extents, and that is the whole of what is
+            // missing: a record still names its file, states its size and
+            // carries the times it was made and last written, none of which
+            // depend on where the volume began. Reading them costs one pass
+            // over records already located, and skipping it is what made a
+            // re-formatted disk look like a disk that never held anything.
+            if let Ok(lost) = argos_fs::ntfs::orphan_records(view, *region) {
+                report.lost_files.extend(lost);
+            }
             continue;
         };
         if let Ok(files) = argos_fs::ntfs::orphan_scan(
