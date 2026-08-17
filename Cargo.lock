@@ -131,8 +131,6 @@ dependencies = [
  "argos_classify",
  "argos_core",
  "criterion",
- "serde_json",
- "sha2",
 ]
 
 [[package]]
