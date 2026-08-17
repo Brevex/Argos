@@ -500,7 +500,13 @@ fn provenance_digest(manifest: &serde_json::Value) -> String {
     }
     hasher.update(manifest["rejected_candidates"].to_string().as_bytes());
     hasher.update(manifest["scan_state"].to_string().as_bytes());
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(hex, "{byte:02x}").expect("writing hex into a String cannot fail");
+    }
+    hex
 }
 
 #[test]

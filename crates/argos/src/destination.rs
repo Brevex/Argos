@@ -72,6 +72,10 @@ fn refuse_same_device(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "one signature on every platform keeps the caller free of cfg"
+)]
 fn refuse_same_device(
     _resolved_source: &Path,
     _resolved_out: &Path,
@@ -105,7 +109,7 @@ fn whole_disk_of(dev: u64) -> Option<String> {
     Some(disk.file_name()?.to_string_lossy().into_owned())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn is_block_device(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::FileTypeExt as _;
     metadata.file_type().is_block_device()

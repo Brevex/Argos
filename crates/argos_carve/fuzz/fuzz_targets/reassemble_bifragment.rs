@@ -24,10 +24,17 @@ fuzz_target!(|data: &[u8]| {
     } else {
         Format::Png
     };
+    // The search reads the header, the break and the format; the rest of the
+    // report is what `locate_break` states when it counted nothing, which is
+    // the shape every format it does not count in produces.
     let broken = Broken {
         header: ByteOffset::new(header),
         break_at: ByteOffset::new(break_at),
         format,
+        declared: None,
+        decoded: 0,
+        required: 0,
+        decoded_end: ByteOffset::new(break_at),
     };
     // A small budget keeps each case fast while still exercising the loops;
     // the point is termination and absence of panics, not recovery rate.

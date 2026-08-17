@@ -3,7 +3,7 @@ use std::io::Cursor;
 use argos_core::artifact::{Artifact, ArtifactSink, Digest};
 use argos_core::geometry::{ByteOffset, ByteRange};
 use argos_core::{Confidence, Format, Stage};
-use argos_report::{ExtentRecord, Handback, Owner, Store, Summary};
+use argos_report::{ExtentRecord, Store, Summary};
 
 /// SHA-256 of the ASCII bytes `abc` — the FIPS 180-2 known-answer vector.
 const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -200,6 +200,8 @@ fn bytes_that_do_not_reproduce_the_recovery_digest_are_refused() {
 #[test]
 fn recovered_files_are_given_to_the_account_that_asked() {
     use std::os::unix::fs::MetadataExt;
+
+    use argos_report::{Handback, Owner};
 
     // A scan of a raw device runs elevated, so everything it writes is created
     // by the administrator. Nothing here is elevated, so the account that asks

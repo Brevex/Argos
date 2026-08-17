@@ -46,14 +46,17 @@ impl Owner {
         std::os::unix::fs::chown(path, Some(self.uid), self.gid)
     }
 
+    /// Gives `path` to this owner.
+    ///
     /// Windows has nothing to do here: a file created by an elevated process
     /// inherits the destination folder's access rules, so the person who chose
     /// the folder keeps the access they already had to it.
+    ///
+    /// # Errors
+    ///
+    /// Never on this platform. The signature is the Unix one so that the caller
+    /// stays free of `cfg`.
     #[cfg(not(unix))]
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "one signature on every platform keeps the caller free of cfg"
-    )]
     pub fn give(self, path: &Path) -> Result<(), std::io::Error> {
         let _ = path;
         Ok(())
@@ -103,7 +106,9 @@ impl Handback {
 
 #[cfg(test)]
 mod tests {
-    use super::{Handback, Owner};
+    use super::Handback;
+    #[cfg(unix)]
+    use super::Owner;
 
     #[test]
     fn no_owner_means_nothing_to_do() {

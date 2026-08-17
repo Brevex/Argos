@@ -33,6 +33,14 @@ const MARKER: &str = "ARGOS_ELEVATED";
 const ROOT_ONLY: &str = "/var/root";
 
 /// What the shell must do before it draws anything.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    expect(
+        dead_code,
+        reason = "only a platform that relaunches itself can report anything but Proceed; \
+                  Windows was already prompted by its manifest"
+    )
+)]
 #[derive(Debug)]
 pub enum Start {
     /// Carry on: this process is privileged.
@@ -277,6 +285,15 @@ fn platform_report(reason: &str) {
 ///
 /// The list is closed in both directions: this side only reads these names,
 /// and the privileged side only accepts these names.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "carrying the session as arguments is pkexec's problem alone: macOS hands the \
+                  assignments to a shell and Windows keeps the environment it started with, so \
+                  neither reads them back"
+    )
+)]
 pub mod session {
     /// User id this process is running on behalf of.
     pub const INVOKER_UID: &str = "ARGOS_INVOKER_UID";
