@@ -421,6 +421,12 @@ minLongSide: number | null,
  */
 previews: boolean, 
 /**
+ * Path of a photograph from the same batch as what is missing, whose
+ * header is lent to fragments that have none. Absent for no graft
+ * sweep, which is the default.
+ */
+reference: string | null, 
+/**
  * How long reassembly may search, in seconds. Absent takes the
  * engine's own budget; zero searches every candidate however long it
  * takes.

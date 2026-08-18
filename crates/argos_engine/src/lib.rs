@@ -29,6 +29,7 @@
 
 pub mod config;
 pub mod finding;
+pub mod graft;
 
 mod annotate;
 mod cache_run;

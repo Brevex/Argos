@@ -12,6 +12,7 @@ mod acquire;
 mod console;
 mod destination;
 mod export;
+mod graft;
 mod invoker;
 mod progress;
 mod scan;
@@ -92,6 +93,16 @@ enum Command {
         /// says so rather than implying the medium held nothing more.
         #[arg(long, value_name = "SECONDS")]
         reassembly_budget: Option<u64>,
+        /// A photograph from the same batch as what is missing, whose header
+        /// is lent to fragments that have none.
+        ///
+        /// After the scan, sweeps for entropy-coded fragments no header
+        /// reaches and writes what decodes into a `grafted/` subdirectory.
+        /// Those are pixels in a header this tool supplied, not files the
+        /// medium held, which is why they land apart from the artifacts and in
+        /// no manifest. See the `graft` command.
+        #[arg(long, value_name = "IMAGE")]
+        reference: Option<PathBuf>,
         /// Render a small preview of every artifact that decodes, into a
         /// `previews/` subdirectory. Previews are derived files, reproducible
         /// from the artifacts, and no part of the recovery depends on them.
@@ -199,6 +210,33 @@ enum Command {
         #[arg(long)]
         previews: bool,
     },
+    /// Recover pixels from JPEG fragments whose header is gone, by lending
+    /// them the header of a photograph from the same batch.
+    ///
+    /// A fragment with no header decodes against nothing: the tables and the
+    /// frame geometry live in the header. Point this at one of the photographs
+    /// the medium already gave back — same camera, same batch — and it lends
+    /// that header to fragments that have none, entering them where a restart
+    /// marker resets the decoder.
+    ///
+    /// What comes out is pixels, not files. The frame size is the reference's,
+    /// each strip's position inside it is unknown, and those bytes in that
+    /// order never lay on the medium. That is why this is its own command and
+    /// its own output directory: a scan's artifacts are files the medium held,
+    /// and these are not.
+    Graft {
+        /// The medium to read.
+        source: PathBuf,
+        /// A whole baseline JPEG from the same batch as what is missing.
+        #[arg(long)]
+        reference: PathBuf,
+        /// Directory to write the grafted pictures into.
+        #[arg(long)]
+        out: PathBuf,
+        /// Byte range of the medium to sweep, as START..END.
+        #[arg(long, value_name = "START..END")]
+        range: Option<String>,
+    },
     Export {
         /// Session directory a previous scan wrote.
         #[arg(long)]
@@ -237,7 +275,12 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+    dispatch(Cli::parse().command)
+}
+
+/// Runs one command. Separate from `main` only because the arms outgrew it.
+fn dispatch(command: Command) -> anyhow::Result<()> {
+    match command {
         Command::Scan {
             source,
             out,
@@ -250,10 +293,10 @@ fn main() -> anyhow::Result<()> {
             reassembly_budget,
             previews,
             range,
-        } => run_scan(
-            &source,
-            &out,
-            &scan::Options {
+            reference,
+        } => {
+            let options = scan::Options {
+                reference,
                 jobs,
                 stages: Stages {
                     filesystem: !carve_only,
@@ -266,8 +309,9 @@ fn main() -> anyhow::Result<()> {
                 previews,
                 range: range.as_deref().map(scan::parse_range).transpose()?,
                 resume_from: None,
-            },
-        ),
+            };
+            run_scan(&source, &out, &options)
+        }
         Command::Acquire { source, to } => run_acquire(&source, &to),
         Command::Serve => {
             serve::run();
@@ -277,13 +321,7 @@ fn main() -> anyhow::Result<()> {
             console::devices();
             Ok(())
         }
-        Command::Report { session, all } => {
-            let manifest = argos_report::Manifest::read(&session).with_context(|| {
-                format!("cannot read the session manifest in {}", session.display())
-            })?;
-            console::manifest(&manifest, all);
-            Ok(())
-        }
+        Command::Report { session, all } => run_report(&session, all),
         Command::Reassemble {
             from,
             source,
@@ -301,6 +339,12 @@ fn main() -> anyhow::Result<()> {
             min_long_side,
             previews,
         ),
+        Command::Graft {
+            source,
+            reference,
+            out,
+            range,
+        } => run_graft(&source, &reference, &out, range.as_deref()),
         Command::Export {
             from,
             to,
@@ -408,6 +452,7 @@ fn run_reassemble(
         source,
         out,
         &scan::Options {
+            reference: None,
             jobs,
             // The sweep and the filesystem pass are what these points cost to
             // find; skipping them is the whole point.
@@ -425,6 +470,40 @@ fn run_reassemble(
             resume_from: Some(broken),
         },
     )
+}
+
+/// Prints what a finished session recovered, read back from its manifest.
+fn run_report(session: &std::path::Path, all: bool) -> anyhow::Result<()> {
+    let manifest = argos_report::Manifest::read(session)
+        .with_context(|| format!("cannot read the session manifest in {}", session.display()))?;
+    console::manifest(&manifest, all);
+    Ok(())
+}
+
+/// Lends a surviving photograph's header to fragments that have none.
+fn run_graft(
+    source: &std::path::Path,
+    reference: &std::path::Path,
+    out: &std::path::Path,
+    range: Option<&str>,
+) -> anyhow::Result<()> {
+    let reference = graft::reference_from(reference)?;
+    let span = match range {
+        Some(text) => {
+            let (start, end) = scan::parse_range(text)?;
+            start..end.unwrap_or(u64::MAX)
+        }
+        None => 0..u64::MAX,
+    };
+    let (width, height) = reference.dimensions();
+    println!("reference  {width}x{height}");
+    let (entered, written) = graft::run(source, out, &reference, span)?;
+    println!("entered {entered} orphaned runs, {written} decoded to a picture");
+    println!(
+        "these are pixels in a header this tool supplied, not files the medium held: the frame \
+         size is the reference's and each strip's position inside it is unknown"
+    );
+    Ok(())
 }
 
 fn run_export(

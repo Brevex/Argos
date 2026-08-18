@@ -255,11 +255,54 @@ part of the algorithm rather than an implementation detail.
   reassembly of one could produce anything but the small file it already is. Candidates below the
   floor are counted and reported, never silently dropped; a format whose parser does not report
   dimensions is never read as "too small".
-- **Regions are searched in order of the furthest any of their candidates decoded.** A frame the
-  decoder walked thousands of MCUs into is a photograph whose first fragment survived; one it walked
-  three into is a signature that landed on plausible bytes. Ties keep medium order, so two runs over
-  one medium agree.
+- **Regions are searched in order of the most units any of their candidates decoded** — MCUs for
+  JPEG, counted absolutely and not as a share of the frame. A frame the decoder walked thousands of
+  MCUs into is a photograph whose first fragment survived; one it walked three into is a signature
+  that landed on plausible bytes. A share does not separate those, because it measures the frame and
+  not the evidence: a cache entry three quarters decoded has walked fewer units than a photograph a
+  tenth decoded, and on a medium whose photographs are the large frames a share orders the budget
+  against them. A format that counts no units contributes zero, so its regions sort last. Ties keep
+  medium order, so two runs over one medium agree.
 - When the budget runs out, what was not tried is reported as not tried (`A-CONFIDENCE-HONEST`).
+
+## Spec: a known reference, and carving orphaned fragments
+
+An entropy-coded fragment with no header is undecodable in principle: the Huffman tables, the
+sampling factors and the frame geometry all live in the header, and nothing in the fragment states
+them. The published attack estimates them, which needs a corpus of encoder settings wide enough to
+cover the camera that wrote the file (Uzun & Sencar, *Carving Orphaned JPEG File Fragments*, IEEE
+TIFS 10(8), 2015; *JpgScraper*, IEEE TIFS 15, 2020, which recovers 24% more image data than prior
+carvers on used media).
+
+**When a file from the same batch survives, the parameters are not estimated but known.** A
+reference is any recovered image the examiner can point at; its header is the header its siblings
+were written with, because one camera at one setting writes one header.
+
+- **A reference is a byte range, not a parse.** Everything from `SOI` to the end of the `SOS`
+  segment is copied verbatim and never re-encoded: re-encoding is a chance to write a table that
+  differs from the one the camera wrote, and the whole value of a reference is that it does not.
+- **A reference must be baseline or extended sequential** (`SOF0`/`SOF1`), single scan. A
+  progressive frame's scans each carry their own parameters, so a prefix of one does not decode the
+  data of another, and offering one would produce confident nonsense.
+- **Grafting** is reference prefix, then the orphan's entropy bytes, then `EOI`. The result is a
+  syntactically whole JPEG that a decoder renders.
+- **An orphan is entered immediately after `RST7`, and after no other marker.** `RSTn` resets the DC
+  predictors and byte-aligns the stream, which is the state a decoder is in at the start of a scan —
+  but the eight markers are *cyclic*, and a decoder leaving `SOS` counts one restart interval and
+  then expects `RST0`. Entering after `RST5` presents it `RST6` at the first marker it meets, and the
+  stream breaks there. Only `RST7` is followed by the marker the decoder is waiting for. A fragment
+  with no `RST7` in it is not a candidate, and none can be invented for it.
+- **What a graft recovers is pixels, not a file.** The frame's dimensions are the reference's, the
+  strip's position within the frame is unknown, and the bytes as a whole never existed on the medium
+  in that order. It is therefore reported at the weakest tier, never as a recovered file, and its
+  provenance names the reference it was grafted onto (`A-PROVENANCE`, `A-CONFIDENCE-HONEST`). An
+  examiner looking at one is looking at real pixels from the medium in a container this tool built.
+- **Acceptance is the entropy decoder, not the pixel decoder**, and the measure is MCUs decoded. A
+  graft is a fragment from the middle of a scan: it can never fill the reference's frame and its tail
+  is always cut mid-MCU, so the strict pixel decode that turns *decoded* into evidence for a whole
+  file rejects every graft by design. What the entropy decoder reports instead is how much of the
+  picture genuinely decoded before the stream stopped being it, which is the number that describes
+  the strip — the frame's dimensions being the reference's and not its own.
 
 ## Spec: resuming a search
 
@@ -403,8 +446,12 @@ just a record of how well the search does — it is the evidence for how far it 
 ## Spec: confidence tiers and finding merge
 
 - Tier ladder: `FsMetadata > JournalResidue > ContiguousCarve > Reassembled >
-  PartialOrThumbnail`. Assignment rules per spec above; no post-hoc promotion
+  PartialOrThumbnail > Grafted`. Assignment rules per spec above; no post-hoc promotion
   (`A-CONFIDENCE-HONEST`).
+- `Grafted` is the floor because it is the one tier whose artifact **is not a file the medium ever
+  held**. Every other tier reports bytes that lay on the medium in the order reported; a graft
+  reports medium bytes inside a header this tool supplied, under a frame size taken from a different
+  file. The pixels are evidence and the container is not, and no tier above the floor can say that.
 - Merge: findings from stages C and D/E are deduplicated by (a) overlapping source extents, then
   (b) content hash. On a duplicate, keep the higher tier and attach the other's metadata (e.g. a
   carved artifact gains the filename from an `$I30` hit over the same extents).

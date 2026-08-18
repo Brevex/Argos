@@ -653,6 +653,30 @@ pub fn photo_jpeg(width: u16, height: u16, seed: u64) -> Vec<u8> {
 /// quantization, which is what makes the fixture behave like a photograph.
 const DEFAULT_PHOTO_QUALITY: u8 = 85;
 
+/// [`photo_jpeg`] with `RST` markers every `interval` MCU rows.
+///
+/// A camera that writes restart markers leaves re-entry points a decoder can
+/// resynchronize on, which is what makes a fragment of one decodable without
+/// the fragment before it. A fixture without them cannot pose that case.
+///
+/// # Panics
+///
+/// Panics if either dimension is zero, if `interval` is zero, or if encoding
+/// fails, which would be a fixture bug rather than a medium condition.
+#[must_use]
+pub fn photo_jpeg_with_restarts(width: u16, height: u16, seed: u64, interval: u16) -> Vec<u8> {
+    assert!(width > 0 && height > 0, "a photo needs both dimensions");
+    assert!(interval > 0, "a restart interval of zero writes no markers");
+    let pixels = photo_pixels(width, height, seed);
+    let mut out = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut out, DEFAULT_PHOTO_QUALITY);
+    encoder.set_restart_interval(interval);
+    encoder
+        .encode(&pixels, width, height, jpeg_encoder::ColorType::Luma)
+        .expect("the fixture encoder accepts its own pixels");
+    out
+}
+
 /// [`photo_jpeg`] at a chosen encoder quality.
 ///
 /// Two qualities of one seed are the same picture in different bytes — a
@@ -664,6 +688,22 @@ const DEFAULT_PHOTO_QUALITY: u8 = 85;
 /// Panics if either dimension is zero, or if encoding fails.
 #[must_use]
 pub fn photo_jpeg_quality(width: u16, height: u16, seed: u64, quality: u8) -> Vec<u8> {
+    let pixels = photo_pixels(width, height, seed);
+    let mut out = Vec::new();
+    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
+    encoder
+        .encode(&pixels, width, height, jpeg_encoder::ColorType::Luma)
+        .expect("encoding a fixture photo must succeed");
+    out
+}
+
+/// The luma plane [`photo_jpeg`] and its variants encode.
+///
+/// # Panics
+///
+/// Panics if either dimension is zero.
+#[must_use]
+fn photo_pixels(width: u16, height: u16, seed: u64) -> Vec<u8> {
     assert!(width > 0 && height > 0, "a photo needs both dimensions");
     let mut pixels = Vec::with_capacity(usize::from(width) * usize::from(height));
     let mut noise = Noise::new(seed);
@@ -690,13 +730,7 @@ pub fn photo_jpeg_quality(width: u16, height: u16, seed: u64, quality: u8) -> Ve
             pixels.push(u8::try_from((base + texture) % 256).unwrap_or(0));
         }
     }
-
-    let mut out = Vec::new();
-    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
-    encoder
-        .encode(&pixels, width, height, jpeg_encoder::ColorType::Luma)
-        .expect("encoding a fixture photo must succeed");
-    out
+    pixels
 }
 
 /// A real, decodable colour JPEG with chroma subsampling.

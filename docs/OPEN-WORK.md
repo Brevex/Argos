@@ -8,6 +8,8 @@ This is a specification of remaining work, in the register of
 [DEVELOPMENT-PLAN.md](DEVELOPMENT-PLAN.md): what the end state is and how to reach it. It is not a
 record of how anything was decided (`M-NO-META-DESIGN-DOCUMENTATION`). Defects that were found and
 fixed are recorded once each in [defects/](defects/); this file is about what has *not* been fixed.
+Questions this file cannot settle from inside the work are put to an outside session by the prompts
+in [audit/](audit/), which fix an evidence contract before they ask anything.
 
 ---
 
@@ -370,11 +372,13 @@ reports a state the engine is not in is worse than no control.
 
 | | Item | Where |
 | --- | --- | --- |
-| a | The `$UsnJrnl` stream name and `USN_RECORD_V2` layout are **unverified against real NTFS media** — every fixture writes what the constants say, so the tests prove reader and fixture agree and nothing more | [ntfs.rs](../crates/argos_fs/src/ntfs.rs), same standing as the ioctl codes in [DEVICE-SMOKE-CHECKLIST.md](DEVICE-SMOKE-CHECKLIST.md) |
+| a | The `$UsnJrnl` stream name and `USN_RECORD_V2` layout are **unverified against real NTFS media** — every fixture writes what the constants say, so the tests prove reader and fixture agree and nothing more. A scan of a 630 GiB residual NTFS volume returned `journal_deletions: 0`, which the two explanations — no journal survived, or the reader does not read a real one — both predict; a targeted read of one live volume separates them | [ntfs.rs](../crates/argos_fs/src/ntfs.rs), same standing as the ioctl codes in [DEVICE-SMOKE-CHECKLIST.md](DEVICE-SMOKE-CHECKLIST.md) |
 | b | The results gallery has not been seen running; the Rust builds and the frontend type-checks, but no window has drawn it. Verifiable against a fixture image without touching a disk | [Gallery.svelte](../crates/argos_ui/ui/src/layout/parts/Gallery.svelte) |
 | c | The window exposes no size floor and no reassembly budget. The gallery reduced the need; whether to add them is a deliberate choice against the one-screen layout of §6.1-6 | [Shell.svelte](../crates/argos_ui/ui/src/layout/Shell.svelte) |
 | d | HPA/DCO are not addressed: capacity comes from `BLKGETSIZE64`, so sectors hidden behind a host-protected area are outside every scan and are not declared as such | [linux.rs](../crates/argos_device/src/device/linux.rs) |
 | e | Only JPEG and PNG are carved. TIFF matters here specifically: three of the cameras in §1.4 are flatbed scanners, and scanner output is often TIFF | [lib.rs](../crates/argos_carve/src/lib.rs) |
+| h | Orphaned-fragment carving reaches the CLI as `graft` (C51) and **not the scan pipeline**, which is deliberate — a graft is pixels in a container this tool built, and a scan's artifacts are files the medium held. What is open is whether the sweep should also run inside a scan, which needs the writing stage to carry a synthetic header without weakening the digest it computes from the stream it hands the sink. Was: [reference.rs](../crates/argos_carve/src/reference.rs) lends a surviving sibling's header to a headerless fragment and [reassemble.rs `restart_points`](../crates/argos_carve/src/reassemble.rs) says where such a fragment may be entered, both tested end to end — but no pipeline stage offers an orphan to them and no CLI flag names a reference. What is missing is the wiring and the reporting: a graft is pixels in a container this tool built, never a recovered file, so it needs the weakest tier and a provenance field naming the reference (`A-CONFIDENCE-HONEST`) | [reference.rs](../crates/argos_carve/src/reference.rs) |
+| g | Recall against a published corpus is **measured by nothing yet**: [corpus_recall.rs](../crates/argos_engine/tests/corpus_recall.rs) reads image/answer pairs from `ARGOS_CORPUS_DIR` and reports per-case recall, and its own instrument is self-tested, but no corpus has been supplied. The DFRWS 2006/2007 carving challenges and NIST `CFReDS` FC-01..FC-05 are what it is for; until one is measured, no recall figure in this file has an external reference | [corpus_recall.rs](../crates/argos_engine/tests/corpus_recall.rs) |
 | f | Thumbnail matching as a second acceptance path for a reassembly — a candidate whose decoded image matches a known EXIF thumbnail is confirmed regardless of its seams. Sequenced behind a completed search, which tells whether it is needed | [reassemble.rs `score`](../crates/argos_carve/src/reassemble.rs) |
 
 ---

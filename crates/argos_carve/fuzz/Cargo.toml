@@ -81,3 +81,10 @@ name = "decode_rgba"
 path = "fuzz_targets/decode_rgba.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "reference_read"
+path = "fuzz_targets/reference_read.rs"
+test = false
+doc = false
+bench = false

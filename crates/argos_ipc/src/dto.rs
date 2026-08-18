@@ -135,6 +135,11 @@ dto! {
         pub min_long_side: Option<u32>,
         /// Render a preview of every artifact that decodes.
         pub previews: bool,
+        /// Path of a photograph from the same batch as what is missing, whose
+        /// header is lent to fragments that have none. Absent for no graft
+        /// sweep, which is the default.
+        #[serde(default)]
+        pub reference: Option<String>,
         /// How long reassembly may search, in seconds. Absent takes the
         /// engine's own budget; zero searches every candidate however long it
         /// takes.
@@ -175,6 +180,7 @@ impl Default for ScanRequest {
             previews: false,
             reassembly_budget_seconds: None,
             resume_from: None,
+            reference: None,
         }
     }
 }

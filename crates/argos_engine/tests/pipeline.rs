@@ -1035,6 +1035,58 @@ fn every_stage_that_can_run_long_reports_progress_while_it_runs() {
 }
 
 #[test]
+fn reassembly_counts_steps_and_does_not_offer_them_as_a_candidate_count() {
+    // The stage searches every header twice — a gap search and a walk — and
+    // reads a region besides, so its total is none of those things counted
+    // once. Reported as `items` it invites the arithmetic it cannot support: a
+    // reader takes a quarter of the queue searched for an eighth, and the
+    // manifest's `reassembly_attempted` is the number that means headers
+    // (`A-CONFIDENCE-HONEST`).
+    let photo = argos_carve::fixture::photo_jpeg(320, 240, 0xC0FF_EE00_0000_0001);
+    let block = argos_carve::classify::BLOCK_BYTES as u64;
+    let header = 2 * MIB;
+    let layout = argos_carve::fixture::planted(8 * MIB, &photo, &[header, header + MIB], block);
+
+    let workers = 2;
+    let session = ScanSession::new(config(workers));
+    let views: Vec<_> = (0..workers).map(|_| layout.source()).collect();
+    let medium = Medium::new(views, layout.disk.len()).expect("medium");
+    let mut sink = Collector::new();
+    let events = Events::new();
+
+    let report = session.start(medium, &mut sink, &events).expect("scan");
+    let seen = events.seen();
+
+    let announced = seen
+        .iter()
+        .find_map(|event| match event {
+            ScanEvent::StageStarted { stage, unit, total } if *stage == Stage::Reassembly => {
+                Some((*unit, *total))
+            }
+            _ => None,
+        })
+        .expect("reassembly must announce itself");
+
+    assert_eq!(
+        announced.0,
+        Unit::Steps,
+        "a stage whose item costs several steps counts steps, and says so"
+    );
+    assert!(
+        announced.1 > report.reassembly_attempted,
+        "the premise: {} steps stands for fewer headers, so reading it as headers understates          what was searched",
+        announced.1
+    );
+    for event in &seen {
+        if let ScanEvent::StageProgress { stage, unit, .. } = event
+            && *stage == Stage::Reassembly
+        {
+            assert_eq!(*unit, Unit::Steps, "the unit must not change mid-stage");
+        }
+    }
+}
+
+#[test]
 fn the_report_stage_reaches_its_total_even_when_findings_are_not_stored() {
     // Progress measures the work a stage got through, and every finding costs
     // it a read whatever becomes of it. The duplicate below is read, hashed and

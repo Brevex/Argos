@@ -345,6 +345,7 @@ impl Engine {
             ));
         }
         Ok(scan::Options {
+            reference: None,
             jobs: options.jobs,
             stages: argos_engine::Stages {
                 filesystem: false,

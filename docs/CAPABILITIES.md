@@ -58,8 +58,14 @@ is one sample: the ordering between stages is dependable, the absolute figures a
 | C21 | Scan one byte range of the medium rather than all of it (`--range`) | CLI | hours → minutes |
 | C22 | Search a previous session's fragmentation points again without re-reading the medium (`reassemble --from`) | CLI, GUI | saves the whole sweep |
 | C23 | Choose the worker count (`--jobs`) | CLI, GUI | — |
+| C51 | Recover pixels from JPEG fragments whose header is gone, by lending them the header of a photograph from the same batch (`graft`, or `scan --reference`) | CLI, GUI | minutes over a range |
 
 **Formats carved**: JPEG and PNG. Nothing else is claimed.
+
+**C51 produces pixels, not files**, and is its own command and its own output directory for that
+reason. The frame size is the reference's, each strip's position inside it is unknown, and those
+bytes in that order never lay on the medium. It carries the `grafted` tier, which is the floor of
+the ladder.
 
 **Never**: report a signature hit that did not validate, or fabricate bytes for a region the medium
 refused. Both are counted in the report instead.
@@ -75,8 +81,8 @@ refused. Both are counted in the report instead.
 | C28 | Skip triage (`--no-triage`); nothing recovered changes, only the labels | CLI, GUI | saves 3 m |
 | C29 | Set the smallest long side an image is written to disk for (`--min-long-side`, default 300 px) | CLI, GUI | changes what fills the output directory |
 
-**Evidence tiers** recorded per artifact, weakest first: `partial-or-thumbnail`, `reassembled`,
-`contiguous-carve`, `journal-residue`, `fs-metadata`.
+**Evidence tiers** recorded per artifact, weakest first: `grafted`, `partial-or-thumbnail`,
+`reassembled`, `contiguous-carve`, `journal-residue`, `fs-metadata`.
 
 **Never**: raise an artifact's tier, or let triage decide what is recovered. Triage labels; it does
 not judge.
@@ -121,7 +127,7 @@ and what was only recorded are counted apart.
 
 ## Totals
 
-50 capabilities.
+51 capabilities.
 
 | | Count |
 | --- | --- |

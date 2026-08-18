@@ -60,6 +60,14 @@ pub enum Unit {
     /// Whatever the stage handles one at a time: a candidate to validate, a
     /// fragment set to reassemble, an artifact to label.
     Items,
+    /// Units of work, where one item costs more than one of them.
+    ///
+    /// A stage whose item is searched in several passes cannot report items
+    /// without either standing still through a pass or counting an item twice.
+    /// It counts steps instead, and says so: `3706 of 16321 steps` invites no
+    /// arithmetic about how many items are left, which `3706 of 16321 items`
+    /// does — wrongly, when an item costs three.
+    Steps,
 }
 
 impl std::fmt::Display for Unit {
@@ -67,6 +75,7 @@ impl std::fmt::Display for Unit {
         f.write_str(match self {
             Self::Bytes => "bytes",
             Self::Items => "items",
+            Self::Steps => "steps",
         })
     }
 }

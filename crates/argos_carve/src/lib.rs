@@ -32,6 +32,7 @@ pub mod jpeg;
 pub mod mcu;
 pub mod png;
 pub mod reassemble;
+pub mod reference;
 
 mod stream;
 

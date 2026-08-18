@@ -25,8 +25,25 @@
   // component. This is the theme itself, for its artwork.
   import { active as inForce } from '../../themes/active.svelte';
   import { settings } from '../../lib/settings.svelte';
+  import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { loadTheme, themeIds } from '../../themes';
   import type { ThemeModule } from '../../themes/contract';
+
+  /**
+   * Names the photograph whose tables are lent.
+   *
+   * A file rather than a switch, because the technique cannot work without one:
+   * there is nothing to fall back on if no sibling is named.
+   */
+  async function chooseReference(): Promise<void> {
+    const picked = await openDialog({
+      multiple: false,
+      directory: false,
+      title: 'A photograph from the same camera as what is missing',
+      filters: [{ name: 'Photographs', extensions: ['jpg', 'jpeg', 'JPG', 'JPEG'] }],
+    });
+    if (typeof picked === 'string') settings.setReference(picked);
+  }
 
   let {
     active,
@@ -200,6 +217,39 @@
                   </span>
                 </span>
               </label>
+            </li>
+
+            <li>
+              <div class="field">
+                <span class="name">Fragments with no header</span>
+                <p class="about">
+                  A fragment of a photograph whose beginning is gone decodes against nothing: the
+                  tables a picture is coded with live in the part that was lost. Name a photograph
+                  this disk already gave back — same camera, same batch — and its tables are lent to
+                  fragments that have none.
+                </p>
+                <p class="about">
+                  What comes out is <em>pixels, not files</em>: the size is the named photograph's,
+                  each piece's place inside it is unknown, and those bytes in that order were never
+                  on the disk. They land in a <code>grafted</code> folder of their own, apart from
+                  what was recovered, and never in the manifest.
+                </p>
+                <div class="picker">
+                  <button class="choose" disabled={locked} onclick={chooseReference}>
+                    {settings.reference ? 'Change photograph' : 'Choose a photograph'}
+                  </button>
+                  {#if settings.reference}
+                    <button class="clear" disabled={locked} onclick={() => settings.setReference(null)}>
+                      Off
+                    </button>
+                  {/if}
+                </div>
+                {#if settings.reference}
+                  <p class="chosen" title={settings.reference}>{settings.reference}</p>
+                {:else}
+                  <p class="chosen off">Off. Nothing extra is searched for.</p>
+                {/if}
+              </div>
             </li>
           </ul>
         {:else if open === 'output'}

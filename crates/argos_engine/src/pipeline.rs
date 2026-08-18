@@ -83,7 +83,9 @@ pub(crate) struct Counter<'a, P: ?Sized> {
     progress: &'a P,
     stage: Stage,
     total: u64,
-    /// Items between two events, never zero.
+    /// What `total` counts.
+    unit: Unit,
+    /// Steps between two events, never zero.
     stride: u64,
     done: AtomicU64,
     /// When the stage began.
@@ -93,17 +95,14 @@ pub(crate) struct Counter<'a, P: ?Sized> {
 }
 
 impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
-    /// Announces the stage and prepares to count `total` items.
-    pub(crate) fn start(progress: &'a P, stage: Stage, total: u64) -> Self {
-        progress.emit(ScanEvent::StageStarted {
-            stage,
-            unit: Unit::Items,
-            total,
-        });
+    /// Announces the stage and prepares to count `total` of `unit`.
+    pub(crate) fn start(progress: &'a P, stage: Stage, total: u64, unit: Unit) -> Self {
+        progress.emit(ScanEvent::StageStarted { stage, unit, total });
         Self {
             progress,
             stage,
             total,
+            unit,
             stride: total.div_ceil(PROGRESS_STEPS).max(1),
             done: AtomicU64::new(0),
             started: std::time::Instant::now(),
@@ -140,7 +139,7 @@ impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
         self.spoke_at.store(self.millis(), Ordering::Relaxed);
         self.progress.emit(ScanEvent::StageProgress {
             stage: self.stage,
-            unit: Unit::Items,
+            unit: self.unit,
             done,
             total: self.total,
         });
@@ -687,7 +686,12 @@ fn recover_filesystems<V: Read + Seek, P: ProgressSink + ?Sized>(
     // Counted in volumes: one volume's metadata can take minutes to walk, and
     // a count of volumes is the only honest denominator this stage has before
     // it opens them.
-    let counter = Counter::start(progress, Stage::Filesystem, sweep.volumes.len() as u64);
+    let counter = Counter::start(
+        progress,
+        Stage::Filesystem,
+        sweep.volumes.len() as u64,
+        Unit::Items,
+    );
     for volume in &sweep.volumes {
         if control.is_cancelled() {
             return found;
@@ -1089,7 +1093,12 @@ where
 {
     // Announced even when there is nothing to do, so the stage order a client
     // sees is the stage order that ran.
-    let counter = Counter::start(progress, Stage::Validation, candidates.len() as u64);
+    let counter = Counter::start(
+        progress,
+        Stage::Validation,
+        candidates.len() as u64,
+        Unit::Items,
+    );
     if candidates.is_empty() || views.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -1379,13 +1388,17 @@ fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
 
     // Each header is counted twice — once for the gap search, once for the
     // walk — plus one step per region read, because they are one stage on
-    // screen. `StageFinished` settles the bar at the end.
+    // screen. That total is steps and not headers, and it says so: a reader who
+    // takes it for a header count reads a quarter of the queue searched as an
+    // eighth, and the manifest's `reassembly_attempted` is the header count
+    // (`A-CONFIDENCE-HONEST`). `StageFinished` settles the bar at the end.
     let counter = Counter::start(
         progress,
         Stage::Reassembly,
         (broken.len() as u64)
             .saturating_mul(2)
             .saturating_add(plans.len() as u64),
+        Unit::Steps,
     );
 
     let mut scratch = Scratch::new();
@@ -1689,11 +1702,17 @@ fn allocation_grid(volumes: &[Volume], region: ByteRange) -> (u64, u64) {
 /// small files, and no reassembly of one could produce anything but the small
 /// file it already is (`docs/defects/02-thumbnail-provenance.md`).
 ///
-/// Then regions go in the order of the candidate that decoded furthest inside
-/// each. A frame the decoder walked thousands of MCUs into is a photograph
+/// Then regions go in the order of how many units the candidates inside each
+/// decoded — MCUs for JPEG, counted absolutely rather than as a share of the
+/// frame. A frame the decoder walked thousands of MCUs into is a photograph
 /// whose first fragment survived; one it walked three into is a signature that
-/// happened to land on plausible bytes. When the clock runs out, it runs out
-/// having spent itself on the first kind.
+/// happened to land on plausible bytes. A share does not separate those,
+/// because it measures the frame and not the evidence: a cache entry three
+/// quarters decoded has walked fewer units than a photograph a tenth decoded,
+/// and on a medium whose photographs are the large frames a share orders the
+/// budget against them. A format that counts no units contributes zero, so its
+/// regions sort last. When the clock runs out, it runs out having spent itself
+/// on the first kind.
 fn plan_search(
     broken: &[Broken],
     min_long_side: u32,
@@ -1721,18 +1740,14 @@ fn plan_search(
     .map(|plan| {
         let best = taken[plan.headers.clone()]
             .iter()
-            .map(reassemble::Broken::progress)
-            .fold(0.0_f64, f64::max);
+            .map(|candidate| candidate.decoded)
+            .max()
+            .unwrap_or(0);
         (plan, best)
     })
     .collect();
-    plans.sort_by(|(left, left_best), (right, right_best)| {
-        right_best
-            .partial_cmp(left_best)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            // Ties keep medium order, so two runs over one medium agree.
-            .then_with(|| left.range.start.cmp(&right.range.start))
-    });
+    // Ties keep medium order, so two runs over one medium agree.
+    plans.sort_by_key(|(plan, best)| (std::cmp::Reverse(*best), plan.range.start));
     (taken, plans.into_iter().map(|(plan, _)| plan).collect())
 }
 
@@ -2292,5 +2307,71 @@ impl<V: Read + Seek> Seek for ExtentReader<'_, V> {
 
     fn stream_position(&mut self) -> std::io::Result<u64> {
         Ok(self.assembled_position())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn broken(header: u64, declared: (u32, u32), decoded: u32, required: u32) -> Broken {
+        Broken {
+            header: ByteOffset::new(header),
+            break_at: ByteOffset::new(header + 4096),
+            format: Format::Jpeg,
+            declared: Some(declared),
+            decoded,
+            required,
+            decoded_end: ByteOffset::new(header + 2048),
+        }
+    }
+
+    /// The floor decides what is searched at all; the order decides what a
+    /// clock reaches. Both these frames clear a 300 px floor, so only the order
+    /// separates them: 594 of 625 MCUs is most of a 400x400 derived image,
+    /// 2,300 of 23,232 is a tenth of a 2816x2112 photograph. The share prefers
+    /// the small frame, the units prefer the photograph, and the photograph is
+    /// what a clock should buy.
+    #[test]
+    fn a_photograph_a_tenth_decoded_is_searched_before_a_small_frame_nearly_through() {
+        let cache = broken(1 << 30, (400, 400), 594, 625);
+        let photo = broken(8 << 30, (2816, 2112), 2_300, 23_232);
+        assert!(
+            cache.progress() > photo.progress(),
+            "the premise: a share orders these the other way round"
+        );
+
+        let mut report = ScanReport::default();
+        let (taken, plans) = plan_search(&[cache, photo], 300, 16 << 30, &mut report);
+
+        assert_eq!(taken.len(), 2, "both frames clear the floor");
+        assert_eq!(
+            taken[plans[0].headers.clone()][0].header,
+            photo.header,
+            "the region holding the photograph is searched first"
+        );
+    }
+
+    /// A format whose parser counts no units reports zero decoded, which must
+    /// order its regions last rather than tie them with everything else.
+    #[test]
+    fn a_candidate_that_counts_no_units_sorts_behind_one_that_does() {
+        let uncounted = Broken {
+            format: Format::Png,
+            declared: None,
+            decoded: 0,
+            required: 0,
+            ..broken(1 << 30, (0, 0), 0, 0)
+        };
+        let counted = broken(8 << 30, (2816, 2112), 12, 23_232);
+
+        let mut report = ScanReport::default();
+        let (taken, plans) = plan_search(&[uncounted, counted], 300, 16 << 30, &mut report);
+
+        assert_eq!(
+            taken[plans[0].headers.clone()][0].header,
+            counted.header,
+            "twelve MCUs is still evidence; no count at all is not"
+        );
     }
 }

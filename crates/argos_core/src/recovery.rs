@@ -141,6 +141,16 @@ impl fmt::Display for Format {
 /// model, not a routine addition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Confidence {
+    /// Medium bytes decoded inside a header this tool supplied.
+    ///
+    /// An entropy-coded fragment with no header of its own, entered at a
+    /// restart marker and grafted onto the header of a surviving file from the
+    /// same batch. The pixels came off the medium; the container did not, and
+    /// the frame size is another file's. It is the floor of the ladder because
+    /// it is the one tier whose artifact is **not a file the medium ever
+    /// held** — an examiner looking at one is looking at real pixels in an
+    /// arrangement this tool built.
+    Grafted,
     /// A fragment or embedded thumbnail; the parent image was not recovered.
     PartialOrThumbnail,
     /// Reassembled from non-contiguous fragments by carving.
@@ -156,6 +166,7 @@ pub enum Confidence {
 impl fmt::Display for Confidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            Self::Grafted => "grafted",
             Self::PartialOrThumbnail => "partial-or-thumbnail",
             Self::Reassembled => "reassembled",
             Self::ContiguousCarve => "contiguous-carve",

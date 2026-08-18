@@ -26,7 +26,7 @@ use argos_classify::phash;
 use argos_core::Stage;
 use argos_core::artifact::{ArtifactSink, Digest};
 use argos_core::classify::{Classifier, PixelImage, TriageScore};
-use argos_core::progress::{ProgressSink, ScanEvent};
+use argos_core::progress::{ProgressSink, ScanEvent, Unit};
 use sha2::{Digest as _, Sha256};
 
 use crate::finding::{Finding, ScanReport};
@@ -138,7 +138,8 @@ pub(crate) fn run<V, S, C, P>(
     } else {
         Stage::Preview
     };
-    let counter = crate::pipeline::Counter::start(progress, stage, emitted.len() as u64);
+    let counter =
+        crate::pipeline::Counter::start(progress, stage, emitted.len() as u64, Unit::Items);
     if let Some(classifier) = classifier.as_ref() {
         report.triage_model = classifier.model();
     }

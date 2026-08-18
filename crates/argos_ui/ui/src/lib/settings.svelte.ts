@@ -63,6 +63,20 @@ class Settings {
    */
   reassemblyBudget = $state<number | null>(null);
 
+  /**
+   * A photograph from the same batch as what is missing, whose header is lent
+   * to fragments that have none. `null` runs no graft sweep, which is the
+   * default.
+   *
+   * Off unless asked for, and asked for by naming a file rather than by
+   * ticking a box, because it cannot work without one: a fragment with no
+   * header decodes against nothing, and what makes it decodable is knowing the
+   * tables the camera wrote — which only a surviving sibling states. What it
+   * produces lands in `grafted/` and in no manifest: pixels in a header the
+   * tool supplied, not files the medium held.
+   */
+  reference = $state<string | null>(null);
+
   /** Whether anything has been changed away from the engine's defaults. */
   get customized(): boolean {
     return (
@@ -73,7 +87,8 @@ class Settings {
       !this.previews ||
       this.minLongSide !== null ||
       this.jobs !== null ||
-      this.reassemblyBudget !== null
+      this.reassemblyBudget !== null ||
+      this.reference !== null
     );
   }
 
@@ -100,6 +115,12 @@ class Settings {
     this.remember();
   }
 
+  /** Names the photograph whose header is lent, or clears it. */
+  setReference(path: string | null): void {
+    this.reference = path !== null && path.length > 0 ? path : null;
+    this.remember();
+  }
+
   /** Sets a numeric limit, treating anything unusable as "take the default". */
   setNumber(field: 'minLongSide' | 'jobs' | 'reassemblyBudget', value: number | null): void {
     this[field] = value !== null && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
@@ -116,6 +137,7 @@ class Settings {
     this.minLongSide = null;
     this.jobs = null;
     this.reassemblyBudget = null;
+    this.reference = null;
     this.remember();
   }
 
@@ -142,6 +164,7 @@ class Settings {
       // A fresh scan resumes nothing. The results view sets this when it asks
       // for a session's fragmentation points to be searched again.
       resumeFrom: null,
+      reference: this.reference,
     };
   }
 
@@ -165,6 +188,7 @@ class Settings {
     this.minLongSide = count('minLongSide');
     this.jobs = count('jobs');
     this.reassemblyBudget = count('reassemblyBudget');
+    this.reference = typeof stored['reference'] === 'string' ? stored['reference'] : null;
   }
 
   private remember(): void {
@@ -178,6 +202,7 @@ class Settings {
         minLongSide: this.minLongSide,
         jobs: this.jobs,
         reassemblyBudget: this.reassemblyBudget,
+        reference: this.reference,
       },
     });
   }

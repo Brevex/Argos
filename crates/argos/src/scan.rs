@@ -45,6 +45,15 @@ pub struct Options {
     /// every stage, so a report of a ranged scan describes that range and not
     /// the medium (`A-CONFIDENCE-HONEST`).
     pub range: Option<(u64, Option<u64>)>,
+    /// A photograph from the same batch as what is missing, whose header is
+    /// lent to fragments that have none.
+    ///
+    /// When present, a graft sweep runs after the scan and writes into a
+    /// `grafted/` subdirectory of the output. It is kept apart from the scan's
+    /// artifacts and out of the manifest on purpose: what it produces is pixels
+    /// in a container this tool built, not files the medium held
+    /// (`A-CONFIDENCE-HONEST`).
+    pub reference: Option<PathBuf>,
     /// Fragmentation points a previous run located, to search again without
     /// sweeping the medium.
     ///
@@ -193,10 +202,42 @@ where
         None => log.line("scan failed before it could report"),
     }
 
+    if let Some(reference) = options.reference.as_deref() {
+        graft_after(source, out, reference, options.range, notice);
+    }
+
     Ok(Finished {
         report: outcome.ok(),
         manifest,
     })
+}
+
+/// Sweeps for headerless fragments once the scan proper is done.
+///
+/// Its output goes to `grafted/` rather than beside the artifacts, and into no
+/// manifest: a graft is pixels inside a header this tool supplied, and a
+/// directory where those and recovered files look alike is a report that leads
+/// to a wrong conclusion (`A-CONFIDENCE-HONEST`).
+///
+/// A failure here does not fail the scan. Everything the scan recovered is
+/// already written, and losing it to a fault in an extra pass would be the
+/// worse outcome.
+fn graft_after<N: Notice + ?Sized>(
+    source: &Path,
+    out: &Path,
+    reference: &Path,
+    range: Option<(u64, Option<u64>)>,
+    notice: &N,
+) {
+    let span = range.map_or(0..u64::MAX, |(start, end)| start..end.unwrap_or(u64::MAX));
+    let outcome = crate::graft::reference_from(reference)
+        .and_then(|reference| crate::graft::run(source, &out.join("grafted"), &reference, span));
+    match outcome {
+        Ok((entered, written)) => notice.warning(&format!(
+            "grafted {written} of {entered} headerless fragments into grafted/: pixels in a header this tool supplied, not files the medium held"
+        )),
+        Err(error) => notice.warning(&format!("the graft sweep did not run: {error}")),
+    }
 }
 
 /// Annotates what was stored and writes the manifest describing it.

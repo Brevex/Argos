@@ -282,6 +282,7 @@ pub fn event(event: ScanEvent) -> Option<argos_ipc::wire::Notification> {
 /// The scan options a request asks for.
 pub fn options(request: &dto::ScanRequest) -> crate::scan::Options {
     crate::scan::Options {
+        reference: request.reference.as_deref().map(std::path::PathBuf::from),
         jobs: request
             .jobs
             .and_then(|jobs| usize::try_from(jobs).ok())

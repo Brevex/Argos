@@ -118,7 +118,7 @@ impl ProgressSink for Renderer {
                         let rate = done as f64 / MIB / elapsed;
                         format!("{rate:>7.1} MiB/s")
                     }
-                    Unit::Items => format!("{done} of {total}"),
+                    Unit::Items | Unit::Steps => format!("{done} of {total} {unit}"),
                 };
                 match percent {
                     Some(percent) => eprint!("\r  {stage:<10} {percent:>3}%   {measure}"),
