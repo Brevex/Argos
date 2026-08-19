@@ -245,9 +245,13 @@ pub struct Failure {
 
 /// Why a call failed.
 ///
-/// The first four are JSON-RPC's own; the rest are Argos'. A client
+/// The first three are JSON-RPC's own; the rest are Argos'. A client
 /// distinguishes "you sent nonsense" from "the medium refused" without parsing
 /// the message.
+///
+/// JSON-RPC's `-32601` is absent because this protocol cannot produce it: a
+/// method is a [`Call`] variant, so an unknown one fails to deserialize and is
+/// an [`ErrorCode::InvalidRequest`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ErrorCode {
@@ -255,8 +259,6 @@ pub enum ErrorCode {
     Parse = -32700,
     /// The JSON was not a request this version understands.
     InvalidRequest = -32600,
-    /// No such method.
-    MethodNotFound = -32601,
     /// The parameters were not what the method takes.
     InvalidParams = -32602,
     /// The client's schema version is not this engine's.

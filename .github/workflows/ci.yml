@@ -114,9 +114,9 @@ jobs:
       - name: Run every carving fuzz target for a fixed budget
         working-directory: crates/argos_carve
         run: |
-          for target in jpeg_validate png_validate exif_thumbnail carver_scan \
-                        block_classify reassemble_bifragment jpeg_entropy_scan \
-                        decode_rgba reference_read; do
+          for target in jpeg_validate png_validate exif_thumbnail exif_metadata \
+                        carver_scan block_classify reassemble_bifragment \
+                        jpeg_entropy_scan decode_rgba reference_read; do
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
       - name: Run every filesystem fuzz target for a fixed budget

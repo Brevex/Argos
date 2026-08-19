@@ -18,6 +18,13 @@
 //! ```text
 //! cargo run --release --example orphan_census -- /dev/sdX --from 0 --to 1000204886016
 //! ```
+//!
+//! Run by hand against a medium, never by a lane: it needs a disk, and what it
+//! reports is a measurement rather than a guarantee. It is the instrument
+//! behind `graft` (`OPEN-WORK.md` §3.9h) — the census says how much of a
+//! medium a graft could reach, so it is what a change to the orphan sweep is
+//! measured with (`A-SUPPORT-DECLARED`). `cargo clippy --all-targets` is what
+//! keeps it compiling.
 
 use std::io::{Read, Seek, SeekFrom, Write as _};
 

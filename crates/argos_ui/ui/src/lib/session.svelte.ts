@@ -18,7 +18,7 @@ import type { Acquired, Summary } from './dto';
 import { onEngineMessage, type EngineMessage } from './ipc';
 
 /** What the window is doing, as far as the user is concerned. */
-export type Phase = 'idle' | 'connecting' | 'scanning' | 'done' | 'cancelled' | 'failed';
+type Phase = 'idle' | 'connecting' | 'scanning' | 'done' | 'cancelled' | 'failed';
 
 /** The stage that reads the medium end to end, counted in bytes. */
 const SWEEP_STAGE = 'carve';

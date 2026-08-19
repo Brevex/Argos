@@ -17,10 +17,10 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use argos_core::artifact::{Artifact, ArtifactSink};
+use argos_core::artifact::{Artifact, ArtifactSink, Digest};
 use argos_core::classify::PixelImage;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 mod handback;
 mod preview;
@@ -593,7 +593,7 @@ impl Store {
                 artifact.length
             ))));
         }
-        let sha256 = hex(&hasher.finalize());
+        let sha256 = Digest::new(hasher.finalize().into()).to_string();
         let recorded = artifact.sha256.to_string();
         if sha256 != recorded {
             drop(out);
@@ -679,12 +679,6 @@ impl Store {
                 continue;
             };
             record.triage_label.clone_from(&annotation.label);
-            // Rounded, because the score comes from a softmax over a
-            // transcendental and `exp` is a libm implementation detail: the
-            // last digits of a probability differ between operating systems
-            // for no substantive reason, and a manifest that differs between
-            // machines undermines the reproducibility the rest of it exists
-            // for. Four decimals is far finer than the label thresholds.
             record.triage_decided_by.clone_from(&annotation.decided_by);
             record
                 .perceptual_hash
@@ -987,21 +981,8 @@ pub fn unix_seconds(at: std::time::SystemTime) -> i64 {
     }
 }
 
-/// Rounds a classifier score to four decimals.
 /// A manifest written before this field existed described stored artifacts
 /// only, so an absent flag means the bytes are there.
 const fn stored_by_default() -> bool {
     true
-}
-
-/// Lowercase hex of a digest.
-fn hex(digest: &[u8]) -> String {
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use fmt::Write as _;
-        write!(out, "{byte:02x}").unwrap_or_else(|err| {
-            unreachable!("writing hex into a String cannot fail: {err}");
-        });
-    }
-    out
 }

@@ -60,8 +60,9 @@ pub const PALETTE_ASSET_MAX: u32 = 256;
 /// Measured over the eval corpus: the least varied photograph of any slice,
 /// greyscale included, uses 71 distinct luma levels; the most varied
 /// synthetic asset uses 47. The threshold sits in that gap, nearer the asset
-/// side, because firing wrongly on a photograph costs the model its chance to
-/// see it while firing wrongly on an asset costs one inference.
+/// side, because the two errors do not cost the same: labelling a photograph
+/// an asset pushes it down the ordering an examiner reads, while labelling an
+/// asset a photograph only leaves it in the pile.
 pub const PALETTE_LUMA_ASSET_MAX: u32 = 48;
 
 /// Pixels an image needs before the palette rule may fire.
@@ -176,10 +177,10 @@ pub struct Features {
 /// Computes [`Features`] by sampling at most [`MAX_SAMPLES`] pixels
 /// stride-uniformly.
 ///
-/// Measured at 1.00 ms for a 0.3-megapixel frame, against 2.61 ms for one
-/// inference — so the rules pay for themselves whenever they settle an image
-/// the model would otherwise have scored. Counting luminance levels alongside
-/// colours costs about a third of that pass; it is what keeps greyscale
+/// Measured at 1.00 ms for a 0.3-megapixel frame, which is what makes running
+/// this over every artifact of a whole-disk recovery proportionate
+/// (`M-HOTPATH`). Counting luminance levels alongside colours costs about a
+/// third of that pass; it is what keeps greyscale
 /// photographs out of the asset label, which is worth more than the time.
 #[must_use]
 pub fn features(image: &PixelImage) -> Features {

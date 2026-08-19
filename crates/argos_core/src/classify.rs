@@ -174,52 +174,32 @@ pub trait Classifier {
     /// What scoring fails with.
     type Error: Error + Send + Sync + 'static;
 
-    /// Identity of the model behind this classifier, when there is one.
+    /// Identity of the decision procedure behind this classifier, when there
+    /// is one.
     fn model(&self) -> Option<ModelIdentity>;
 
     /// Scores a batch of images, one answer per image in order.
     ///
-    /// Batching exists because inference amortizes over it; a caller with one
-    /// image uses [`Classifier::score`].
+    /// The batch is the unit because the engine scores a whole scan's
+    /// artifacts at once, after every one of them is stored and hashed.
     ///
     /// # Errors
     ///
-    /// Fails when the classifier itself breaks — a model tensor mismatch, not
-    /// a property of any image. Per-image "no opinion" is `Ok(None)`.
+    /// Fails when the classifier itself breaks, not on a property of any
+    /// image. Per-image "no opinion" is `Ok(None)`.
     fn score_batch(
         &mut self,
         images: &[PixelImage],
     ) -> Result<Vec<Option<TriageScore>>, Self::Error>;
-
-    /// Scores one image.
-    ///
-    /// # Errors
-    ///
-    /// Same conditions as [`Classifier::score_batch`].
-    fn score(&mut self, image: &PixelImage) -> Result<Option<TriageScore>, Self::Error> {
-        Ok(self
-            .score_batch(std::slice::from_ref(image))?
-            .into_iter()
-            .next()
-            .flatten())
-    }
 }
 
-/// The null classifier: no model, no opinion, every artifact left as it is.
+/// The null classifier: no opinion, every artifact left as it is.
 ///
-/// This is the adapter behind a scan whose triage is disabled — by the user,
-/// or because a pinned model failed verification. The scan proceeds and
-/// reports everything, unscored (A-MODEL-PINNED).
+/// It is what names the classifier type of a scan that has none, so a run with
+/// triage disabled goes through the same path as one with it and reports
+/// everything, unscored (A-TRIAGE-NOT-VERDICT).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AcceptAll;
-
-impl AcceptAll {
-    /// The null classifier.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
-}
 
 impl Classifier for AcceptAll {
     type Error = Infallible;

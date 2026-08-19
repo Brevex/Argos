@@ -474,11 +474,10 @@ fn scanning_an_image_file_warns_about_nothing() {
 
 /// Fields of the manifest that describe *what was recovered from where*.
 ///
-/// Deliberately not the whole manifest. The classifier score is a softmax over
-/// a transcendental, and `exp` is a libm implementation detail — its last
-/// digits differ between operating systems for no substantive reason. What
-/// must not differ is the recovery: the same bytes, at the same offsets, at
-/// the same confidence tier, in the same order.
+/// Deliberately not the whole manifest. A manifest also records where the run
+/// wrote, what version produced it and what it labelled — none of which is the
+/// claim under test. What must not differ is the recovery: the same bytes, at
+/// the same offsets, at the same confidence tier, in the same order.
 fn provenance_digest(manifest: &serde_json::Value) -> String {
     use sha2::{Digest as _, Sha256};
 
@@ -500,13 +499,7 @@ fn provenance_digest(manifest: &serde_json::Value) -> String {
     }
     hasher.update(manifest["rejected_candidates"].to_string().as_bytes());
     hasher.update(manifest["scan_state"].to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(hex, "{byte:02x}").expect("writing hex into a String cannot fail");
-    }
-    hex
+    argos_core::artifact::Digest::new(hasher.finalize().into()).to_string()
 }
 
 #[test]

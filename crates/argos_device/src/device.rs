@@ -34,9 +34,9 @@ fn aligned_slice(bounce: &mut Vec<u8>, len: usize, align: usize) -> &mut [u8] {
 
 /// A raw block device, opened read-only at the lowest layer.
 ///
-/// Construction is per-OS; on platforms without a HAL yet, [`Device::open`] fails
-/// with an error whose [`DeviceError::is_unsupported`] returns `true`. The mocked
-/// variant (behind `test-util`) drives the same code paths without a device.
+/// Construction is per-OS; on platforms without a HAL yet, [`Device::open`]
+/// fails. The mocked variant (behind `test-util`) drives the same code paths
+/// without a device.
 #[derive(Debug)]
 pub struct Device {
     core: Core,
@@ -221,12 +221,6 @@ impl DeviceError {
     #[must_use]
     pub fn is_not_block_device(&self) -> bool {
         matches!(self.kind, DeviceErrorKind::NotBlockDevice)
-    }
-
-    /// Whether this platform has no native device HAL yet.
-    #[must_use]
-    pub fn is_unsupported(&self) -> bool {
-        matches!(self.kind, DeviceErrorKind::Unsupported)
     }
 
     /// Backtrace captured where the failure was detected.

@@ -8,7 +8,7 @@ import type { ThemeModule } from './contract';
  * named, so adding one is this file plus its directory — and the base layout
  * does not change, because a theme cannot reach it.
  */
-export const THEMES: Readonly<Record<string, () => Promise<{ default: ThemeModule }>>> = {
+const THEMES: Readonly<Record<string, () => Promise<{ default: ThemeModule }>>> = {
   default: () => import('./default'),
   aero: () => import('./aero'),
   retro: () => import('./retro'),

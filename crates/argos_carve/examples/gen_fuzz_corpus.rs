@@ -47,6 +47,30 @@ fn main() -> std::io::Result<()> {
     let cyclic = argos_carve::fixture::exif_payload(&thumb, true);
     fs::write(exif_dir.join("cyclic"), &cyclic[6..])?;
 
+    // Description reading, which has two entry points and therefore two kinds
+    // of seed: a whole image, where the `APP1` has to be found among marker
+    // segments whose lengths come off the medium, and a bare TIFF, where every
+    // value is reached through an offset the file states.
+    let metadata_dir = base.join("exif_metadata");
+    fs::create_dir_all(&metadata_dir)?;
+    let camera = Jpeg::new()
+        .with_capture("Make", "Model", "2016:07:04 11:22:33", (4128, 3096))
+        .build();
+    let tiff =
+        argos_carve::fixture::exif_capture("Make", "Model", "2016:07:04 11:22:33", (4128, 3096));
+    fs::write(metadata_dir.join("camera"), &camera)?;
+    fs::write(metadata_dir.join("tiff"), &tiff)?;
+    fs::write(
+        metadata_dir.join("tiff-truncated"),
+        truncated(&tiff, tiff.len() / 2),
+    )?;
+    // Byte 12 is inside IFD0's first entry, so flipping it moves an offset or
+    // a count — the field a walker must not follow blindly.
+    fs::write(
+        metadata_dir.join("tiff-flipped-offset"),
+        with_flipped_byte(&tiff, 12),
+    )?;
+
     // The reassembly oracle. Seeding it with real encoded images matters more
     // than anywhere else here: starting from noise, a fuzzer would spend its
     // budget failing at the frame header and never reach the entropy decoder

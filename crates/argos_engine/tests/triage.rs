@@ -203,7 +203,7 @@ fn every_persisted_artifact_gets_an_outcome_keyed_by_its_hash() {
 }
 
 #[test]
-fn identical_images_collapse_into_one_inference_and_share_its_score() {
+fn identical_images_collapse_into_one_decision_and_share_its_score() {
     // The same photograph planted twice at different offsets. Content-hash
     // dedup drops the second copy before triage, so plant a re-encoded
     // near-duplicate instead: same picture, different bytes.
@@ -222,7 +222,7 @@ fn identical_images_collapse_into_one_inference_and_share_its_score() {
     assert_eq!(artifacts.len(), 2, "both encodings are separate artifacts");
     assert_eq!(
         hostile.seen, 1,
-        "a near-duplicate must not pay for its own inference"
+        "a near-duplicate must not be scored on its own"
     );
     assert!(
         report

@@ -221,8 +221,7 @@ fn push_record_region(regions: &mut Vec<ByteRange>, at: u64) {
 ///
 /// `window` starts at absolute offset `at`; `medium_len` bounds what an
 /// anchor may claim.
-#[must_use]
-pub fn anchor_at(window: &[u8], at: u64, medium_len: u64) -> Option<Anchor> {
+fn anchor_at(window: &[u8], at: u64, medium_len: u64) -> Option<Anchor> {
     if let Some(volume) = volume_at(window, at, medium_len) {
         return Some(Anchor::Volume(volume.kind));
     }

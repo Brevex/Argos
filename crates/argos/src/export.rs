@@ -13,8 +13,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use argos_core::artifact::Digest;
 use argos_report::{ArtifactRecord, Manifest};
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 /// Bytes copied per streaming step while hashing.
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
@@ -302,15 +303,7 @@ fn copy_verified(from: &Path, to: &Path) -> anyhow::Result<String> {
         std::io::Write::write_all(&mut output, &buf[..read])
             .with_context(|| format!("cannot write {}", to.display()))?;
     }
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(hex, "{byte:02x}").unwrap_or_else(|err| {
-            unreachable!("writing hex into a String cannot fail: {err}");
-        });
-    }
-    Ok(hex)
+    Ok(Digest::new(hasher.finalize().into()).to_string())
 }
 
 /// Copies one preview file, keeping its position relative to the session

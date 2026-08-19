@@ -13,9 +13,9 @@
 //! depend on triage being enabled — a scan with `--no-triage` renders previews
 //! exactly as one with triage does.
 //!
-//! Perceptual-hash dedup runs before inference, so near-duplicate images
-//! collapse into one inference and share its score. Inference itself runs on
-//! one dedicated worker thread, in batches, overlapping the decode of the next
+//! Perceptual-hash dedup runs before scoring, so near-duplicate images
+//! collapse into one decision and share it. Scoring itself runs on one
+//! dedicated worker thread, in batches, overlapping the decode of the next
 //! images with the scoring of the previous ones.
 
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ pub struct TriageOutcome {
     pub score: Option<TriageScore>,
 }
 
-/// Artifacts an inference batch may hold at once.
+/// Artifacts a scoring batch may hold at once.
 ///
 /// Batching buys no throughput here, and the number says so. Measured
 /// (`cargo bench -p argos_classify --bench classify`): 2.61 ms per image
@@ -63,7 +63,7 @@ pub struct TriageOutcome {
 /// to keep the worker from idling between images.
 const BATCH_MAX_IMAGES: usize = 4;
 
-/// Pixel budget of one inference batch.
+/// Pixel budget of one scoring batch.
 ///
 /// Decoded planes are four bytes per pixel, so a batch holds at most 128 MiB
 /// of input (A-BOUNDED-ALLOC). The budget is checked against what a batch
@@ -218,7 +218,7 @@ pub(crate) fn run<V, S, C, P>(
     });
 }
 
-/// Collapses near-duplicate images so one inference speaks for a group.
+/// Collapses near-duplicate images so one decision speaks for a group.
 ///
 /// Two artifacts whose perceptual hashes are within
 /// [`phash::NEAR_DUPLICATE_DISTANCE`] are the same picture as far as a label
@@ -373,7 +373,7 @@ impl Dedup {
     }
 }
 
-/// The dedicated inference worker: drains the channel in batches and scores
+/// The dedicated scoring worker: drains the channel in batches and scores
 /// them.
 ///
 /// Returns the scores it produced and whether the classifier hard-failed. On

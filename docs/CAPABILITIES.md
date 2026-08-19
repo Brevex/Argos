@@ -95,7 +95,7 @@ not judge.
 | C31 | Record an artifact that was deliberately not written (below the size floor), with its extents and digest, so the manifest stays a complete account of the medium | CLI, GUI | in C30 |
 | C32 | Render a small preview of every artifact that decodes | CLI, GUI | in C30 |
 | C33 | Refuse an output directory that would contain the source | CLI, GUI | — |
-| C34 | Print what a finished session recovered, read back from its manifest (`report`, `--all`) | CLI | instant |
+| C34 | Print what a finished session recovered, read back from its manifest (`report`, `--all`) | CLI, wire | instant |
 | C35 | Read one page of a session's artifacts, ordered strongest evidence first, filtered by standing | CLI, GUI | instant |
 | C36 | Copy artifacts out of a session, verifying each hash and refusing any whose bytes no longer reproduce it | CLI, GUI | I/O bound |
 | C37 | Select what to export by SHA-256 or an unambiguous prefix | CLI, wire | — |
@@ -134,7 +134,7 @@ and what was only recorded are counted apart.
 | Reachable from the command line | **48** — every one except C48 and C49, which are the window itself |
 | Reachable from the window | **42** |
 | Reachable from the command line but not the window | **7** — C21, C34, C37, C38, C40, C41, C47 |
-| Expressible on the wire but called by no client | **1** — C37 |
+| Expressible on the wire but called by no client | **2** — C34, C37 |
 
 The command line reaches every capability the tool has, headless, before any interface exposes it
 (`A-CLI-FIRST`). Where the window reaches fewer, the difference is a surface that has not been

@@ -1,8 +1,8 @@
 //! What the perceptual hash must collapse and what it must keep apart.
 //!
-//! Dedup groups near-duplicates so one inference speaks for a group. A hash
+//! Dedup groups near-duplicates so one decision speaks for a group. A hash
 //! that collapses unrelated pictures would give them one label; a hash that
-//! separates re-encodings would pay for the same inference twice. Both are
+//! separates re-encodings would decide the same image twice. Both are
 //! measured here on generated images.
 
 use argos_classify::fixture::{Slice, sample};

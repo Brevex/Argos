@@ -1,4 +1,4 @@
-//! Perceptual hashing, so near-duplicate images collapse before inference.
+//! Perceptual hashing, so near-duplicate images collapse into one entry.
 //!
 //! The hash is a 64-bit blockhash (Yang, Weng & Lei, *Blockhash* — block mean
 //! value based image perceptual hashing, IIH-MSP 2006): the luma plane is

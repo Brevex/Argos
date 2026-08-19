@@ -31,18 +31,7 @@ impl ImageSource {
     ///
     /// Fails when the file cannot be opened read-only or its length queried.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DeviceError> {
-        Self::with_sector_size(path, Self::DEFAULT_SECTOR_SIZE)
-    }
-
-    /// Opens the image at `path` read-only, addressed in sectors of `sector_size`.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the file cannot be opened read-only or its length queried.
-    pub fn with_sector_size(
-        path: impl AsRef<Path>,
-        sector_size: SectorSize,
-    ) -> Result<Self, DeviceError> {
+        let sector_size = Self::DEFAULT_SECTOR_SIZE;
         let path = path.as_ref();
         let file = File::options()
             .read(true)

@@ -52,9 +52,6 @@ test = false
 doc = false
 bench = false
 
-[workspace]
-members = ["."]
-
 [[bin]]
 name = "block_classify"
 path = "fuzz_targets/block_classify.rs"
@@ -81,6 +78,7 @@ name = "decode_rgba"
 path = "fuzz_targets/decode_rgba.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "reference_read"
@@ -88,3 +86,6 @@ path = "fuzz_targets/reference_read.rs"
 test = false
 doc = false
 bench = false
+
+[workspace]
+members = ["."]

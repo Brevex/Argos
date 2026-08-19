@@ -10,6 +10,12 @@
 //! `FF D8 FF` hits a real medium produces, which is what exercises the
 //! validation stage. Images are planted at regular intervals so a scan of the
 //! result must cover the whole surface to find them all.
+//!
+//! Run by hand, before a throughput measurement: `benches/carve.rs` measures
+//! detection and classification on an in-memory fixture, and this builds the
+//! multi-gibibyte disk those rates are checked against on real storage. It
+//! guarantees nothing on its own and no lane runs it; `cargo clippy
+//! --all-targets` is what keeps it compiling (`A-SUPPORT-DECLARED`).
 
 use std::io::{BufWriter, Write};
 
