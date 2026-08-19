@@ -323,8 +323,9 @@ shadowCopies: Array<ShadowCopy>, };
  *
  * `done` and `total` are counted in `unit`. A stage that reads the medium
  * counts bytes; one that examines candidates or labels artifacts counts
- * those, and saying which is what stops a candidate count being read as a
- * byte count.
+ * those; one that ends on a clock counts the seconds of its budget. Saying
+ * which is what stops a candidate count being read as a byte count — and
+ * what tells a client when it may not show a percentage at all.
  */
 export type Progress = { 
 /**
@@ -332,7 +333,13 @@ export type Progress = {
  */
 stage: string, 
 /**
- * `bytes` or `items`.
+ * `bytes`, `items`, `steps` or `seconds`.
+ *
+ * A client may show `done` of `total` as a percentage for every unit
+ * but `steps`. Steps cost different amounts and the stage that counts
+ * them hands the expensive ones out first, so a fraction of them is
+ * not a fraction of the work's time and a bar that shows one reports a
+ * run doing its heaviest work as barely started.
  */
 unit: string, 
 /**
@@ -494,7 +501,8 @@ export type StageBegan = {
  */
 stage: string, 
 /**
- * `bytes` or `items`.
+ * `bytes`, `items`, `steps` or `seconds`; see [`Progress::unit`] for
+ * which of them a client may render as a percentage.
  */
 unit: string, 
 /**

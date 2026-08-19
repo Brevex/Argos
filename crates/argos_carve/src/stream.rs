@@ -59,6 +59,7 @@ impl<'a, R: Read + Seek> Bytes<'a, R> {
     }
 
     /// Next byte, or `None` at the end limit or source EOF.
+    #[inline]
     pub(crate) fn next(&mut self) -> io::Result<Option<u8>> {
         if self.idx == self.buf_len && !self.refill()? {
             return Ok(None);
@@ -66,6 +67,42 @@ impl<'a, R: Read + Seek> Bytes<'a, R> {
         let byte = self.buf[self.idx];
         self.idx += 1;
         Ok(Some(byte))
+    }
+
+    /// `n` buffered bytes containing no `0xFF`, packed big-endian and consumed.
+    ///
+    /// `None` when fewer than `n` are buffered or any of them is `0xFF`, and it
+    /// never refills. Both are what make it safe for a caller reading
+    /// entropy-coded data: `0xFF` introduces stuffing, fill bytes or a marker,
+    /// and resolving those is the byte-at-a-time path's business. A window this
+    /// returns is one physical byte per logical byte, which is what lets
+    /// [`Bytes::rewind`] give it back.
+    #[inline]
+    pub(crate) fn take_clean(&mut self, n: usize) -> Option<u64> {
+        debug_assert!(n <= 8, "a window wider than a u64 cannot be packed: {n}");
+        let end = self.idx.checked_add(n)?;
+        if end > self.buf_len {
+            return None;
+        }
+        let window = self.buf.get(self.idx..end)?;
+        let mut packed = 0_u64;
+        for byte in window {
+            if *byte == 0xFF {
+                return None;
+            }
+            packed = (packed << 8) | u64::from(*byte);
+        }
+        self.idx = end;
+        Some(packed)
+    }
+
+    /// Gives back `n` bytes taken through [`Bytes::take_clean`].
+    ///
+    /// Only ever called with a count taken from the same buffer and not yet
+    /// crossed by a refill, so the bytes are still there to give back.
+    #[inline]
+    pub(crate) fn rewind(&mut self, n: usize) {
+        self.idx = self.idx.saturating_sub(n);
     }
 
     /// Appends exactly `n` bytes to `out`; `false` when the limit or EOF cuts

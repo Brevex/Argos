@@ -1034,21 +1034,25 @@ fn every_stage_that_can_run_long_reports_progress_while_it_runs() {
     assert_eq!(unit_of(Stage::Report), Some(Unit::Bytes));
 }
 
-#[test]
-fn reassembly_counts_steps_and_does_not_offer_them_as_a_candidate_count() {
-    // The stage searches every header twice — a gap search and a walk — and
-    // reads a region besides, so its total is none of those things counted
-    // once. Reported as `items` it invites the arithmetic it cannot support: a
-    // reader takes a quarter of the queue searched for an eighth, and the
-    // manifest's `reassembly_attempted` is the number that means headers
-    // (`A-CONFIDENCE-HONEST`).
+/// Scans a medium holding one fragmented photograph under `budget`, and hands
+/// back what reassembly announced itself as, every event seen, and the report.
+fn reassembly_under(
+    budget: Option<std::time::Duration>,
+) -> ((Unit, u64), Vec<ScanEvent>, ScanReport) {
     let photo = argos_carve::fixture::photo_jpeg(320, 240, 0xC0FF_EE00_0000_0001);
     let block = argos_carve::classify::BLOCK_BYTES as u64;
     let header = 2 * MIB;
     let layout = argos_carve::fixture::planted(8 * MIB, &photo, &[header, header + MIB], block);
 
     let workers = 2;
-    let session = ScanSession::new(config(workers));
+    let config = ScanConfig::builder()
+        .workers(NonZeroUsize::new(workers).expect("at least one worker"))
+        .chunk_bytes(CHUNK)
+        .min_long_side(0)
+        .reassembly_budget(budget)
+        .build()
+        .expect("valid configuration");
+    let session = ScanSession::new(config);
     let views: Vec<_> = (0..workers).map(|_| layout.source()).collect();
     let medium = Medium::new(views, layout.disk.len()).expect("medium");
     let mut sink = Collector::new();
@@ -1056,7 +1060,6 @@ fn reassembly_counts_steps_and_does_not_offer_them_as_a_candidate_count() {
 
     let report = session.start(medium, &mut sink, &events).expect("scan");
     let seen = events.seen();
-
     let announced = seen
         .iter()
         .find_map(|event| match event {
@@ -1066,23 +1069,81 @@ fn reassembly_counts_steps_and_does_not_offer_them_as_a_candidate_count() {
             _ => None,
         })
         .expect("reassembly must announce itself");
+    (announced, seen, report)
+}
+
+/// Every reassembly progress event, so a test can hold the whole stage to one
+/// unit rather than to whichever event it happened to look at.
+fn reassembly_units(seen: &[ScanEvent]) -> Vec<Unit> {
+    seen.iter()
+        .filter_map(|event| match event {
+            ScanEvent::StageProgress { stage, unit, .. } if *stage == Stage::Reassembly => {
+                Some(*unit)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_deadline_bounded_reassembly_reports_against_the_deadline() {
+    // The stage ends on its budget, so that is what it reports against. Its
+    // queue cannot stand in: a step costs anything from seconds to over an
+    // hour, and `plan_search` hands the expensive ones out first, so a
+    // fraction of the steps runs far behind the work actually done — the field
+    // run of `docs/defects/09` showed 1.75% of them having covered the regions
+    // three quarters of the queue's weight sat in, and was stopped for it.
+    let budget = std::time::Duration::from_secs(3600);
+    let ((unit, total), seen, _) = reassembly_under(Some(budget));
 
     assert_eq!(
-        announced.0,
+        unit,
+        Unit::Seconds,
+        "a stage that ends on a clock reports against that clock"
+    );
+    assert_eq!(
+        total,
+        budget.as_secs(),
+        "the denominator is the budget, which is what the stage actually reaches"
+    );
+    assert!(
+        unit.supports_percentage(),
+        "elapsed of a budget is a fraction a display may show"
+    );
+    for unit in reassembly_units(&seen) {
+        assert_eq!(unit, Unit::Seconds, "the unit must not change mid-stage");
+    }
+}
+
+#[test]
+fn reassembly_counts_steps_and_does_not_offer_them_as_a_candidate_count() {
+    // Without a deadline there is nothing proportional to the time left, so
+    // the stage falls back to what it can honestly say: how much of its queue
+    // it has been through. That total is steps and not headers — the stage
+    // searches every header twice, a gap search and a walk, and reads a region
+    // besides. Reported as `items` it invites the arithmetic it cannot
+    // support: a reader takes a quarter of the queue searched for an eighth,
+    // and the manifest's `reassembly_attempted` is the number that means
+    // headers (`A-CONFIDENCE-HONEST`).
+    let ((unit, total), seen, report) = reassembly_under(None);
+
+    assert_eq!(
+        unit,
         Unit::Steps,
         "a stage whose item costs several steps counts steps, and says so"
     );
     assert!(
-        announced.1 > report.reassembly_attempted,
-        "the premise: {} steps stands for fewer headers, so reading it as headers understates          what was searched",
-        announced.1
+        total > report.reassembly_attempted,
+        "the premise: {total} steps stands for fewer headers, so reading it as headers \
+         understates what was searched"
     );
-    for event in &seen {
-        if let ScanEvent::StageProgress { stage, unit, .. } = event
-            && *stage == Stage::Reassembly
-        {
-            assert_eq!(*unit, Unit::Steps, "the unit must not change mid-stage");
-        }
+    assert!(
+        !unit.supports_percentage(),
+        "steps cost different amounts and the dear ones go first, so no display may \
+         render a fraction of them as a fraction of the work"
+    );
+    for unit in reassembly_units(&seen) {
+        assert_eq!(unit, Unit::Steps, "the unit must not change mid-stage");
     }
 }
 

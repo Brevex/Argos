@@ -87,6 +87,9 @@ class Session {
   /** Progress of that stage, in whatever that stage counts. */
   work = $state<StageProgress>({ done: 0, total: 0 });
 
+  /** What `work` is counted in, as the engine named it. */
+  workUnit = $state('');
+
   /** Bytes read off the medium by the sweep, and how many there are. */
   sweep = $state<StageProgress>({ done: 0, total: 0 });
 
@@ -159,8 +162,9 @@ class Session {
    * exchange rate between bytes and candidates. The label beside it says which
    * pass the figure belongs to.
    */
-  get scanned(): number {
+  get scanned(): number | null {
     if (AFTER_RECOVERY.has(this.stage)) return 1;
+    if (!showsPercentage(this.workUnit)) return null;
     return fraction(this.work);
   }
 
@@ -184,6 +188,7 @@ class Session {
 
   /** The active stage's percentage, or `null` when it cannot say. */
   get doneOfStage(): number | null {
+    if (!showsPercentage(this.workUnit)) return null;
     if (this.work.total <= 0) return null;
     return Math.round(fraction(this.work) * 100);
   }
@@ -225,6 +230,7 @@ class Session {
     this.source = source;
     this.stage = '';
     this.work = { done: 0, total: 0 };
+    this.workUnit = '';
     this.sweep = { done: 0, total: 0 };
     this.recovery = { done: 0, total: 0 };
     this.stored = 0;
@@ -242,9 +248,10 @@ class Session {
   apply(message: EngineMessage): void {
     switch (message.method) {
       case 'stageBegan': {
-        const { stage, total } = message.params;
+        const { stage, unit, total } = message.params;
         this.stage = stage;
         this.work = { done: 0, total };
+        this.workUnit = unit;
         // The writing stage announces how much it has to get through before it
         // starts, so its ring has a denominator from the first frame rather
         // than after the first artifact.
@@ -252,12 +259,13 @@ class Session {
         break;
       }
       case 'progress': {
-        const { stage, done, total } = message.params;
+        const { stage, unit, done, total } = message.params;
         if (stage === REPORT_STAGE) {
           this.recovery = { done, total };
           break;
         }
         this.work = { done, total };
+        this.workUnit = unit;
         if (stage === SWEEP_STAGE) this.sweep = { done, total };
         break;
       }
@@ -290,6 +298,9 @@ class Session {
         const { pass, done, total } = message.params;
         this.stage = pass;
         this.work = { done, total };
+        // A copy is measured in sectors all the way through, so it always has
+        // a percentage to show.
+        this.workUnit = 'items';
         break;
       }
       case 'acquired':
@@ -341,6 +352,20 @@ class Session {
 function fraction({ done, total }: StageProgress): number {
   if (total <= 0) return 0;
   return Math.min(1, Math.max(0, done / total));
+}
+
+/**
+ * Whether `done` of `total` in this unit is a fraction the window may show as
+ * a percentage.
+ *
+ * False for `steps`, and the engine says so for one stage: reassembly's steps
+ * cost anything from seconds to over an hour, and its queue hands the
+ * expensive ones out first, so a fraction of them runs far behind the work
+ * actually done. A run showing 1.75% had covered the material 77% of the
+ * queue's weight sat in, and was stopped for it.
+ */
+function showsPercentage(unit: string): boolean {
+  return unit !== 'steps';
 }
 
 /** The one mirror the whole window reads. */

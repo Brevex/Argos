@@ -17,10 +17,15 @@
    * The sweep claims nothing: it travels only the filled part, so it says
    * "this much is done, and the run is alive", never "this much more is
    * coming".
+   *
+   * A `null` fraction is a stage that cannot express itself as one — not a
+   * stage at nought. The ring then shows an empty track and a dash in place of
+   * a figure, which is the honest reading: the run is going and how far
+   * through it is is not a thing that can be said.
    */
   import { percentage } from '../../lib/format';
 
-  let { label, fraction }: { label: string; fraction: number } = $props();
+  let { label, fraction }: { label: string; fraction: number | null } = $props();
 
   /**
    * Geometry of the arc, in the SVG's own coordinates.
@@ -41,8 +46,8 @@
   /** One filter id per ring, so two on a page do not share one blur. */
   const uid = `ring-${(counter += 1)}`;
 
-  const clamped = $derived(Math.min(1, Math.max(0, fraction)));
-  const percent = $derived(percentage(fraction));
+  const clamped = $derived(fraction === null ? 0 : Math.min(1, Math.max(0, fraction)));
+  const percent = $derived(fraction === null ? null : percentage(fraction));
   const filled = $derived(CIRCUMFERENCE * clamped);
   const offset = $derived(CIRCUMFERENCE - filled);
 
@@ -60,7 +65,11 @@
 </script>
 
 <div class="ring">
-  <svg viewBox="0 0 {SIZE} {SIZE}" role="img" aria-label="{label} {percent}%">
+  <svg
+    viewBox="0 0 {SIZE} {SIZE}"
+    role="img"
+    aria-label={percent === null ? `${label}, progress not measurable` : `${label} ${percent}%`}
+  >
     <defs>
       <filter id={uid} x="-25%" y="-25%" width="150%" height="150%">
         <feGaussianBlur stdDeviation="5" />
@@ -70,7 +79,7 @@
     <circle class="track" cx={SIZE / 2} cy={SIZE / 2} r={RADIUS} />
     <circle class="track-edge" cx={SIZE / 2} cy={SIZE / 2} r={RADIUS + NOMINAL_STROKE / 2 - 0.5} />
 
-    {#if percent > 0}
+    {#if clamped > 0}
       <!-- The rim under the fill, a shade darker, so the arc has a body. -->
       <circle
         class="rim"
@@ -114,7 +123,11 @@
   <div class="screen" aria-hidden="true"></div>
   <div class="face">
     <span class="label">{label}</span>
-    <span class="value">{percent}<span class="unit">%</span></span>
+    {#if percent === null}
+      <span class="value">&mdash;</span>
+    {:else}
+      <span class="value">{percent}<span class="unit">%</span></span>
+    {/if}
   </div>
 </div>
 

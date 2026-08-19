@@ -75,18 +75,58 @@ const PROGRESS_STEPS: u64 = 200;
 /// when it is slowest is a stage that cannot be told from a stalled one.
 const PROGRESS_INTERVAL_MS: u64 = 5_000;
 
-/// Reports how far a stage that counts items has got.
+/// How often a stage watching the clock rather than its work looks at it.
+///
+/// Well under [`PROGRESS_INTERVAL_MS`], so an event goes out close to when it
+/// is due, and long enough that the watcher costs nothing: it wakes, compares
+/// two instants and goes back to sleep (`M-LOG-OVERHEAD`). It also bounds how
+/// long the stage waits for the watcher when the search finishes first.
+const TICK_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// What a stage's progress is measured against.
+#[derive(Clone, Copy, Debug)]
+enum Bound {
+    /// An amount of work, advanced by [`Counter::step`].
+    Work {
+        /// Work the stage expects to cover.
+        total: u64,
+        /// What `total` counts.
+        unit: Unit,
+        /// Steps between two events, never zero.
+        stride: u64,
+    },
+    /// A wall clock the stage ends on, however much of its queue it reached.
+    ///
+    /// Reassembly is the only stage bounded this way, and it has to report
+    /// this way for the same reason it is bounded this way: a decode's cost is
+    /// not a constant, so neither the queue's length nor the position in it is
+    /// a fraction of the time left. Elapsed against the budget is.
+    Deadline {
+        /// How long the stage may run.
+        budget: std::time::Duration,
+    },
+}
+
+impl Bound {
+    /// The unit and total a stage announces itself with.
+    fn announced(self) -> (Unit, u64) {
+        match self {
+            Self::Work { total, unit, .. } => (unit, total),
+            Self::Deadline { budget } => (Unit::Seconds, budget.as_secs()),
+        }
+    }
+}
+
+/// Reports how far a stage has got, against the amount of work it has to do or
+/// against the clock it ends on.
 ///
 /// Shared by the workers of a parallel stage, so the count is one number for
 /// the stage rather than one per thread.
 pub(crate) struct Counter<'a, P: ?Sized> {
     progress: &'a P,
     stage: Stage,
-    total: u64,
-    /// What `total` counts.
-    unit: Unit,
-    /// Steps between two events, never zero.
-    stride: u64,
+    /// What progress is measured against.
+    bound: Bound,
     done: AtomicU64,
     /// When the stage began.
     started: std::time::Instant,
@@ -97,13 +137,34 @@ pub(crate) struct Counter<'a, P: ?Sized> {
 impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
     /// Announces the stage and prepares to count `total` of `unit`.
     pub(crate) fn start(progress: &'a P, stage: Stage, total: u64, unit: Unit) -> Self {
+        Self::new(
+            progress,
+            stage,
+            Bound::Work {
+                total,
+                unit,
+                stride: total.div_ceil(PROGRESS_STEPS).max(1),
+            },
+        )
+    }
+
+    /// Announces a stage that ends on a deadline, and prepares to report how
+    /// much of `budget` it has spent.
+    ///
+    /// Steps are still counted — [`Counter::step`] is what keeps the clock
+    /// honest across a quiet stretch — but what goes out is the clock, because
+    /// that is what reaches its end when the stage does.
+    pub(crate) fn until(progress: &'a P, stage: Stage, budget: std::time::Duration) -> Self {
+        Self::new(progress, stage, Bound::Deadline { budget })
+    }
+
+    fn new(progress: &'a P, stage: Stage, bound: Bound) -> Self {
+        let (unit, total) = bound.announced();
         progress.emit(ScanEvent::StageStarted { stage, unit, total });
         Self {
             progress,
             stage,
-            total,
-            unit,
-            stride: total.div_ceil(PROGRESS_STEPS).max(1),
+            bound,
             done: AtomicU64::new(0),
             started: std::time::Instant::now(),
             spoke_at: AtomicU64::new(0),
@@ -114,12 +175,31 @@ impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
     /// and whenever the stage has been quiet for [`PROGRESS_INTERVAL_MS`].
     pub(crate) fn step(&self) {
         let done = self.done.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-        if done.is_multiple_of(self.stride) || done == self.total {
+        if let Bound::Work { total, stride, .. } = self.bound
+            && (done.is_multiple_of(stride) || done == total)
+        {
             self.report(done);
             return;
         }
-        // Otherwise on the clock. One caller wins the interval and speaks for
-        // the stage; the others go straight back to work.
+        self.report_if_quiet(done);
+    }
+
+    /// Reports without advancing, for a caller watching the clock rather than
+    /// the work.
+    ///
+    /// A stage whose items take tens of minutes cannot report from inside
+    /// [`Counter::step`] alone: nothing calls it until an item finishes, and a
+    /// stage that goes quiet exactly when it is slowest cannot be told from a
+    /// stalled one.
+    pub(crate) fn tick(&self) {
+        self.report_if_quiet(self.done.load(Ordering::Relaxed));
+    }
+
+    /// Reports if nothing has for [`PROGRESS_INTERVAL_MS`].
+    ///
+    /// One caller wins the interval and speaks for the stage; the others go
+    /// straight back to work.
+    fn report_if_quiet(&self, done: u64) {
         let now = self.millis();
         if now.saturating_sub(self.spoke_at.load(Ordering::Relaxed)) < PROGRESS_INTERVAL_MS {
             return;
@@ -137,11 +217,21 @@ impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
 
     fn report(&self, done: u64) {
         self.spoke_at.store(self.millis(), Ordering::Relaxed);
+        let (unit, done, total) = match self.bound {
+            Bound::Work { total, unit, .. } => (unit, done, total),
+            // Capped at the budget: a stage that overran its deadline waiting
+            // for an item to finish must not report more than all of it.
+            Bound::Deadline { budget } => (
+                Unit::Seconds,
+                self.started.elapsed().as_secs().min(budget.as_secs()),
+                budget.as_secs(),
+            ),
+        };
         self.progress.emit(ScanEvent::StageProgress {
             stage: self.stage,
-            unit: self.unit,
+            unit,
             done,
-            total: self.total,
+            total,
         });
     }
 }
@@ -1392,14 +1482,19 @@ fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
     // takes it for a header count reads a quarter of the queue searched as an
     // eighth, and the manifest's `reassembly_attempted` is the header count
     // (`A-CONFIDENCE-HONEST`). `StageFinished` settles the bar at the end.
-    let counter = Counter::start(
-        progress,
-        Stage::Reassembly,
-        (broken.len() as u64)
-            .saturating_mul(2)
-            .saturating_add(plans.len() as u64),
-        Unit::Steps,
-    );
+    //
+    // Which of the two a run reports is decided by whether it has a deadline.
+    // Steps are not equal here and `plan_search` hands out the expensive ones
+    // first, so a fraction of them is not a fraction of the time and no display
+    // may read it as one; with a budget there is a quantity that is, and it is
+    // the budget (`docs/defects/09`).
+    let steps = (broken.len() as u64)
+        .saturating_mul(2)
+        .saturating_add(plans.len() as u64);
+    let counter = match budget {
+        Some(budget) => Counter::until(progress, Stage::Reassembly, budget),
+        None => Counter::start(progress, Stage::Reassembly, steps, Unit::Steps),
+    };
 
     let mut scratch = Scratch::new();
     let mut found = Vec::new();
@@ -1415,41 +1510,63 @@ fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
         .collect();
     let mut buffer = Vec::new();
 
-    for plan in plans {
-        if control.is_cancelled() {
-            return found;
-        }
-        if spent() {
-            report.ceilings.reassembly_decodes = true;
-            return found;
-        }
-        let region = search::Region::load(view, plan.range, buffer);
-        counter.step();
-        let searched = search_region(
-            &region,
-            &broken[plan.headers.clone()],
-            allocation_grid(volumes, region.range()),
-            &spoken_for,
-            &mut Searching {
-                control,
-                counter: &counter,
-                spent: &spent,
-                scratch: &mut scratch,
-                report,
-                workers,
-            },
-        );
-        // What this region claimed carries to the next one, which narrows from
-        // it again.
-        for finding in &searched {
-            spoken_for.extend_from_slice(&finding.extents);
-        }
-        found.extend(searched);
+    // One thread does nothing but look at the clock while the search runs. The
+    // stage's items are minutes long and the counter only speaks when one ends,
+    // so without this a run reporting every five seconds by contract went an
+    // hour and eight minutes without a word — which is what a stalled run looks
+    // like, and what got a working one cancelled (`docs/defects/09`).
+    let ticking = std::sync::atomic::AtomicBool::new(true);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            while ticking.load(Ordering::Relaxed) {
+                std::thread::sleep(TICK_POLL);
+                counter.tick();
+            }
+        });
 
-        buffer = region.into_buffer();
-    }
-    report.ceilings.reassembly_decodes |= spent();
-    found
+        // Immediately-called so the ticker is stopped on every way out,
+        // including the two the search leaves by early.
+        let found = (|| {
+            for plan in plans {
+                if control.is_cancelled() {
+                    return found;
+                }
+                if spent() {
+                    report.ceilings.reassembly_decodes = true;
+                    return found;
+                }
+                let region = search::Region::load(view, plan.range, buffer);
+                counter.step();
+                let searched = search_region(
+                    &region,
+                    &broken[plan.headers.clone()],
+                    allocation_grid(volumes, region.range()),
+                    &spoken_for,
+                    &mut Searching {
+                        control,
+                        counter: &counter,
+                        spent: &spent,
+                        scratch: &mut scratch,
+                        report,
+                        workers,
+                    },
+                );
+                // What this region claimed carries to the next one, which
+                // narrows from it again.
+                for finding in &searched {
+                    spoken_for.extend_from_slice(&finding.extents);
+                }
+                found.extend(searched);
+
+                buffer = region.into_buffer();
+            }
+            report.ceilings.reassembly_decodes |= spent();
+            found
+        })();
+
+        ticking.store(false, Ordering::Relaxed);
+        found
+    })
 }
 
 /// What one region's search shares with the stage around it.
@@ -2313,6 +2430,110 @@ impl<V: Read + Seek> Seek for ExtentReader<'_, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sink that counts what a stage said, for the tests below about *when*
+    /// it speaks rather than about what it found.
+    #[derive(Default)]
+    struct Spoken {
+        progress: AtomicU64,
+        last: std::sync::Mutex<Option<(Unit, u64, u64)>>,
+    }
+
+    impl Spoken {
+        fn count(&self) -> u64 {
+            self.progress.load(Ordering::Relaxed)
+        }
+
+        fn last(&self) -> Option<(Unit, u64, u64)> {
+            *self
+                .last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
+    impl ProgressSink for Spoken {
+        fn emit(&self, event: ScanEvent) {
+            if let ScanEvent::StageProgress {
+                unit, done, total, ..
+            } = event
+            {
+                self.progress.fetch_add(1, Ordering::Relaxed);
+                *self
+                    .last
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((unit, done, total));
+            }
+        }
+    }
+
+    /// A stage whose items take tens of minutes still has to speak on the
+    /// clock.
+    ///
+    /// [`Counter::step`] was the only thing that reported, and nothing calls it
+    /// until an item finishes: the field run behind `docs/defects/09` spent
+    /// 4,112 s on one item without a word, from a counter contracted to speak
+    /// every five seconds. That is indistinguishable from a stalled run, and it
+    /// is what got a working one cancelled.
+    #[test]
+    fn a_tick_speaks_for_a_stage_that_has_not_finished_an_item() {
+        let sink = Spoken::default();
+        let mut counter = Counter::until(
+            &sink,
+            Stage::Reassembly,
+            std::time::Duration::from_secs(600),
+        );
+
+        // Nothing yet: the stage has only just begun and has nothing to add.
+        counter.tick();
+        assert_eq!(counter.done.load(Ordering::Relaxed), 0, "no item finished");
+        assert_eq!(sink.count(), 0, "a stage that just started has said enough");
+
+        // Quiet for longer than the interval now, and still no step taken.
+        counter.started -= std::time::Duration::from_millis(PROGRESS_INTERVAL_MS + 1);
+        counter.tick();
+        assert_eq!(
+            sink.count(),
+            1,
+            "the clock, not the work, is what makes a deadline-bounded stage speak"
+        );
+        assert_eq!(
+            counter.done.load(Ordering::Relaxed),
+            0,
+            "a tick is not a step"
+        );
+
+        let (unit, done, total) = sink.last().expect("the tick reported");
+        assert_eq!(unit, Unit::Seconds, "a budget is spoken of in seconds");
+        assert_eq!(total, 600, "the denominator is the budget");
+        assert!(
+            done >= 5,
+            "elapsed is what was spent, not what was finished: {done}"
+        );
+
+        // And it does not repeat itself inside one interval.
+        counter.tick();
+        assert_eq!(sink.count(), 1, "one caller wins the interval");
+    }
+
+    /// A deadline-bounded stage that overran its budget waiting for an item to
+    /// finish reports all of it, never more.
+    #[test]
+    fn a_stage_that_overran_its_budget_reports_it_full_and_not_past_full() {
+        let sink = Spoken::default();
+        let mut counter =
+            Counter::until(&sink, Stage::Reassembly, std::time::Duration::from_secs(10));
+
+        counter.started -= std::time::Duration::from_secs(90);
+        counter.tick();
+
+        let (_, done, total) = sink.last().expect("the tick reported");
+        assert_eq!(
+            (done, total),
+            (10, 10),
+            "a bar past its end reports a run that overshot as one still going"
+        );
+    }
 
     fn broken(header: u64, declared: (u32, u32), decoded: u32, required: u32) -> Broken {
         Broken {

@@ -1,0 +1,94 @@
+luma-640x480	scan	decoded=4800 required=4800 across=80 rows=8 640x480 end=44086 settled=44084 stop=Complete seams=0
+luma-640x480	watched	decoded=4800 required=4800 across=80 rows=8 640x480 end=44086 settled=44084 stop=Complete seams=3 1156 1553 2357
+luma-640x480	resume/4	replay_from=11015 decoded=1155 required=4800 (640, 480)
+luma-640x480	continued/4	decoded=1155 required=4800 across=80 rows=8 640x480 end=2 settled=2 stop=Broke seams=3 0 0 0
+luma-640x480	resume/2	replay_from=22039 decoded=2356 required=4800 (640, 480)
+luma-640x480	continued/2	decoded=2356 required=4800 across=80 rows=8 640x480 end=2 settled=2 stop=Broke seams=3 0 0 0
+luma-97x61-odd	scan	decoded=104 required=104 across=13 rows=8 97x61 end=1577 settled=1575 stop=Complete seams=0
+luma-97x61-odd	watched	decoded=104 required=104 across=13 rows=8 97x61 end=1577 settled=1575 stop=Complete seams=3 1 17 40
+luma-97x61-odd	resume/4	none
+luma-97x61-odd	resume/2	replay_from=783 decoded=39 required=104 (97, 61)
+luma-97x61-odd	continued/2	decoded=39 required=104 across=13 rows=8 97x61 end=2 settled=2 stop=Broke seams=3 0 0 0
+rgb-96x64	scan	decoded=24 required=24 across=6 rows=16 96x64 end=1623 settled=1621 stop=Complete seams=0
+rgb-96x64	watched	decoded=24 required=24 across=6 rows=16 96x64 end=1623 settled=1621 stop=Complete seams=3 1 1 4
+rgb-96x64	resume/4	none
+rgb-96x64	resume/2	replay_from=787 decoded=3 required=24 (96, 64)
+rgb-96x64	continued/2	decoded=3 required=24 across=6 rows=16 96x64 end=2 settled=2 stop=Broke seams=3 0 0 0
+restarts-320x240	scan	decoded=1200 required=1200 across=40 rows=8 320x240 end=14528 settled=14526 stop=Complete seams=0
+restarts-320x240	watched	decoded=1200 required=1200 across=40 rows=8 320x240 end=14528 settled=14526 stop=Complete seams=3 265 394 609
+restarts-320x240	resume/4	replay_from=3631 decoded=264 required=1200 (320, 240)
+restarts-320x240	continued/4	decoded=264 required=1200 across=40 rows=8 320x240 end=2 settled=2 stop=Broke seams=3 0 0 0
+restarts-320x240	resume/2	replay_from=7258 decoded=608 required=1200 (320, 240)
+restarts-320x240	continued/2	decoded=608 required=1200 across=40 rows=8 320x240 end=2 settled=2 stop=Broke seams=3 0 0 0
+quality-30	scan	decoded=300 required=300 across=20 rows=8 160x120 end=1580 settled=1578 stop=Complete seams=0
+quality-30	watched	decoded=300 required=300 across=20 rows=8 160x120 end=1580 settled=1578 stop=Complete seams=3 1 20 80
+quality-30	resume/4	none
+quality-30	resume/2	replay_from=789 decoded=79 required=300 (160, 120)
+quality-30	continued/2	decoded=79 required=300 across=20 rows=8 160x120 end=2 settled=2 stop=Broke seams=3 0 0 0
+quality-98	scan	decoded=300 required=300 across=20 rows=8 160x120 end=10793 settled=10791 stop=Complete seams=0
+quality-98	watched	decoded=300 required=300 across=20 rows=8 160x120 end=10793 settled=10791 stop=Complete seams=3 70 96 155
+quality-98	resume/4	replay_from=2676 decoded=69 required=300 (160, 120)
+quality-98	continued/4	decoded=69 required=300 across=20 rows=8 160x120 end=2 settled=2 stop=Broke seams=3 0 0 0
+quality-98	resume/2	replay_from=5390 decoded=154 required=300 (160, 120)
+quality-98	continued/2	decoded=154 required=300 across=20 rows=8 160x120 end=2 settled=2 stop=Broke seams=3 0 0 0
+truncated-1-8	scan	decoded=76 required=768 across=32 rows=8 256x192 end=921 settled=918 stop=Broke seams=0
+truncated-1-8	watched	decoded=76 required=768 across=32 rows=8 256x192 end=921 settled=918 stop=Broke seams=3 1 1 10
+truncated-1-8	resume/4	none
+truncated-1-8	resume/2	replay_from=453 decoded=9 required=768 (256, 192)
+truncated-1-8	continued/2	decoded=9 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+truncated-2-8	scan	decoded=200 required=768 across=32 rows=8 256x192 end=1843 settled=1838 stop=Broke seams=0
+truncated-2-8	watched	decoded=200 required=768 across=32 rows=8 256x192 end=1843 settled=1838 stop=Broke seams=3 10 32 77
+truncated-2-8	resume/4	replay_from=453 decoded=9 required=768 (256, 192)
+truncated-2-8	continued/4	decoded=9 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+truncated-2-8	resume/2	replay_from=918 decoded=76 required=768 (256, 192)
+truncated-2-8	continued/2	decoded=76 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+truncated-3-8	scan	decoded=282 required=768 across=32 rows=8 256x192 end=2764 settled=2759 stop=Broke seams=0
+truncated-3-8	watched	decoded=282 required=768 across=32 rows=8 256x192 end=2764 settled=2759 stop=Broke seams=3 43 77 145
+truncated-3-8	resume/4	replay_from=691 decoded=43 required=768 (256, 192)
+truncated-3-8	continued/4	decoded=43 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+truncated-3-8	resume/2	replay_from=1375 decoded=144 required=768 (256, 192)
+truncated-3-8	continued/2	decoded=144 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+truncated-7-8	scan	decoded=700 required=768 across=32 rows=8 256x192 end=6451 settled=6449 stop=Broke seams=0
+truncated-7-8	watched	decoded=700 required=768 across=32 rows=8 256x192 end=6451 settled=6449 stop=Broke seams=3 178 227 314
+truncated-7-8	resume/4	replay_from=1610 decoded=177 required=768 (256, 192)
+truncated-7-8	continued/4	decoded=177 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+truncated-7-8	resume/2	replay_from=3183 decoded=313 required=768 (256, 192)
+truncated-7-8	continued/2	decoded=313 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+flipped-at-55pc	scan	decoded=768 required=768 across=32 rows=8 256x192 end=7373 settled=7371 stop=Complete seams=0
+flipped-at-55pc	watched	decoded=768 required=768 across=32 rows=8 256x192 end=7373 settled=7371 stop=Complete seams=3 201 254 347
+flipped-at-55pc	resume/4	replay_from=1838 decoded=200 required=768 (256, 192)
+flipped-at-55pc	continued/4	decoded=200 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+flipped-at-55pc	resume/2	replay_from=3677 decoded=346 required=768 (256, 192)
+flipped-at-55pc	continued/2	decoded=346 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+flipped-at-70pc	scan	decoded=768 required=768 across=32 rows=8 256x192 end=7373 settled=7371 stop=Complete seams=0
+flipped-at-70pc	watched	decoded=768 required=768 across=32 rows=8 256x192 end=7373 settled=7371 stop=Complete seams=3 201 254 347
+flipped-at-70pc	resume/4	replay_from=1838 decoded=200 required=768 (256, 192)
+flipped-at-70pc	continued/4	decoded=200 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+flipped-at-70pc	resume/2	replay_from=3677 decoded=346 required=768 (256, 192)
+flipped-at-70pc	continued/2	decoded=346 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+flipped-at-85pc	scan	decoded=768 required=768 across=32 rows=8 256x192 end=7359 settled=7358 stop=Broke seams=0
+flipped-at-85pc	watched	decoded=768 required=768 across=32 rows=8 256x192 end=7359 settled=7358 stop=Broke seams=3 201 254 347
+flipped-at-85pc	resume/4	replay_from=1838 decoded=200 required=768 (256, 192)
+flipped-at-85pc	continued/4	decoded=200 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+flipped-at-85pc	resume/2	replay_from=3677 decoded=346 required=768 (256, 192)
+flipped-at-85pc	continued/2	decoded=346 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+spliced-onto-a-sibling	scan	decoded=768 required=768 across=32 rows=8 256x192 end=8056 settled=8055 stop=Broke seams=0
+spliced-onto-a-sibling	watched	decoded=768 required=768 across=32 rows=8 256x192 end=8056 settled=8055 stop=Broke seams=3 234 285 378
+spliced-onto-a-sibling	resume/4	replay_from=2195 decoded=233 required=768 (256, 192)
+spliced-onto-a-sibling	continued/4	decoded=233 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+spliced-onto-a-sibling	resume/2	replay_from=4390 decoded=377 required=768 (256, 192)
+spliced-onto-a-sibling	continued/2	decoded=377 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+header-then-noise	scan	decoded=258 required=768 across=32 rows=8 256x192 end=2550 settled=2547 stop=Broke seams=0
+header-then-noise	watched	decoded=258 required=768 across=32 rows=8 256x192 end=2550 settled=2547 stop=Broke seams=3 0 0 0
+header-then-noise	resume/4	replay_from=2547 decoded=258 required=768 (256, 192)
+header-then-noise	continued/4	decoded=258 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+header-then-noise	resume/2	replay_from=2547 decoded=258 required=768 (256, 192)
+header-then-noise	continued/2	decoded=258 required=768 across=32 rows=8 256x192 end=2 settled=2 stop=Broke seams=3 0 0 0
+pure-noise	scan	decoded=0 required=0 across=0 rows=0 0x0 end=1 settled=1 stop=Broke seams=0
+pure-noise	watched	decoded=0 required=0 across=0 rows=0 0x0 end=1 settled=1 stop=Broke seams=0
+pure-noise	resume/4	none
+pure-noise	resume/2	none
+empty	scan	decoded=0 required=0 across=0 rows=0 0x0 end=0 settled=0 stop=Broke seams=0
+empty	watched	decoded=0 required=0 across=0 rows=0 0x0 end=0 settled=0 stop=Broke seams=0
+empty	resume/4	none
+empty	resume/2	none

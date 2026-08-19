@@ -15,6 +15,21 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 /// Bytes in a mebibyte, for the rate display.
 const MIB: f64 = 1024.0 * 1024.0;
 
+/// `seconds` as a clock a reader takes in at a glance.
+///
+/// `2h00m`, `52m10s`, `9s`: the largest two units that carry information, so a
+/// budget and how much of it is gone can be compared without counting digits.
+fn clock(seconds: u64) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 /// Renders scan events to stderr, leaving stdout for the result.
 ///
 /// On a terminal this is one status line rewritten in place; when stderr is
@@ -106,7 +121,14 @@ impl ProgressSink for Renderer {
                     .duration_since(line.started)
                     .as_secs_f64()
                     .max(f64::MIN_POSITIVE);
-                let percent = done.saturating_mul(100).checked_div(total);
+                // Only from a unit that supports one. Reassembly's steps cost
+                // different amounts and the expensive ones are handed out
+                // first, so a percentage of them reports a run doing its
+                // heaviest work as barely started (`docs/defects/09`).
+                let percent = unit
+                    .supports_percentage()
+                    .then(|| done.saturating_mul(100).checked_div(total))
+                    .flatten();
                 let measure = match unit {
                     // A read rate belongs to a stage that reads; a stage
                     // counting candidates reports the count itself.
@@ -119,6 +141,8 @@ impl ProgressSink for Renderer {
                         format!("{rate:>7.1} MiB/s")
                     }
                     Unit::Items | Unit::Steps => format!("{done} of {total} {unit}"),
+                    // A budget reads as a clock, not as a count of seconds.
+                    Unit::Seconds => format!("{} of {}", clock(done), clock(total)),
                 };
                 match percent {
                     Some(percent) => eprint!("\r  {stage:<10} {percent:>3}%   {measure}"),
@@ -241,4 +265,30 @@ pub fn spawn_console_controls(session: ScanSession) -> Controls {
         }
     });
     Controls { active }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clock;
+
+    /// A budget and how much of it is gone are read side by side, so the two
+    /// must never be shown in different units or in a form that has to be
+    /// counted out. These are the boundaries where that could slip.
+    #[test]
+    fn a_clock_carries_the_largest_two_units_that_say_anything() {
+        assert_eq!(clock(0), "0s");
+        assert_eq!(clock(9), "9s");
+        assert_eq!(clock(59), "59s");
+        // A minute is the first thing worth naming, and the seconds beside it
+        // stay two digits so 1m05s does not read as 1m50s.
+        assert_eq!(clock(60), "1m00s");
+        assert_eq!(clock(65), "1m05s");
+        assert_eq!(clock(3599), "59m59s");
+        // Past an hour the seconds stop earning their place and the minutes
+        // take the same two digits for the same reason.
+        assert_eq!(clock(3600), "1h00m");
+        assert_eq!(clock(3661), "1h01m");
+        assert_eq!(clock(7200), "2h00m");
+        assert_eq!(clock(86_399), "23h59m");
+    }
 }

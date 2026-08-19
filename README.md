@@ -50,20 +50,25 @@ Needs a stable Rust toolchain and Node 24. On Linux also `libwebkit2gtk-4.1-dev`
 `librsvg2-dev` and `patchelf`.
 
 ```bash
-# the engine, from the repository root
-cargo test --workspace
+rm -rf crates/argos_ui/crates                  
+rm -rf crates/argos_ui/target/release/bundle   
+
 cargo build --release -p argos --target x86_64-unknown-linux-gnu
 
-# stage it where the bundler looks for it
 mkdir -p crates/argos_ui/binaries
 cp target/x86_64-unknown-linux-gnu/release/argos \
    crates/argos_ui/binaries/argos-x86_64-unknown-linux-gnu
 
-# the shell
 npm --prefix crates/argos_ui/ui ci
+npm --prefix crates/argos_ui/ui run check
+
 cd crates/argos_ui
 TAURI_FRONTEND_PATH=ui ui/node_modules/.bin/tauri build \
-  --target x86_64-unknown-linux-gnu --bundles deb
+  --target x86_64-unknown-linux-gnu --bundles deb,rpm
+cd ../..
+
+sudo dnf remove argos        
+sudo dnf install ./crates/argos_ui/target/x86_64-unknown-linux-gnu/release/bundle/rpm/Argos-0.1.0-1.x86_64.rpm
 ```
 
 The engine is a separate binary that the shell finds beside itself, which is why it is staged under

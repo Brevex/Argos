@@ -49,9 +49,14 @@ impl std::fmt::Display for RunState {
 /// What a stage counts its work in.
 ///
 /// A stage that reads the medium measures itself in bytes; one that examines
-/// candidates or labels artifacts measures itself in those. Naming the unit is
-/// what lets a display say `43%` for either without claiming a candidate count
-/// is a byte count.
+/// candidates or labels artifacts measures itself in those; one that ends on a
+/// clock measures itself in seconds. Naming the unit is what lets a display say
+/// `43%` for one without claiming a candidate count is a byte count — and what
+/// lets it decline to say it for a unit that cannot support one.
+///
+/// Only [`Unit::Bytes`], [`Unit::Items`] and [`Unit::Seconds`] support a
+/// percentage. [`Unit::Steps`] does not, and a display must not compute one
+/// from it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Unit {
     /// Bytes of the medium.
@@ -67,7 +72,40 @@ pub enum Unit {
     /// It counts steps instead, and says so: `3706 of 16321 steps` invites no
     /// arithmetic about how many items are left, which `3706 of 16321 items`
     /// does — wrongly, when an item costs three.
+    ///
+    /// Steps are not equal, and where the queue is ordered by how promising an
+    /// item is rather than by what it costs, they are not even ordered: the
+    /// field run behind `docs/defects/09` measured 3.68 s and 131.65 s per
+    /// header in two regions of the same queue, with the expensive ones first.
+    /// A fraction of the steps is therefore not a fraction of the time, and
+    /// [`Unit::supports_percentage`] answers `false` here for that reason.
     Steps,
+    /// Seconds of wall clock, for a stage that ends on a deadline rather than
+    /// on an amount of work.
+    ///
+    /// Reassembly is the one. Its budget is wall-clock because a decode's cost
+    /// is not a constant and the stage cannot tell which case it is in until it
+    /// is there, so how far it has got through its queue says nothing about how
+    /// long it has left. Elapsed against that budget says exactly that, and
+    /// reaches its end when the stage does.
+    Seconds,
+}
+
+impl Unit {
+    /// Whether `done` out of `total` of this unit is a fraction a display may
+    /// show as a percentage.
+    ///
+    /// False for [`Unit::Steps`], whose units cost different amounts and are
+    /// not handed out cheapest-first. A display that shows one anyway reports a
+    /// run doing its heaviest work as barely started, which is what the run in
+    /// `docs/defects/09` was cancelled for.
+    #[must_use]
+    pub const fn supports_percentage(self) -> bool {
+        match self {
+            Self::Bytes | Self::Items | Self::Seconds => true,
+            Self::Steps => false,
+        }
+    }
 }
 
 impl std::fmt::Display for Unit {
@@ -76,6 +114,7 @@ impl std::fmt::Display for Unit {
             Self::Bytes => "bytes",
             Self::Items => "items",
             Self::Steps => "steps",
+            Self::Seconds => "seconds",
         })
     }
 }

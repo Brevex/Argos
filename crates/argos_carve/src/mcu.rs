@@ -357,7 +357,7 @@ struct Cursor {
     decoded: u32,
     expected_restart: u8,
     /// Bits pulled but not yet consumed, most significant first.
-    accumulator: u32,
+    accumulator: u64,
     /// How many of `accumulator`'s low bits are valid.
     bits: u32,
     halt: Halt,
@@ -625,8 +625,33 @@ const MAX_SYMBOLS: usize = 256;
 /// The symbol list is inline rather than a `Vec`: a table is rebuilt for every
 /// reassembly hypothesis, and thousands of those run per fragmented candidate,
 /// so a heap allocation here would be one per hypothesis (`M-MEM-REUSE`).
+/// Code bits one direct lookup resolves.
+///
+/// Eight covers the great majority of codes a JPEG encoder emits — the common
+/// symbols are the short ones, which is what Huffman coding is for — and costs
+/// a 512-byte table per Huffman table. Longer codes fall through to the
+/// canonical walk, which is the same code that ran before and still decides
+/// them (`M-DOCUMENTED-MAGIC`).
+const LUT_BITS: u32 = 10;
+
+/// Entries in a direct-lookup table: one per possible `LUT_BITS` prefix.
+const LUT_SIZE: usize = 1 << LUT_BITS;
+
+/// A prefix no code of `LUT_BITS` or fewer bits matches.
+///
+/// Zero cannot be a real entry because a real one carries a length of at least
+/// one in its high byte, so it needs no separate flag.
+const LUT_MISS: u16 = 0;
+
 #[derive(Clone, Debug)]
 struct HuffTable {
+    /// Symbol and code length for every `LUT_BITS`-bit prefix, packed as
+    /// `(length << 8) | symbol`, or [`LUT_MISS`].
+    ///
+    /// Built once per table, and a table is built once per candidate rather
+    /// than per hypothesis, so this is paid for by every hypothesis that
+    /// follows it.
+    lut: [u16; LUT_SIZE],
     /// Smallest code of each length, indexed by length.
     mincode: [i32; MAX_CODE_BITS + 1],
     /// Largest code of each length; `-1` when the length has no codes.
@@ -668,13 +693,56 @@ impl HuffTable {
         let mut symbols = [0_u8; MAX_SYMBOLS];
         let taken = values.len().min(MAX_SYMBOLS);
         symbols[..taken].copy_from_slice(&values[..taken]);
-        Some(Self {
+        let mut table = Self {
+            lut: [LUT_MISS; LUT_SIZE],
             mincode,
             maxcode,
             valptr,
             values: symbols,
             symbols: taken,
-        })
+        };
+        table.fill_lut();
+        Some(table)
+    }
+
+    /// Records, for every short prefix, what the canonical walk would decide.
+    ///
+    /// A prefix the walk resolves at `length` bits stands for every longer
+    /// prefix that begins with it, so one code fills a run of entries. A code
+    /// the walk would refuse — one whose symbol index falls outside the table —
+    /// is left as [`LUT_MISS`] rather than guessed at, so the walk refuses it
+    /// exactly as it did before.
+    fn fill_lut(&mut self) {
+        for length in 1..=LUT_BITS as usize {
+            if self.maxcode[length] < 0 {
+                continue;
+            }
+            for code in self.mincode[length]..=self.maxcode[length] {
+                let Ok(offset) = usize::try_from(code - self.mincode[length]) else {
+                    continue;
+                };
+                let Some(symbol) = self
+                    .valptr
+                    .get(length)
+                    .and_then(|base| base.checked_add(offset))
+                    .filter(|at| *at < self.symbols)
+                    .and_then(|at| self.values.get(at))
+                    .copied()
+                else {
+                    continue;
+                };
+                let Ok(code) = usize::try_from(code) else {
+                    continue;
+                };
+                let shift = LUT_BITS as usize - length;
+                let first = code << shift;
+                let length = u16::try_from(length).unwrap_or(u16::MAX);
+                let entry = (length << 8) | u16::from(symbol);
+                for slot in first..(first + (1 << shift)).min(LUT_SIZE) {
+                    self.lut[slot] = entry;
+                }
+            }
+        }
     }
 }
 
@@ -695,12 +763,27 @@ enum Halt {
 /// Bytes are pulled one at a time, on demand, so the cursor position stays
 /// within one byte of what has actually been consumed — reassembly trims
 /// fragments to that position, so over-reading ahead would misreport it.
+/// Bytes one fast refill pulls.
+///
+/// The reader is bit-serial by nature, so what it can amortise is the refill:
+/// pulling seven clean bytes at once buys about eleven Huffman symbols before
+/// the next check, instead of one check per eight bits. Seven rather than eight
+/// leaves the accumulator room to hold a partial byte's leftover bits without
+/// the top of a `u64` falling off (`M-DOCUMENTED-MAGIC`).
+const FAST_FILL_BYTES: u32 = 7;
+
 struct BitReader<'a, 'b, R> {
     bytes: &'a mut Bytes<'b, R>,
     /// Bits pulled but not yet consumed, most significant first.
-    accumulator: u32,
+    accumulator: u64,
     /// How many of `accumulator`'s low bits are valid.
     bits: u32,
+    /// Whole trailing bytes of `accumulator` that a fast refill pulled.
+    ///
+    /// Those cost exactly one physical byte each, so they are the ones
+    /// [`BitReader::settle`] may give back. A byte the slow path pulled may
+    /// have been `FF 00` and cost two, and is never counted here.
+    clean: u32,
     halt: Halt,
 }
 
@@ -715,8 +798,49 @@ impl<'a, 'b, R: Read + Seek> BitReader<'a, 'b, R> {
             bytes,
             accumulator: cursor.accumulator,
             bits: cursor.bits,
+            // A cursor is only ever taken settled, so nothing it carries is a
+            // whole byte this reader may hand back.
+            clean: 0,
             halt: cursor.halt,
         }
+    }
+
+    /// Pulls [`FAST_FILL_BYTES`] at once when the next ones carry no `0xFF`.
+    ///
+    /// Only ever called with an empty accumulator, which is what keeps the
+    /// arithmetic in [`BitReader::settle`] exact: everything buffered is then
+    /// whole, clean bytes.
+    #[inline]
+    fn fast_fill(&mut self) -> bool {
+        debug_assert_eq!(self.bits, 0, "a fast refill assumes an empty accumulator");
+        let Some(packed) = self.bytes.take_clean(FAST_FILL_BYTES as usize) else {
+            return false;
+        };
+        self.accumulator = packed;
+        self.bits = FAST_FILL_BYTES * 8;
+        self.clean = FAST_FILL_BYTES;
+        true
+    }
+
+    /// Gives back every whole buffered byte, restoring the one-byte lookahead
+    /// the rest of the decoder is written against.
+    ///
+    /// The source position is what a caller reports as `end`, as `settled`, and
+    /// as the offset a splice was crossed at, so it has to mean the same thing
+    /// it meant when the reader never held more than a byte. Reading ahead is
+    /// therefore something that happens only *within* an MCU: at every boundary
+    /// where the position is observed, the lookahead is handed back first.
+    #[inline]
+    fn settle(&mut self) {
+        let whole = (self.bits / 8).min(self.clean);
+        if whole == 0 {
+            return;
+        }
+        let shift = whole * 8;
+        self.bytes.rewind(whole as usize);
+        self.accumulator >>= shift;
+        self.bits -= shift;
+        self.clean -= whole;
     }
 
     /// Pulls the next byte of entropy data, resolving `FF 00` stuffing and
@@ -749,20 +873,39 @@ impl<'a, 'b, R: Read + Seek> BitReader<'a, 'b, R> {
     }
 
     /// One bit, most significant first; `None` once the data ends.
+    #[inline]
     fn bit(&mut self) -> Result<Option<u32>, CarveError> {
-        if self.bits == 0 {
+        if self.bits == 0 && !self.fast_fill() {
             let Some(byte) = self.next_data_byte()? else {
                 return Ok(None);
             };
-            self.accumulator = u32::from(byte);
+            self.accumulator = u64::from(byte);
             self.bits = 8;
+            self.clean = 0;
         }
         self.bits -= 1;
-        Ok(Some((self.accumulator >> self.bits) & 1))
+        Ok(Some(((self.accumulator >> self.bits) & 1) as u32))
     }
 
     /// `count` bits as an unsigned value.
+    ///
+    /// Taken in one piece when they are already buffered, which reads nothing
+    /// and so cannot change where the data ends; otherwise bit by bit, which is
+    /// the path that refills and meets the markers.
+    #[inline]
     fn receive(&mut self, count: u32) -> Result<Option<u32>, CarveError> {
+        if count == 0 {
+            return Ok(Some(0));
+        }
+        if self.bits >= count {
+            self.bits -= count;
+            let mask = (1_u64 << count) - 1;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "count is at most the 16 bits a coefficient category can ask for"
+            )]
+            return Ok(Some(((self.accumulator >> self.bits) & mask) as u32));
+        }
         let mut value = 0_u32;
         for _ in 0..count {
             let Some(bit) = self.bit()? else {
@@ -774,7 +917,31 @@ impl<'a, 'b, R: Read + Seek> BitReader<'a, 'b, R> {
     }
 
     /// Decodes one Huffman-coded symbol. Source: T.81 §F.2.2.3.
+    ///
+    /// The lookup resolves a short code from bits already buffered, which is
+    /// most codes most of the time. It is entered only with [`LUT_BITS`] bits
+    /// in hand, so it reads nothing and cannot change where the data ends; a
+    /// prefix it does not resolve falls through to the walk below, which is
+    /// what decided every code before the table existed and still decides the
+    /// long ones.
+    #[inline]
     fn symbol(&mut self, table: &HuffTable) -> Result<Option<u8>, CarveError> {
+        if self.bits >= LUT_BITS {
+            // The mask bounds the value to LUT_SIZE, so the table indexes it.
+            let prefix = usize::try_from(
+                (self.accumulator >> (self.bits - LUT_BITS)) & (LUT_SIZE as u64 - 1),
+            )
+            .unwrap_or(0);
+            let entry = table.lut[prefix];
+            if entry != LUT_MISS {
+                self.bits -= u32::from(entry >> 8);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the low byte of the entry is the symbol"
+                )]
+                return Ok(Some(entry as u8));
+            }
+        }
         let mut code = 0_i32;
         for length in 1..=MAX_CODE_BITS {
             let Some(bit) = self.bit()? else {
@@ -799,7 +966,11 @@ impl<'a, 'b, R: Read + Seek> BitReader<'a, 'b, R> {
     /// Discards bits up to the next byte boundary, as a restart marker or the
     /// end of a scan requires. Source: T.81 §B.1.1.5.
     fn align(&mut self) {
+        // The lookahead goes back before the partial byte is discarded, or the
+        // bytes behind it would be discarded with it.
+        self.settle();
         self.bits = 0;
+        self.clean = 0;
     }
 
     /// The marker that stopped the scan, consuming it if it has not been met
@@ -903,6 +1074,7 @@ fn decode_scan<R: Read + Seek>(
         {
             reader.align();
             let Some(code) = reader.marker()? else {
+                reader.settle();
                 return Ok((
                     outcome(&reader, decoded, seam_mcus, snapshot, ScanStop::Broke),
                     snapshot,
@@ -913,6 +1085,7 @@ fn decode_scan<R: Read + Seek>(
             if !(MARKER_RST0..=MARKER_RST7).contains(&code)
                 || code - MARKER_RST0 != expected_restart
             {
+                reader.settle();
                 return Ok((
                     outcome(&reader, decoded, seam_mcus, snapshot, ScanStop::Broke),
                     snapshot,
@@ -924,12 +1097,14 @@ fn decode_scan<R: Read + Seek>(
         }
 
         if !decode_mcu(&mut reader, scan, tables, &mut predictors)? {
+            reader.settle();
             return Ok((
                 outcome(&reader, decoded, seam_mcus, snapshot, ScanStop::Broke),
                 snapshot,
             ));
         }
         decoded += 1;
+        reader.settle();
         snapshot = Some(Snapshot {
             cursor: Cursor {
                 predictors,
@@ -956,6 +1131,7 @@ fn decode_scan<R: Read + Seek>(
         // that needs one has already told us its height.
         _ => ScanStop::Broke,
     };
+    reader.settle();
     Ok((
         outcome(&reader, decoded, seam_mcus, snapshot, stop),
         snapshot,
@@ -1167,9 +1343,114 @@ fn segment_len<R: Read + Seek>(bytes: &mut Bytes<'_, R>) -> Result<Option<u16>, 
     if len < 2 { Ok(None) } else { Ok(Some(len - 2)) }
 }
 
+/// The offset is read only on the error path, and only `refill` can fail —
+/// which leaves the cursor untouched, so the position after a failure is the
+/// position before it. Taking it eagerly would cost a load and an add on every
+/// byte of every hypothesis for a value almost nothing ever reads.
+#[inline]
 fn next<R: Read + Seek>(bytes: &mut Bytes<'_, R>) -> Result<Option<u8>, CarveError> {
-    let at = bytes.pos();
-    bytes
-        .next()
-        .map_err(|source| CarveError::io(ByteOffset::new(at), source))
+    match bytes.next() {
+        Ok(byte) => Ok(byte),
+        Err(source) => Err(CarveError::io(ByteOffset::new(bytes.pos()), source)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HuffTable, LUT_BITS, LUT_MISS, LUT_SIZE, MAX_CODE_BITS};
+
+    /// What the canonical walk of T.81 §F.2.2.3 decides for a short prefix.
+    ///
+    /// A transcription of the loop in [`BitReader::symbol`], reading bits from
+    /// `prefix` instead of from a stream, so the two can be compared without
+    /// one of them being the other.
+    fn canonical(table: &HuffTable, prefix: u16) -> Option<(u8, u32)> {
+        let mut code = 0_i32;
+        for length in 1..=LUT_BITS as usize {
+            let bit = i32::from((prefix >> (LUT_BITS as usize - length)) & 1);
+            code = (code << 1) | bit;
+            if table.maxcode[length] >= code {
+                let offset = usize::try_from(code - table.mincode[length]).unwrap_or(usize::MAX);
+                let symbol = table
+                    .valptr
+                    .get(length)
+                    .and_then(|base| base.checked_add(offset))
+                    .filter(|at| *at < table.symbols)
+                    .and_then(|at| table.values.get(at))
+                    .copied()?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "length is bounded by LUT_BITS"
+                )]
+                return Some((symbol, length as u32));
+            }
+        }
+        None
+    }
+
+    /// Tables spanning the shapes a Huffman table can take: every code one
+    /// length, codes spread over many lengths, a single code, a full byte of
+    /// codes, and counts that describe more symbols than are supplied.
+    fn tables() -> Vec<HuffTable> {
+        let mut built = Vec::new();
+        let values: Vec<u8> = (0..=255_u8).collect();
+
+        for length in 1..=MAX_CODE_BITS {
+            let mut counts = [0_u8; MAX_CODE_BITS];
+            let available = 1_usize << length.min(8);
+            counts[length - 1] = u8::try_from(available.min(255)).unwrap_or(255);
+            if let Some(table) = HuffTable::build(&counts, &values) {
+                built.push(table);
+            }
+        }
+
+        // A spread: one code of every length, which is what an encoder that
+        // has seen a wide alphabet produces.
+        let spread = [1_u8; MAX_CODE_BITS];
+        if let Some(table) = HuffTable::build(&spread, &values) {
+            built.push(table);
+        }
+
+        // Counts that promise more symbols than the value list carries: the
+        // walk refuses those, and the table must refuse them the same way.
+        let mut greedy = [0_u8; MAX_CODE_BITS];
+        greedy[7] = 200;
+        if let Some(table) = HuffTable::build(&greedy, &values[..4]) {
+            built.push(table);
+        }
+
+        assert!(built.len() > 4, "the shapes must actually build");
+        built
+    }
+
+    /// The lookup is not a faster approximation of the walk; it is the walk's
+    /// answer, precomputed. Nothing else would let it stand in front of the
+    /// oracle that decides what counts as a recovered photograph.
+    ///
+    /// This is exhaustive rather than sampled: the domain is every prefix of
+    /// [`LUT_BITS`] bits, all `LUT_SIZE` of them, so checking each one checks
+    /// the whole of it.
+    #[test]
+    fn the_lookup_agrees_with_the_canonical_walk_on_every_prefix() {
+        for table in tables() {
+            for prefix in 0..LUT_SIZE {
+                let byte = u16::try_from(prefix).expect("LUT_SIZE fits a u16");
+                let entry = table.lut[prefix];
+                match canonical(&table, byte) {
+                    Some((symbol, length)) => assert_eq!(
+                        entry,
+                        (u16::try_from(length).expect("bounded by LUT_BITS") << 8)
+                            | u16::from(symbol),
+                        "prefix {byte:08b}: the walk decodes {symbol} in {length} bits and the \
+                         table does not agree"
+                    ),
+                    None => assert_eq!(
+                        entry, LUT_MISS,
+                        "prefix {byte:08b}: the walk resolves nothing here, so the table must \
+                         send it to the walk rather than answer for it"
+                    ),
+                }
+            }
+        }
+    }
 }

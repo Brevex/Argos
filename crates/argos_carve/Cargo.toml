@@ -28,5 +28,9 @@ criterion.workspace = true
 name = "carve"
 harness = false
 
+[[bench]]
+name = "replay"
+harness = false
+
 [lints]
 workspace = true
