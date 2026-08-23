@@ -1,10 +1,11 @@
 /**
  * The theme in force, and the one place it is applied.
  *
- * Applying a theme writes its tokens onto the document root and keeps its
- * module so components can read the artwork out of it. Nothing here is
- * remounted and no state is lost, which is why the picker can be used in the
- * middle of a running scan.
+ * Applying a theme writes its tokens onto the document root, names the idiom
+ * its controls are drawn in on the same element, and keeps its module so
+ * components can read the artwork out of it. Nothing here is remounted and no
+ * state is lost, which is why the picker can be used in the middle of a
+ * running scan.
  */
 
 import { load, save } from '../lib/preferences';
@@ -44,6 +45,11 @@ export async function apply(id: string): Promise<void> {
   for (const [token, value] of Object.entries(module.tokens)) {
     root.style.setProperty(token, value);
   }
+  // The shape of a control, where two idioms disagree about the kind of
+  // object rather than about its colour. One attribute per question, on the
+  // root, so the component that draws it selects rather than branches.
+  root.dataset.checkbox = module.controls.checkbox;
+  root.dataset.choice = module.controls.choice;
   root.style.colorScheme = module.scheme;
   active.module = module;
   // Stored where the person who opened Argos can find it, merged into whatever

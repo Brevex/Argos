@@ -24,6 +24,15 @@
   import { session } from '../../lib/session.svelte';
   import Ring from './Ring.svelte';
 
+  /**
+   * Whether the results of a finished run are on screen below this block.
+   *
+   * When they are, the arcs stand down: they are both at their end, the line
+   * above says in words how the run ended, and the room they take is the room
+   * the pictures need.
+   */
+  let { results = false }: { results?: boolean } = $props();
+
   const status = $derived.by(() => {
     switch (session.phase) {
       case 'connecting':
@@ -88,9 +97,25 @@
   });
 
   const remaining = $derived(session.remaining);
+
+  /**
+   * Which of the five things a run can be doing, for the arcs to take their
+   * colour from.
+   *
+   * One meaning, one colour, in every theme: what "under way" looks like is a
+   * theme's decision and what is under way is this one's. Named states rather
+   * than colours, so no component here ever picks a hue.
+   */
+  const state = $derived.by(() => {
+    if (session.phase === 'failed') return 'failed';
+    if (session.phase === 'cancelled') return 'cancelled';
+    if (session.phase === 'done') return 'done';
+    if (session.paused) return 'paused';
+    return 'running';
+  });
 </script>
 
-<section>
+<section class:compact={results}>
   <p
     class="status"
     class:live={session.phase === 'scanning'}
@@ -99,14 +124,16 @@
     {status}
   </p>
 
-  <div class="rings">
-    {#if session.job === 'acquire'}
-      <Ring label="Copy" fraction={session.scanned} />
-    {:else}
-      <Ring label="Scan" fraction={session.scanned} />
-      <Ring label="Recovery" fraction={session.recovered} />
-    {/if}
-  </div>
+  {#if !results}
+    <div class="rings" data-state={state}>
+      {#if session.job === 'acquire'}
+        <Ring label="Copy" fraction={session.scanned} />
+      {:else}
+        <Ring label="Scan" fraction={session.scanned} />
+        <Ring label="Recovery" fraction={session.recovered} />
+      {/if}
+    </div>
+  {/if}
 
   <dl class="stats">
     {#if session.job === 'acquire'}
@@ -150,19 +177,16 @@
     </div>
   </dl>
 
-  {#if session.warnings.length > 0 || session.problem}
-    <div class="messages">
-      {#if session.warnings.length > 0}
-        <ul class="warnings">
-          {#each session.warnings as warning, index (index)}
-            <li>{warning}</li>
-          {/each}
-        </ul>
-      {/if}
-
-      {#if session.problem}
-        <p class="problem">{session.problem}</p>
-      {/if}
+  <!--
+    Only what went wrong. What the engine *warns* about is a property of the
+    medium — a filesystem mounted for writing, a drive that trims — and it is
+    stamped on that drive's own row in the table above, where it can be read
+    before the drive is chosen rather than in a strip between the figures and
+    the button that nobody reads twice.
+  -->
+  {#if session.problem}
+    <div class="notes">
+      <p class="problem">{session.problem}</p>
     </div>
   {/if}
 </section>
@@ -174,7 +198,7 @@
     align-items: center;
     justify-content: center;
     /* Takes every pixel the fixed blocks left, which is what keeps them still
-       when a message appears: the room a warning or an error needs comes from
+       when a message appears: the room a note or an error needs comes from
        here, not from the drive table. */
     flex: 1 1 auto;
     min-height: 0;
@@ -185,19 +209,17 @@
     overflow: hidden;
   }
 
-  /* The one part of the screen that gives way. On a window too short to show a
-     long message whole, it scrolls; nothing else moves. */
-  .messages {
+  /* Once there are results below, this block stops claiming the slack: the
+     figures are final, and every pixel it is not using is a row of pictures
+     the person can actually see. */
+  .compact {
     flex: 0 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    width: 100%;
-    max-width: 56.25rem;
+    justify-content: flex-start;
   }
 
   .status {
     margin: 0 0 1rem;
-    font-size: 1.06rem;
+    font-size: var(--type-xl);
     color: var(--text-dim);
     text-shadow: var(--text-glow);
     text-align: center;
@@ -211,10 +233,34 @@
     color: var(--ok);
   }
 
+  /*
+   * The arcs take their colour from the run's state, and this is the only
+   * place that mapping exists.
+   */
   .rings {
     display: flex;
     gap: var(--ring-gap);
     margin-bottom: var(--block-gap);
+  }
+
+  .rings[data-state='running'] {
+    --ring: var(--progress-running);
+  }
+
+  .rings[data-state='paused'] {
+    --ring: var(--progress-paused);
+  }
+
+  .rings[data-state='done'] {
+    --ring: var(--progress-done);
+  }
+
+  .rings[data-state='cancelled'] {
+    --ring: var(--progress-cancelled);
+  }
+
+  .rings[data-state='failed'] {
+    --ring: var(--progress-failed);
   }
 
   .stats {
@@ -257,14 +303,14 @@
   }
 
   dt {
-    font-size: 0.84rem;
+    font-size: var(--type-md);
     color: var(--text-dim);
     text-align: center;
   }
 
   dd {
     margin: 0;
-    font-size: 1.56rem;
+    font-size: var(--type-2xl);
     text-shadow: var(--text-glow);
     font-weight: 300;
     letter-spacing: -0.01em;
@@ -272,33 +318,42 @@
     white-space: nowrap;
   }
 
-  .warnings {
-    list-style: none;
-    margin: 0.75rem 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
-  }
-
-  /* No coloured edge, on either kind of message. A stripe down the side of a
-     box is decoration standing in for what the sentence already says, and it
-     is the first thing that reads as an alarm on a screen a user is watching
-     for minutes at a time. */
-  .warnings li {
-    padding: 0.56rem 0.875rem;
-    border-radius: var(--radius);
-    background: var(--pane);
-    font-size: 0.78rem;
-    color: var(--text-dim);
+  /*
+   * What the engine said, set as prose.
+   *
+   * No box, no fill and no coloured edge on either kind of message. A stripe
+   * down the side of a panel is decoration standing in for what the sentence
+   * already says, and it is the first thing that reads as an alarm on a screen
+   * a user watches for minutes at a time. What earns the emphasis is the
+   * error, and it gets it from its colour and from being last.
+   *
+   * The one part of the screen that gives way: on a window too short for a
+   * long message it scrolls, and nothing else moves.
+   */
+  .notes {
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    width: 100%;
+    /* The strip's own width rather than a prose measure: at the shortest
+       window this application opens at, the room under the statistics is one
+       line, and a sentence set to sixty-five characters would take three of
+       them and show one. Wide and small is what fits without moving anything
+       above it. */
+    max-width: 56.25rem;
+    margin-top: 0.5rem;
+    text-align: center;
   }
 
   .problem {
-    margin: 1rem 0 0;
-    padding: 0.56rem 0.875rem;
-    border-radius: var(--radius);
-    background: var(--pane);
-    font-size: 0.78rem;
+    margin: 0.25rem 0 0;
+    font-size: var(--type-2xs);
+    line-height: 1.45;
+    color: var(--text-dim);
+    text-shadow: var(--text-glow);
+  }
+
+  .problem {
     color: var(--danger);
   }
 </style>

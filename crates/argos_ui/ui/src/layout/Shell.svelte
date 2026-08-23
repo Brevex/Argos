@@ -52,6 +52,16 @@
   /** The same, for the run in progress: promoted once the engine says done. */
   let pending: { session: string; previewDir: string } | null = null;
 
+  /**
+   * Whether there are results to show.
+   *
+   * A run that recovered nothing — stopped early, or pointed at a surface with
+   * nothing left on it — has an empty gallery to offer, and an empty gallery is
+   * four filters and two buttons saying nothing. The figures and the line above
+   * them already say what happened.
+   */
+  const showing = $derived(finished !== null && session.artifacts > 0);
+
   const target = $derived(job === 'acquire' ? imagePath : destination);
   const ready = $derived(source !== '' && target !== '' && !busy);
 
@@ -306,9 +316,9 @@
       />
     </div>
 
-    <Activity />
+    <Activity results={showing} />
 
-    {#if finished !== null}
+    {#if showing && finished !== null}
       <Gallery
         session={finished.session}
         previewDir={finished.previewDir}
@@ -346,8 +356,15 @@
 {/if}
 
 <style>
-  /* The frame. The system draws no decorations, so the edge, the corner and
-     the shadow around this application are this rule and nothing else. */
+  /*
+   * The frame. The system draws no decorations, so the edge, the corner and
+   * the shadow around this application are these rules and nothing else.
+   *
+   * Two lines, not one: the border is the dark edge against the desktop and
+   * the overlay below it is the bright line just inside — which is how a
+   * window of one generation is drawn and, at a hairline width, exactly how a
+   * window of another is.
+   */
   /*
    * The layout's own scale.
    *
@@ -373,14 +390,26 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--backdrop);
-    background-image: var(--backdrop-glow);
-    border: 1px solid var(--window-border);
+    background-color: var(--backdrop);
+    background-image: var(--backdrop-noise), var(--backdrop-glow);
+    border: 1px solid var(--window-edge);
     border-radius: var(--window-radius);
     box-shadow: var(--window-shadow);
     /* The corner has to cut what is inside it, or a pane's own corner would
        show through the frame's. */
     overflow: hidden;
+  }
+
+  /* The bright line inside the dark one. Its own element because a theme with
+     no shadow cannot have one appended to `none`. */
+  .window::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px var(--window-border);
   }
 
   /* The client area, inside the frame band. On a theme whose frame is a
@@ -432,6 +461,7 @@
   }
 
   .job button {
+    position: relative;
     display: flex;
     flex: 1;
     min-width: 0;
@@ -443,32 +473,59 @@
     color: var(--text);
     background: var(--inset);
     border: 1px solid var(--inset-border);
-    border-radius: var(--radius);
+    border-radius: var(--input-radius);
+    box-shadow: var(--inset-shadow);
     cursor: pointer;
+  }
+
+  /* The band of light across the top of anything that can be pressed — on the
+     card that is chosen, and on that one only. On the other the fill is flat:
+     the same token the drive table's own ground is drawn with, so the two can
+     never drift apart, and what separates chosen from not is colour and edge
+     rather than texture. */
+  .job button::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: none;
+  }
+
+  .job button.on::after {
+    background: var(--specular);
   }
 
   .job button:hover:not(:disabled) {
     background: var(--row-hover);
+    border-color: var(--inset-border-hover);
+  }
+
+  .job button:active:not(:disabled) {
+    background: var(--button-active);
+    box-shadow: var(--button-shadow-active);
   }
 
   .job button.on {
     background: var(--row-selected);
     border-color: var(--row-selected-border);
+    box-shadow: var(--row-selected-shadow);
   }
 
   .job button:disabled {
     cursor: default;
-    opacity: 0.6;
+    color: var(--disabled-text);
+    opacity: var(--disabled-opacity);
   }
 
   .job .what {
-    font-size: 0.82rem;
+    font-size: var(--type-sm);
   }
 
   /* Two lines' worth whether the typeface takes one or two: a theme changes
      the face, never where a control sits (`themes/contract.ts`). */
   .job .why {
-    font-size: 0.7rem;
+    font-size: var(--type-2xs);
     line-height: 1.35;
     min-height: 2.7em;
     color: var(--text-dim);
@@ -482,40 +539,85 @@
     gap: 0.6rem;
   }
 
-  /* Subordinate to the main button, and narrower: suspending a run is a
-     smaller decision than starting or abandoning one, and the layout says so
-     rather than leaving two equal buttons to be told apart by their words. */
-  .secondary {
-    width: 9.4rem;
-    color: var(--text);
-    background: transparent;
-    border-color: var(--pane-border);
-    box-shadow: none;
-  }
-
+  /*
+   * Two of the three kinds of button this interface has, side by side.
+   *
+   * The one that runs the job wears the theme's action fill; suspending a run
+   * is a smaller decision than starting or abandoning one, so it wears the
+   * ordinary one — and the layout says so with the fill and the width rather
+   * than leaving two identical buttons to be told apart by their words.
+   */
   .action {
+    position: relative;
     flex: none;
     width: 16.9rem;
     padding: 0.94rem 0;
     font-family: var(--font);
-    font-size: 0.97rem;
+    font-size: var(--type-lg);
     color: var(--action-text);
     background: var(--action);
     text-shadow: var(--text-glow);
     border: 1px solid var(--action-border);
-    border-radius: var(--radius);
+    border-radius: var(--button-radius);
     box-shadow: var(--action-shadow);
     cursor: pointer;
   }
 
-  .action:hover:not(:disabled) {
-    filter: brightness(1.08);
+  .action::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: var(--specular);
   }
 
+  .action:hover:not(:disabled) {
+    background: var(--action-hover);
+    color: var(--action-text-hover);
+  }
+
+  .action:active:not(:disabled) {
+    background: var(--action-active);
+    color: var(--action-text-hover);
+    box-shadow: var(--action-shadow-active);
+  }
+
+  /* A button that cannot be pressed gives up the accent fill entirely and
+     wears the ordinary surface instead. Keeping the fill and dimming the ink
+     is what made the label vanish: pale grey text at half opacity over a
+     saturated blue reads at a contrast of one to one, and the button still
+     looks like the thing you are meant to press. */
   .action:disabled {
-    opacity: 0.45;
+    color: var(--disabled-text);
+    background: var(--button);
+    border-color: var(--button-border);
     cursor: not-allowed;
     box-shadow: none;
   }
 
+  /* The gloss goes with the fill. */
+  .action:disabled::after {
+    background: none;
+  }
+
+  .secondary {
+    width: 9.4rem;
+    color: var(--button-text);
+    background: var(--button);
+    border-color: var(--button-border);
+    box-shadow: var(--button-shadow);
+  }
+
+  .secondary:hover:not(:disabled) {
+    background: var(--button-hover);
+    border-color: var(--button-border-hover);
+    color: var(--button-text-hover);
+  }
+
+  .secondary:active:not(:disabled) {
+    background: var(--button-active);
+    box-shadow: var(--button-shadow-active);
+    color: var(--button-text-hover);
+  }
 </style>

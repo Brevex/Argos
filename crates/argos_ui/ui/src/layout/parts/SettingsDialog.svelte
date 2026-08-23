@@ -28,6 +28,7 @@
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { loadTheme, themeIds } from '../../themes';
   import type { ThemeModule } from '../../themes/contract';
+  import NumberField from './NumberField.svelte';
 
   /**
    * Names the photograph whose tables are lent.
@@ -95,13 +96,6 @@
 
   /** A run is under way, so these apply to the next one rather than to it. */
   const locked = $derived(session.running);
-
-  /** Reads a number field, treating an empty box as "take the default". */
-  function entered(value: string): number | null {
-    if (value.trim() === '') return null;
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
 </script>
 
 <svelte:window onkeydown={(event) => event.key === 'Escape' && onClose()} />
@@ -180,16 +174,12 @@
                   <div class="nested">
                     <label class="inline">
                       <span class="name">Give up after</span>
-                      <input
-                        class="number"
-                        type="number"
-                        min="0"
-                        step="1"
+                      <NumberField
+                        value={settings.reassemblyBudget}
                         placeholder="120"
                         disabled={locked}
-                        value={settings.reassemblyBudget ?? ''}
-                        onchange={(event) =>
-                          settings.setNumber('reassemblyBudget', entered(event.currentTarget.value))}
+                        label="Give up reassembling after, in minutes"
+                        onChange={(value) => settings.setNumber('reassemblyBudget', value)}
                       />
                       <span class="unit">minutes</span>
                     </label>
@@ -223,16 +213,13 @@
               <div class="field">
                 <span class="name">Fragments with no header</span>
                 <p class="about">
-                  A fragment of a photograph whose beginning is gone decodes against nothing: the
-                  tables a picture is coded with live in the part that was lost. Name a photograph
-                  this disk already gave back — same camera, same batch — and its tables are lent to
-                  fragments that have none.
+                  A fragment whose beginning is gone cannot be decoded on its own. Name a
+                  photograph from the same camera and its tables are lent to those fragments.
                 </p>
                 <p class="about">
-                  What comes out is <em>pixels, not files</em>: the size is the named photograph's,
-                  each piece's place inside it is unknown, and those bytes in that order were never
-                  on the disk. They land in a <code>grafted</code> folder of their own, apart from
-                  what was recovered, and never in the manifest.
+                  What comes out is <em>pixels, not files</em> — it lands in a
+                  <code>grafted</code> folder, apart from what was recovered, and never in the
+                  manifest.
                 </p>
                 <div class="picker">
                   <button class="choose" disabled={locked} onclick={chooseReference}>
@@ -284,16 +271,12 @@
               <div class="field">
                 <label class="inline">
                   <span class="name">Keep pictures at least</span>
-                  <input
-                    class="number"
-                    type="number"
-                    min="0"
-                    step="1"
+                  <NumberField
+                    value={settings.minLongSide}
                     placeholder="300"
                     disabled={locked}
-                    value={settings.minLongSide ?? ''}
-                    onchange={(event) =>
-                      settings.setNumber('minLongSide', entered(event.currentTarget.value))}
+                    label="Keep pictures at least, in pixels on the long side"
+                    onChange={(value) => settings.setNumber('minLongSide', value)}
                   />
                   <span class="unit">px on the long side</span>
                 </label>
@@ -309,16 +292,13 @@
               <div class="field">
                 <label class="inline">
                   <span class="name">Use</span>
-                  <input
-                    class="number"
-                    type="number"
-                    min="1"
-                    step="1"
+                  <NumberField
+                    value={settings.jobs}
                     placeholder="auto"
+                    min={1}
                     disabled={locked}
-                    value={settings.jobs ?? ''}
-                    onchange={(event) =>
-                      settings.setNumber('jobs', entered(event.currentTarget.value))}
+                    label="Worker threads to use"
+                    onChange={(value) => settings.setNumber('jobs', value)}
                   />
                   <span class="unit">worker threads</span>
                 </label>
@@ -347,7 +327,7 @@
                   <span class="name">{choice.name}</span>
                   {#if choice.id === active}
                     <svg class="tick" viewBox="0 0 14 14" aria-hidden="true">
-                      <path d="M2.5 7.4l3 3 6-6.4" />
+                      {@html inForce.icon('tick')}
                     </svg>
                   {/if}
                 </button>
@@ -374,36 +354,68 @@
 
   /* Sized against the window rather than in fixed measures: the window can be
      small, and a panel that outgrew it would be a panel with no way out. */
+  /*
+   * A window, built the way the main one is: the frame is the whole element,
+   * the title sits on it, and the panel is inset into it by the width of the
+   * band. A theme whose windows have no band gives the inset no width, and the
+   * panel then covers everything but the title — which is the same panel it
+   * was before.
+   *
+   * Sized against the window rather than in fixed measures: the window can be
+   * small, and a panel that outgrew it would be a panel with no way out.
+   */
   .dialog {
+    position: relative;
     display: flex;
     flex-direction: column;
     width: min(44rem, calc(100vw - 3rem));
     max-height: calc(100vh - 3rem);
-    background: var(--pane);
-    backdrop-filter: var(--pane-blur);
-    -webkit-backdrop-filter: var(--pane-blur);
-    border: 1px solid var(--window-border);
+    background: var(--dialog-strip);
+    backdrop-filter: var(--dialog-blur);
+    -webkit-backdrop-filter: var(--dialog-blur);
+    border: 1px solid var(--window-edge);
     border-radius: var(--window-radius);
     box-shadow: var(--window-shadow);
     padding: 0;
     overflow: hidden;
   }
 
-  /* The title strip, on the terms the main window's is on. */
+  /* The same bright line inside the dark edge that the main window has. */
+  .dialog::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px var(--window-border);
+  }
+
+  /*
+   * The title strip, and the one piece of glass in this application that is
+   * real.
+   *
+   * The window's own frame lies over the desktop, which no filter in a web
+   * view can reach; this lies over the window, which *is* the page — so the
+   * blur behind it blurs something, and on a theme whose windows are framed in
+   * glass this is that glass, measured on the same profile as the frame. On a
+   * theme whose window is one unbroken surface it is the panel's own fill and
+   * the panel's own filter, and there is no strip to see.
+   */
   header {
     display: flex;
     align-items: center;
     flex: none;
-    padding: 0.42rem 0.42rem 0.42rem 1.25rem;
-    border-bottom: 1px solid var(--titlebar-border);
-    background: var(--titlebar);
+    height: var(--dialog-strip-height);
+    padding: 0 var(--winbtn-offset-right) 0 1.25rem;
   }
 
   h2 {
     margin: 0;
-    font-size: 0.9rem;
-    font-weight: 500;
+    font-size: var(--type-md);
+    font-weight: 600;
     color: var(--titlebar-text);
+    text-shadow: var(--titlebar-text-shadow, var(--text-glow));
   }
 
   /* The same strip the window buttons sit in, holding the one button a panel
@@ -411,30 +423,41 @@
   .group {
     display: flex;
     align-items: stretch;
+    gap: var(--winbtn-gap);
     margin-left: auto;
+    /* The group hangs from the band's top edge on a theme whose windows do,
+       and sits on the title's own line on one whose windows do not. */
+    align-self: var(--winbtn-align);
+    margin-top: var(--winbtn-offset-top);
     background: var(--winbtn-group);
     border: 1px solid var(--winbtn-group-border);
+    border-top: 0;
     border-radius: var(--winbtn-group-radius);
+    box-shadow: var(--winbtn-group-shadow);
     overflow: hidden;
   }
 
   .window {
     display: grid;
     place-items: center;
-    width: 3.4rem;
-    height: 1.7rem;
+    width: var(--winbtn-close-width);
+    height: var(--winbtn-height);
     padding: 0;
-    background: none;
-    border: 0;
-    color: var(--winbtn-text);
+    background: var(--winbtn-close);
+    border: 1px solid;
+    border-color: var(--winbtn-border);
+    border-radius: var(--winbtn-radius);
+    color: var(--winbtn-close-text);
     cursor: pointer;
   }
 
+  /* The glyph is the theme's drawing, and it says for itself whether it is a
+     line or a filled shape with an outline — the caption glyphs of a bevelled
+     desktop are the second, and forcing `fill: none` here made them the
+     first. All this decides is how big it is and what colour it inherits. */
   .window svg {
-    width: 0.86rem;
-    height: 0.86rem;
-    fill: none;
-    stroke: currentColor;
+    width: var(--winbtn-glyph);
+    height: var(--winbtn-glyph);
     stroke-width: var(--winbtn-stroke);
   }
 
@@ -443,13 +466,30 @@
     color: var(--winbtn-close-hover-text);
   }
 
+  .window.close:active {
+    background: var(--winbtn-close-active);
+    color: var(--winbtn-close-hover-text);
+  }
+
+  .window:focus-visible {
+    outline: var(--focus-outline);
+    outline-offset: -2px;
+  }
+
+  /* The panel, inside the frame — the dialog's client area, edged the way the
+     main window's client area is edged. */
   .body {
     display: flex;
     flex: 1;
     min-height: 0;
     gap: 1.4rem;
     align-items: stretch;
+    margin: 0 var(--dialog-inset) var(--dialog-inset);
     padding: 1.1rem 1.25rem 1.25rem;
+    background: var(--pane);
+    border: 1px solid var(--main-border);
+    border-radius: var(--main-radius);
+    box-shadow: var(--main-shadow);
   }
 
   /* The rail names three places and should do nothing else. A hairline carries
@@ -468,11 +508,11 @@
     padding: 0.46rem 0.55rem;
     text-align: left;
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--type-sm);
     color: var(--text-dim);
     background: none;
     border: 1px solid transparent;
-    border-radius: var(--radius);
+    border-radius: var(--row-radius);
     cursor: pointer;
   }
 
@@ -481,10 +521,22 @@
     color: var(--text);
   }
 
+  nav button:active {
+    background: var(--row-selected);
+  }
+
+  /* The section being shown is the selected row of a list, drawn the way the
+     drive table draws one — not an outline that has to be looked for. */
   nav button.current {
     color: var(--text);
     background: var(--row-selected);
     border-color: var(--row-selected-border);
+    box-shadow: var(--row-selected-shadow);
+  }
+
+  nav button:focus-visible {
+    outline: var(--focus-outline);
+    outline-offset: -3px;
   }
 
   .panel {
@@ -501,35 +553,51 @@
     margin-bottom: 0.9rem;
   }
 
+  /*
+   * Three levels of voice, and they never trade places: what a control is
+   * called, what it does, and what a reader has to be told about the state it
+   * is in. The name is the body size in the text colour; the description is a
+   * step down and dimmed; a note is smaller again.
+   */
   .lead p {
     margin: 0;
-    font-size: 0.76rem;
-    line-height: 1.45;
+    max-width: var(--measure);
+    font-size: var(--type-xs);
+    line-height: 1.5;
     color: var(--text-dim);
   }
 
+  /* A word rather than an object: the third kind of button this interface
+     has, and the only place one appears. */
   .reset {
     margin-left: auto;
     flex: none;
     padding: 0;
     border: 0;
     background: none;
-    color: var(--accent-strong);
+    color: var(--link);
     font: inherit;
-    font-size: 0.74rem;
+    font-size: var(--type-xs);
     white-space: nowrap;
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
     cursor: pointer;
   }
 
+  .reset:hover:not(:disabled) {
+    color: var(--link-hover);
+  }
+
   .reset:disabled {
-    color: var(--text-faint);
+    color: var(--disabled-text);
+    text-decoration: none;
     cursor: default;
   }
 
   .note {
     margin: 0 0 0.7rem;
-    font-size: 0.74rem;
-    color: var(--text-dim);
+    font-size: var(--type-2xs);
+    color: var(--text-faint);
   }
 
   ul {
@@ -556,7 +624,7 @@
 
   li > label {
     cursor: pointer;
-    border-radius: var(--radius);
+    border-radius: var(--row-radius);
   }
 
   li > label:hover {
@@ -571,18 +639,19 @@
   /* A stage that will not run is dimmed rather than removed: what a scan is
      not going to do is as much a part of the account as what it will. */
   li > label.off .text {
-    opacity: 0.5;
+    opacity: 0.55;
   }
 
-  /* A switch rather than a tick box.
-     Still a real checkbox — focusable, keyboard-operable, announced as one —
-     with `appearance: none` turning the control itself into the track and its
-     `::after` into the thumb. One element, so nothing can drift out of step
-     with what the input actually holds.
-
-     Every colour and both corners come from the theme: a pill is right for one
-     generation of interface and wrong for another, and a terminal's toggle is
-     square. The measurements are the layout's and are the same everywhere. */
+  /*
+   * On or off, in whichever of the three shapes the theme draws it.
+   *
+   * The control is a real checkbox in every one of them — focusable, operated
+   * by the keyboard, announced as a checkbox — with `appearance: none` handing
+   * the drawing to the theme. It keeps the same footprint whichever shape it
+   * takes, so the words beside it do not move when the theme changes; a tick
+   * box narrower than a switch is drawn centred in the switch's width, which
+   * also leaves it a target far bigger than the box.
+   */
   input[type='checkbox'] {
     appearance: none;
     -webkit-appearance: none;
@@ -591,16 +660,32 @@
     margin: 0.08rem 0 0;
     width: 2.2rem;
     height: 1.2rem;
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+
+  input[type='checkbox']:disabled {
+    cursor: default;
+    opacity: var(--disabled-opacity);
+  }
+
+  input[type='checkbox']:focus-visible {
+    outline: var(--focus-outline);
+    outline-offset: 2px;
+  }
+
+  /* --- a switch: a track with a thumb that slides across it -------------- */
+  :global(html[data-checkbox='switch']) input[type='checkbox'] {
     border-radius: var(--switch-radius);
     background: var(--switch-track);
     border: 1px solid var(--switch-border);
-    cursor: pointer;
     transition:
       background 130ms ease,
       border-color 130ms ease;
   }
 
-  input[type='checkbox']::after {
+  :global(html[data-checkbox='switch']) input[type='checkbox']::after {
     content: '';
     position: absolute;
     top: 50%;
@@ -613,23 +698,78 @@
     transition: left 130ms ease;
   }
 
-  input[type='checkbox']:checked {
+  :global(html[data-checkbox='switch']) input[type='checkbox']:checked {
     background: var(--switch-track-on);
     border-color: var(--switch-border-on);
   }
 
-  input[type='checkbox']:checked::after {
+  :global(html[data-checkbox='switch']) input[type='checkbox']:checked::after {
     left: calc(100% - 0.99rem);
   }
 
-  input[type='checkbox']:disabled {
-    cursor: default;
-    opacity: 0.5;
+  /* --- a tick box: a sunken well with a mark cut into it ----------------- */
+  :global(html[data-checkbox='checkbox']) input[type='checkbox']::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 1.05rem;
+    height: 1.05rem;
+    background: var(--check-box);
+    border: 1px solid var(--check-border);
+    border-radius: var(--check-radius);
+    box-shadow: var(--check-shadow);
   }
 
-  input[type='checkbox']:focus-visible {
-    outline: 2px solid var(--accent-strong);
-    outline-offset: 2px;
+  :global(html[data-checkbox='checkbox']) input[type='checkbox']:checked::before {
+    background: var(--check-box-checked);
+    border-color: var(--check-border-checked);
+  }
+
+  :global(html[data-checkbox='checkbox']) input[type='checkbox']:checked::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0.62rem;
+    height: 0.34rem;
+    transform: translate(-50%, -70%) rotate(-45deg);
+    border-left: 0.16rem solid var(--check-mark);
+    border-bottom: 0.16rem solid var(--check-mark);
+  }
+
+  :global(html[data-checkbox='checkbox']) input[type='checkbox']:hover::before {
+    border-color: var(--check-border-hover);
+    box-shadow: var(--check-shadow-hover);
+  }
+
+  /* --- brackets: a cell that is lit or unlit ----------------------------- */
+  :global(html[data-checkbox='bracket']) input[type='checkbox']::before {
+    content: '[ ]';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    /* An absolutely positioned box offset from the left shrinks to the room
+       left of it, which is narrower than three characters: without this the
+       brackets stack one above the other. */
+    width: max-content;
+    white-space: pre;
+    font-family: var(--font);
+    font-size: var(--type-md);
+    line-height: 1;
+    color: var(--check-border);
+  }
+
+  :global(html[data-checkbox='bracket']) input[type='checkbox']:checked::before {
+    content: '[X]';
+    color: var(--check-mark);
+    text-shadow: var(--text-glow);
+  }
+
+  :global(html[data-checkbox='bracket']) input[type='checkbox']:hover::before {
+    color: var(--check-border-checked);
   }
 
   .text {
@@ -640,13 +780,14 @@
   }
 
   .name {
-    font-size: 0.85rem;
+    font-size: var(--type-md);
   }
 
   .about {
     margin: 0;
-    font-size: 0.75rem;
-    line-height: 1.45;
+    max-width: var(--measure);
+    font-size: var(--type-xs);
+    line-height: 1.5;
     color: var(--text-dim);
   }
 
@@ -658,7 +799,7 @@
 
   .inline {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 0.45rem;
     padding: 0;
     background: none;
@@ -666,23 +807,86 @@
   }
 
   .unit {
-    font-size: 0.75rem;
+    font-size: var(--type-xs);
     color: var(--text-faint);
-  }
-
-  .number {
-    width: 4.6rem;
-    padding: 0.24rem 0.45rem;
-    background: var(--inset);
-    border: 1px solid var(--inset-border);
-    border-radius: var(--radius);
-    color: var(--text);
-    font: inherit;
-    font-size: 0.8rem;
   }
 
   .nested .about {
     margin-top: 0.35rem;
+  }
+
+  /* The picker for the photograph whose tables are lent, and what it produced.
+     Two ordinary buttons and a line of state under them — not a control that
+     leaves a person guessing what it did. */
+  .picker {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+  }
+
+  .choose,
+  .clear {
+    position: relative;
+    padding: 0.3rem 0.85rem;
+    font: inherit;
+    font-size: var(--type-xs);
+    color: var(--button-text);
+    background: var(--button);
+    border: 1px solid var(--button-border);
+    border-radius: var(--button-radius);
+    box-shadow: var(--button-shadow);
+    cursor: pointer;
+  }
+
+  .choose::after,
+  .clear::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: var(--specular);
+  }
+
+  .choose:hover:not(:disabled),
+  .clear:hover:not(:disabled) {
+    background: var(--button-hover);
+    border-color: var(--button-border-hover);
+    color: var(--button-text-hover);
+  }
+
+  .choose:active:not(:disabled),
+  .clear:active:not(:disabled) {
+    background: var(--button-active);
+    box-shadow: var(--button-shadow-active);
+    color: var(--button-text-hover);
+  }
+
+  .choose:disabled,
+  .clear:disabled {
+    color: var(--disabled-text);
+    opacity: var(--disabled-opacity);
+    cursor: default;
+  }
+
+  /* What the picker chose, or that it chose nothing: state, in the quietest
+     voice the panel has, and never mistakable for a description. */
+  .chosen {
+    margin: 0.45rem 0 0;
+    font-size: var(--type-2xs);
+    line-height: 1.45;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+  }
+
+  .chosen.off {
+    color: var(--text-faint);
+    direction: ltr;
   }
 
   .themes li {
@@ -698,8 +902,8 @@
     padding: 0.66rem 0.75rem;
     text-align: left;
     background: var(--inset);
-    border: 1px solid transparent;
-    border-radius: var(--radius);
+    border: 1px solid var(--inset-border);
+    border-radius: var(--row-radius);
     color: var(--text);
     font: inherit;
     cursor: pointer;
@@ -707,11 +911,23 @@
 
   .themes li button.theme:hover {
     background: var(--row-hover);
+    border-color: var(--inset-border-hover);
+  }
+
+  .themes li button.theme:active {
+    background: var(--button-active);
+    box-shadow: var(--button-shadow-active);
   }
 
   .themes li button.theme.current {
     background: var(--row-selected);
     border-color: var(--row-selected-border);
+    box-shadow: var(--row-selected-shadow);
+  }
+
+  .themes li button.theme:focus-visible {
+    outline: var(--focus-outline);
+    outline-offset: -3px;
   }
 
   .swatch {
@@ -720,6 +936,7 @@
     flex: none;
     border-radius: 50%;
     border: 1px solid var(--pane-border);
+    box-shadow: var(--bevel-raised);
   }
 
   .tick {
@@ -727,10 +944,6 @@
     width: 0.94rem;
     height: 0.94rem;
     flex: none;
-    fill: none;
-    stroke: var(--accent-strong);
-    stroke-width: 1.6;
-    stroke-linecap: round;
-    stroke-linejoin: round;
+    color: var(--accent-strong);
   }
 </style>

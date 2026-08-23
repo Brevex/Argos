@@ -1,187 +1,374 @@
 import { theme } from '../contract';
 
 /**
- * Aero: Frutiger Aero — glass, water-light and sky.
+ * Aero: the glass desktop of Windows 7.
  *
- * The look is optimistic and wet: everything is a surface with light coming
- * through it rather than a shape with a colour. A translucent frame surrounds
- * the window on all four sides and the title bar is part of that frame rather
- * than a band laid across the top of the content — there is no rule between
- * them, and the same glass runs from the title down the left edge, under the
- * client area and up the right. The specular highlight sits at the top of the
- * glass, where the light source is, and fades before the middle.
+ * This is a port, not a reconstruction. Every fill, edge, shadow and glyph
+ * below comes from **7-Aero-Stylesheet** by Z2r-YT (MIT; the licence travels
+ * with it, in `LICENSE-7-Aero-Stylesheet.txt`), which reproduces that desktop
+ * in plain CSS. Its window is built the way this one is — a frame, a title bar
+ * with a control group hanging off its right, and an opaque body inside — so
+ * the mapping is one rule to one token and nothing had to be invented to make
+ * it fit.
  *
- * Inside it is one near-white sheet with a thin cornflower rule, and the
- * controls sit on it as separate objects: the drive table and the destination
- * field share no panel, because they are two questions rather than one.
+ * Two things the source does that a token cannot carry, and how they are
+ * handled here:
  *
- * Blue is the colour of choice — the selected drive, the button. Green is the
- * colour of work under way, and the highlight sweeping the filled arc is the
- * one animation here, because that sweep is what a progress bar of this
- * moment did.
+ * - Its gradients run `0deg`, which in CSS is bottom to top. Every one of them
+ *   is written here as `180deg` with the stops reversed, so the numbers read in
+ *   the order the eye meets them.
+ * - Its `.window` blurs what is behind it. There, that is the page's own
+ *   wallpaper and the blur works. Here the window is a transparent Tauri
+ *   window over a desktop no filter inside a web view can reach, so the tint
+ *   is carried at the source's own alpha and the blur is left declared and
+ *   inert — never faked with a picture of the desktop.
+ *
+ * What is not from the source is marked where it appears: this application has
+ * a primary button, a progress arc and a scrollbar that the source has no
+ * equivalent for, and those are built from its own palette.
  */
 export default theme({
   id: 'aero',
   name: 'Aero',
   scheme: 'light',
+  // A tick box and a bevelled radio: the source draws both, and a sliding
+  // switch is a decade too late for this window.
+  controls: { checkbox: 'checkbox', choice: 'radio' },
   tokens: {
-    // The frame band. Glass: a tinted, translucent surface with the light
-    // source above it, so the specular is strongest at the very top and gone
-    // by the middle. Darker and bluer than the sheet it surrounds, because a
-    // frame reads as glass only when what is behind it is dimmer than what is
-    // on it.
-    '--backdrop': 'rgba(171, 204, 232, 0.68)',
+    // ---------------------------------------------------------------- frame
+    // `.window`: a translucent blue wash, a white band low on the glass, a
+    // black outline and a white line just inside it.
+    '--backdrop': 'rgba(70, 162, 255, 0.37)',
     '--backdrop-glow':
-      // The specular on the very top edge, where the light is. Bright, and
-      // over before the title has finished.
-      'linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(255, 255, 255, 0.54) 5%, ' +
-      'rgba(255, 255, 255, 0.18) 16%, rgba(255, 255, 255, 0.04) 38%, ' +
-      'rgba(255, 255, 255, 0) 60%), ' +
-      // The gleam: light lying across the upper left of the pane, the way it
-      // lies on a sheet of glass rather than on a painted surface.
-      'radial-gradient(115% 70% at 20% -14%, rgba(255, 255, 255, 0.6), transparent 56%), ' +
-      // Light wrapping the bottom edge as it passes through.
-      'linear-gradient(0deg, rgba(255, 255, 255, 0.32) 0%, transparent 24%), ' +
-      // The body of the glass, cooler where it is thickest.
-      'linear-gradient(180deg, rgba(219, 237, 251, 0.5) 0%, rgba(160, 200, 232, 0.56) 100%)',
+      'linear-gradient(180deg, rgba(231, 240, 255, 0) 10%, #ffffff 35%, ' +
+      '#ffffff 35%, rgba(253, 254, 255, 0) 36%, rgba(231, 240, 255, 0) 100%)',
+    // The source has no grain. Neither does this.
+    '--backdrop-noise': 'none',
 
-    // A white inner edge, a blue-grey outer line to define it against the
-    // desktop, and a wide soft shadow underneath.
-    '--window-border': 'rgba(255, 255, 255, 0.86)',
-    '--window-radius': '0.62rem',
-    '--window-shadow':
-      '0 0 0 1px rgba(70, 121, 165, 0.55), 0 0.55rem 0.4rem -0.3rem rgba(28, 66, 100, 0.22), ' +
-      '0 1.5rem 2.4rem -0.7rem rgba(30, 69, 103, 0.5)',
-    '--window-inset': '0.44rem',
+    // `outline: solid 1px #000000` and `inset 0 0 0 1px #fcfcfc`.
+    '--window-edge': '#000000',
+    '--window-border': '#fcfcfc',
+    '--window-radius': '0.33rem',
+    '--window-shadow': '0 3px 10px #000000',
+    // `padding: 5px` with `padding-top: 0` — the title bar meets the top edge
+    // and the body sits inside a five-pixel band on the other three sides.
+    '--window-inset': '0.33rem',
 
-    // The client sheet: near-white, faintly blue, lit from the middle.
-    '--main-surface':
-      'radial-gradient(80% 62% at 50% 40%, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0) 72%), ' +
-      'linear-gradient(180deg, #fdfeff 0%, #f2f8fe 46%, #e7f2fd 100%)',
-    '--main-border': '#93bfe2',
-    '--main-shadow':
-      '0 0 0 1px rgba(255, 255, 255, 0.9), 0 1px 0 rgba(255, 255, 255, 0.95) inset',
-    '--main-radius': '0.42rem',
+    // `.window-body`: flat, opaque, cut into the frame.
+    '--main-surface': '#f0eff2',
+    // The source writes `outline: inset 1px`, which is a border style rather
+    // than a colour; this is the grey that style resolves to on that surface.
+    '--main-border': '#9d9d9d',
+    '--main-shadow': 'none',
+    '--main-radius': '0',
 
-    // No fill and no rule: the title bar is the frame, continued.
     '--titlebar': 'transparent',
     '--titlebar-border': 'transparent',
-    '--titlebar-text': '#1b3f5f',
+    '--titlebar-text': '#000000',
+    // `.title-bar-text`: eight stacked white glows. That stack is what makes
+    // black text legible on glass, and one glow does not do it.
+    '--titlebar-text-size': '0.94rem',
+    '--titlebar-text-weight': '400',
+    '--titlebar-text-shadow':
+      '0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff, ' +
+      '0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff',
 
-    // One glass strip in the corner, divided into three by hairlines, rounded
-    // on its bottom corners only — it is flush with the top of the frame.
-    '--winbtn-group':
-      'linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(240, 249, 255, 0.86) 48%, ' +
-      'rgba(206, 231, 250, 0.86) 52%, rgba(226, 242, 253, 0.9) 100%)',
-    '--winbtn-group-border': 'rgba(122, 168, 207, 0.85)',
-    '--winbtn-group-radius': '0.28rem',
-    '--winbtn-divider': 'rgba(122, 168, 207, 0.5)',
-    '--winbtn-text': '#1b3f5f',
+    // ------------------------------------------------------- caption group
+    // `.title-bar-controls`: pulled up so the buttons meet the window's top
+    // edge, 20px tall, 27px wide, and 45px for the close.
+    '--winbtn-align': 'flex-start',
+    '--winbtn-offset-top': '0rem',
+    '--winbtn-offset-right': '0.33rem',
+    '--winbtn-height': '1.38rem',
+    '--winbtn-width': '1.86rem',
+    '--winbtn-close-width': '3.1rem',
+    '--winbtn-glyph': '0.97rem',
+    '--winbtn-border': 'transparent',
+    '--winbtn-radius': '0',
+    '--winbtn-gap': '0rem',
+    '--winbtn-group-pull': '0rem',
+    '--winbtn-group': 'transparent',
+    '--winbtn-group-border': 'transparent',
+    // Square where the group meets the top edge, 4px where it leaves it.
+    '--winbtn-group-radius': '0 0 0.27rem 0.27rem',
+    '--winbtn-group-shadow': 'none',
+    // `.title-bar-controls > button:hover { outline: solid 1px #000 }` is the
+    // only edge the source draws between them.
+    '--winbtn-divider': 'rgba(0, 0, 0, 0.35)',
+    '--winbtn-divider-light': 'rgba(255, 255, 255, 0.35)',
+
+    // Minimise and maximise, and what they do under the pointer and under the
+    // press. The cyan at the foot of the hover fill is the source's, and it is
+    // the whole reason an Aero caption button reads as lit rather than tinted.
+    '--winbtn-face':
+      'linear-gradient(180deg, #b8c5d3 0%, rgba(174, 174, 174, 0.494) 50%, ' +
+      'rgba(132, 132, 132, 0.475) 50%, #728aa9 100%)',
+    '--winbtn-text': '#000000',
+    '--winbtn-hover-text': '#000000',
     '--winbtn-hover':
-      'linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(226, 243, 255, 0.95) 100%)',
-    '--winbtn-close-hover': 'linear-gradient(180deg, #ef8074 0%, #e05043 48%, #c9291d 52%, #d8443a 100%)',
-    '--winbtn-close-hover-text': '#ffffff',
-    '--winbtn-stroke': '1.35',
+      'linear-gradient(180deg, #b3d6ed 0%, #83b5d7 50%, #2978ae 50%, #09fdfa 100%)',
+    '--winbtn-hover-filter': 'drop-shadow(0 4px 4px #5cc4ef)',
+    '--winbtn-active':
+      'linear-gradient(180deg, #a0bacb 0%, #57a4b3 50%, #0b3f5b 50%, #13d5c4 100%)',
 
-    // Panes that remain panes: the statistics strip and the theme dialog.
-    '--pane': 'linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 251, 255, 0.94))',
+    // Close. Red at rest, and the hover carries a band of yellow at its foot —
+    // which is the source's, and is what that button actually did.
+    '--winbtn-close':
+      'linear-gradient(180deg, #efb1a1 0%, #d5836f 51%, #ab4732 51%, #c17f6e 100%)',
+    '--winbtn-close-text': '#ffffff',
+    '--winbtn-close-hover':
+      'linear-gradient(180deg, #f99b8b 0%, #ed6c56 51%, #ab220c 51%, ' +
+      '#d22405 72%, #f4e679 100%)',
+    '--winbtn-close-hover-text': '#ffffff',
+    '--winbtn-close-hover-filter': 'drop-shadow(0 4px 4px rgba(255, 0, 0, 0.467))',
+    '--winbtn-close-active':
+      'linear-gradient(180deg, #d1a993 0%, #b7745b 51%, #8a1f09 52%, #f0c928 100%)',
+    '--winbtn-stroke': '1',
+
+    // The source has no unfocused window. Withdrawing the faces and the red is
+    // what that desktop did, and it is the one place here that is inference
+    // rather than port.
+    '--winbtn-face-off': 'rgba(255, 255, 255, 0.25)',
+    '--winbtn-close-off': 'rgba(255, 255, 255, 0.25)',
+    '--winbtn-group-border-off': 'transparent',
+    '--winbtn-divider-off': 'rgba(0, 0, 0, 0.18)',
+
+    // ---------------------------------------------------------------- panes
+    // `fieldset`: a hairline in `#cdd7db` with a white line inside it.
+    '--pane': '#f0eff2',
     '--pane-blur': 'none',
-    '--pane-border': '#a6c8e6',
-    '--pane-shadow': '0 1px 0 0 rgba(255, 255, 255, 0.95) inset',
-    '--pane-radius': '0.3rem',
-    // The drive table and the destination field are two objects on the sheet,
-    // not two halves of a third one.
+    '--pane-border': '#cdd7db',
+    '--pane-shadow': 'inset 0 0 0 1px #ffffff',
+    '--pane-radius': '0.2rem',
     '--form-pane': 'transparent',
     '--form-pane-border': 'transparent',
     '--form-pane-shadow': 'none',
-    '--scrim': 'rgba(186, 218, 243, 0.62)',
+    // A dialog is a window: the same glass, the same band around the panel,
+    // the same height, the same caption group.
+    '--dialog-strip':
+      'linear-gradient(180deg, rgba(231, 240, 255, 0) 10%, #ffffff 35%, ' +
+      '#ffffff 35%, rgba(253, 254, 255, 0) 36%, rgba(231, 240, 255, 0) 100%), ' +
+      'rgba(70, 162, 255, 0.37)',
+    '--dialog-strip-height': '2.9rem',
+    '--dialog-inset': '0.33rem',
+    '--dialog-blur': 'blur(3px)',
+    // Deep enough that the glass over it reads in the same register as the
+    // glass over the desktop: this material takes the colour of whatever is
+    // behind it, and behind a dialog is a light window.
+    '--scrim': 'rgba(12, 32, 56, 0.62)',
 
+    // ----------------------------------------------------------------- rows
+    // Not in the source, which has no list. Built from its own hover blues.
     '--row': 'transparent',
-    '--row-hover': 'linear-gradient(180deg, rgba(238, 248, 255, 0.95), rgba(219, 238, 252, 0.9))',
-    '--row-selected': 'linear-gradient(180deg, #eaf5fe 0%, #d9ecfc 52%, #cbe4fa 100%)',
-    '--row-selected-border': '#6ba5da',
-    // Nothing at all on a row that is not selected: the reference shows one
-    // mark on the chosen row and clean space on the others.
-    '--dot-idle': 'transparent',
+    '--row-hover': 'linear-gradient(180deg, #f3f9fe 0%, #eaf6fd 51%, #d9f0fc 51%, #cbe8fb 100%)',
+    '--row-selected': 'linear-gradient(180deg, #eaf6fd 0%, #d9f0fc 51%, #bce5fc 51%, #a7d9f5 100%)',
+    '--row-selected-border': '#3c7fb1',
+    '--row-selected-shadow': 'inset 0 0 0 1px #ffffff',
+    '--row-radius': '0.2rem',
 
-    '--inset': 'linear-gradient(180deg, #ffffff 0%, #fbfdff 100%)',
-    '--inset-border': '#a6c8e6',
-    '--track': '#dde8f2',
-    '--track-edge': '#c4d8e9',
+    // `input[type="radio"]`: a sunken white well with a cyan bead in a dark rim.
+    '--choice': '#f6f6f6',
+    '--choice-border': '#8e8f8f',
+    '--choice-border-selected': '#8e8f8f',
+    '--choice-mark':
+      'radial-gradient(circle at 50% 50%, #7cd3eb 0 0.13rem, #1d91d0 0.13rem 0.17rem, ' +
+      '#2e648b 0.17rem 0.23rem, transparent 0.23rem), #f6f6f6',
+    '--choice-shadow':
+      'inset 0 0 0 1.5px #f4f4f4, inset 1px 1px 0 1.5px #aeaeae, ' +
+      'inset -1px 0 0 1.5px #dddddd, inset 3px 3px 6px #cccccc',
 
-    // Green, and not the accent: on a window this blue the arcs are the one
-    // thing that says work is under way, and blue on blue would lose them.
-    '--ring': '#3fbb28',
-    '--ring-highlight': '#8ce860',
-    '--ring-shadow': '#1f8f1a',
-    '--ring-glow': 'rgba(76, 202, 45, 0.62)',
-    '--ring-cap': 'round',
-    '--ring-pulse': 'rgba(122, 196, 74, 0.85)',
-    '--ring-pulse-duration': '2.6s',
+    // --------------------------------------------------------------- fields
+    // A list box and a text field on this desktop are white, cut into the
+    // surface with the fieldset's hairline and its white inner line.
+    '--inset': '#ffffff',
+    '--inset-border': '#cdd7db',
+    '--inset-border-hover': '#3c7fb1',
+    '--inset-shadow': 'inset 0 0 0 1px #ffffff, inset 0 1px 3px rgba(0, 0, 0, 0.12)',
+    '--input-radius': '0.2rem',
 
+    // The progress arc's channel. Not in the source; the greys are the ones it
+    // builds its resting button out of.
+    '--track': '#dbdbdb',
+    '--track-edge': '#8e8f8f',
+    '--track-lit': '#fcfcfc',
+    '--track-shadow': 'inset 0 1px 3px rgba(0, 0, 0, 0.16)',
 
+    // -------------------------------------------------------------- buttons
+    // `button`, verbatim: a four-stop gradient with the break at the middle,
+    // a grey outline and a white line inside it. Hover turns it blue; the
+    // press darkens it and lays a two-pixel lit edge inside.
+    '--button':
+      'linear-gradient(180deg, #fcfcfc 0%, #ebebeb 51%, #dbdbdb 51%, #cfcfcf 100%)',
+    '--button-hover':
+      'linear-gradient(180deg, #eaf6fd 0%, #d9f0fc 51%, #bce5fc 51%, #a7d9f5 100%)',
+    '--button-active':
+      'linear-gradient(180deg, #e5f4fc 0%, #c4e5f6 51%, #98d1ef 51%, #68b2da 100%)',
+    '--button-text': '#000000',
+    '--button-text-hover': '#000000',
+    '--button-border': '#757575',
+    '--button-border-hover': '#3c7fb1',
+    '--button-shadow': 'inset 0 0 0 1px #fcfcfc',
+    '--button-shadow-active': 'inset 0 0 0 2px #86c6e8',
+    '--button-radius': '0.2rem',
+
+    // The one button that starts and stops a scan. The source has a single
+    // button and no notion of a default one, so this is that button with the
+    // glow the system put around the one the Enter key would press.
+    '--action':
+      'linear-gradient(180deg, #fcfcfc 0%, #ebebeb 51%, #dbdbdb 51%, #cfcfcf 100%)',
+    '--action-hover':
+      'linear-gradient(180deg, #eaf6fd 0%, #d9f0fc 51%, #bce5fc 51%, #a7d9f5 100%)',
+    '--action-active':
+      'linear-gradient(180deg, #e5f4fc 0%, #c4e5f6 51%, #98d1ef 51%, #68b2da 100%)',
+    '--action-text': '#000000',
+    '--action-text-hover': '#000000',
+    '--action-border': '#3c7fb1',
+    '--action-shadow': 'inset 0 0 0 1px #fcfcfc, 0 0 0.34rem rgba(60, 127, 177, 0.85)',
+    '--action-shadow-active': 'inset 0 0 0 2px #86c6e8',
+
+    '--link': '#0066cc',
+    '--link-hover': '#3c7fb1',
+
+    '--disabled-text': '#8d8d8d',
+    '--disabled-opacity': '1',
+
+    '--focus-outline': '1px dotted #000000',
+    '--focus-offset': '-3px',
+
+    // ------------------------------------------------------------- progress
+    // Not in the source. The green is the one Windows 7's own progress bar
+    // used, and the bands either side of it are mixed from it.
+    '--ring': '#00d328',
+    '--ring-highlight': 'color-mix(in srgb, var(--ring) 22%, #ffffff)',
+    '--ring-edge': 'color-mix(in srgb, var(--ring) 62%, #ffffff)',
+    '--ring-glow': 'transparent',
+    '--ring-cap': 'butt',
+    '--progress-running': '#00d328',
+    '--progress-paused': '#e0a21b',
+    '--progress-done': '#00d328',
+    '--progress-cancelled': '#9d9d9d',
+    '--progress-failed': '#ab4732',
+    '--sheen': 'rgba(255, 255, 255, 0.5)',
+    '--sheen-duration': '2.1s',
+    '--sheen-easing': 'cubic-bezier(0.45, 0, 0.55, 1)',
+
+    // ------------------------------------------------------------- controls
+    // The switch is not this theme's idiom, but the contract is total, so it
+    // is drawn in the same greys and blues as everything else.
+    '--switch-track': 'linear-gradient(180deg, #cfcfcf 0%, #ebebeb 100%)',
+    '--switch-track-on': 'linear-gradient(180deg, #68b2da 0%, #a7d9f5 100%)',
+    '--switch-border': '#757575',
+    '--switch-border-on': '#3c7fb1',
+    '--switch-thumb': 'linear-gradient(180deg, #fcfcfc 0%, #dbdbdb 100%)',
+    '--switch-radius': '0.2rem',
+    '--switch-thumb-radius': '0.14rem',
+
+    // `input[type="checkbox"] + label::before`, verbatim — the well, its four
+    // inset lines and the tick's own colour.
+    '--check-box': '#f6f6f6',
+    '--check-box-checked': '#f6f6f6',
+    '--check-border': '#8e8f8f',
+    '--check-border-checked': '#8e8f8f',
+    '--check-border-hover': '#3c7fb1',
+    '--check-mark': '#4e64a1',
+    '--check-radius': '0',
+    '--check-shadow':
+      'inset 0 0 0 1px #f4f4f4, inset 1px 1px 0 1px #aeaeae, ' +
+      'inset -1px -1px 0 1px #dddddd, inset 3px 3px 6px #cccccc',
+    '--check-shadow-hover':
+      'inset 0 0 0 1px #def9fa, inset 1px 1px 0 1px #79c6f9, ' +
+      'inset -1px -1px 0 1px #c6e9fc, inset 3px 3px 6px #b1dffd',
+
+    // The seal on a drive row. Not in the source; the amber is this
+    // application's warning colour, given the fieldset's edge treatment.
+    '--badge': 'linear-gradient(180deg, #fff8e1 0%, #ffe9b0 100%)',
+    '--badge-border': '#d9a441',
+    '--badge-text': '#7a5210',
+    '--badge-quiet': 'linear-gradient(180deg, #fcfcfc 0%, #ebebeb 100%)',
+    '--badge-quiet-border': '#cdd7db',
+    '--badge-quiet-text': '#5a5a5a',
+    '--badge-radius': '0.14rem',
+
+    // Not in the source. The thumb is its button, the channel its sunken well.
+    '--scrollbar-track': '#f0eff2',
+    '--scrollbar-thumb':
+      'linear-gradient(90deg, #fcfcfc 0%, #ebebeb 51%, #dbdbdb 51%, #cfcfcf 100%)',
+    '--scrollbar-thumb-hover':
+      'linear-gradient(90deg, #eaf6fd 0%, #d9f0fc 51%, #bce5fc 51%, #a7d9f5 100%)',
+    '--scrollbar-border': '#cdd7db',
+    '--scrollbar-radius': '0.14rem',
+
+    // --------------------------------------------------------------- ground
     '--scanlines': 'none',
     '--text-glow': 'none',
+    '--bevel-raised': 'inset 0 0 0 1px #fcfcfc',
+    '--bevel-sunken': 'inset 0 0 0 1px #ffffff, inset 0 1px 3px rgba(0, 0, 0, 0.12)',
+    // The break the source puts down the middle of everything clickable.
+    '--specular':
+      'linear-gradient(180deg, rgba(255, 255, 255, 0.5) 0%, ' +
+      'rgba(255, 255, 255, 0.12) 51%, rgba(255, 255, 255, 0) 51%)',
 
-    '--text': '#1b3f5f',
-    '--text-dim': '#2f6da8',
-    '--text-faint': '#7ba0be',
+    '--text': '#000000',
+    '--text-dim': '#3a3a3a',
+    '--text-faint': '#767676',
+    '--heading': '#000000',
 
-    '--accent': '#1b7fd4',
-    '--accent-strong': '#1b7fd4',
+    '--accent': '#3c7fb1',
+    '--accent-strong': '#2c628b',
     '--accent-text': '#ffffff',
+    '--ok': '#1a7a2e',
+    '--warn': '#8a5b00',
+    '--danger': '#ab4732',
 
-    // The highlight breaks at the middle instead of fading, which is what
-    // makes a button of this era read as glass rather than as a gradient.
-    '--action':
-      'linear-gradient(180deg, #6dbcf2 0%, #4aa1e9 48%, #2a80d2 50%, #1f6ec0 88%, #2b7ac9 100%)',
-    '--action-text': '#ffffff',
-    '--action-border': '#1a629f',
-    '--action-shadow':
-      '0 0 0 1px rgba(255, 255, 255, 0.72) inset, 0 0.35rem 0.6rem -0.3rem rgba(15, 70, 122, 0.55)',
-
-    '--ok': '#2f8f2a',
-    '--warn': '#a5761b',
-    '--danger': '#c0392b',
-
-    // A bevelled rectangle, not a pill: this generation of interface had
-    // square-shouldered controls with a gradient down them.
-    '--switch-track': 'linear-gradient(180deg, #c9d9e8 0%, #e6f0f8 100%)',
-    '--switch-track-on': 'linear-gradient(180deg, #4aa3e8 0%, #1b7fd4 100%)',
-    '--switch-border': '#a6c8e6',
-    '--switch-border-on': '#1a629f',
-    '--switch-thumb': 'linear-gradient(180deg, #ffffff 0%, #e4eff9 100%)',
-    '--switch-radius': '0.28rem',
-    '--switch-thumb-radius': '0.18rem',
-    '--radius': '0.24rem',
-    '--font':
-      '"Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif',
+    // The source loads Segoe UI from Microsoft's own CDN. This window ships
+    // Selawik instead — metric-compatible, bundled, and it renders offline.
+    '--font': '"Segoe UI", Selawik, "Noto Sans", Carlito, sans-serif',
   },
   icons: {
-    // A drive seen face on, the way the system's own drive icon draws one: a
-    // silver case with the light catching its top edge, a dark bezel on the
-    // left with two vent slots and the green activity lamp, and three ribs
-    // across the body. Flat bands rather than gradients, so eight of them on
-    // screen cost eight rectangles.
-    disk:
-      '<rect x="0.6" y="2.4" width="18.8" height="11.2" rx="1.7" fill="#c4d0db"/>' +
-      '<rect x="0.6" y="2.4" width="18.8" height="4.6" rx="1.7" fill="#f2f6fa"/>' +
-      '<rect x="0.6" y="6.6" width="18.8" height="2.2" fill="#dae2ea"/>' +
-      '<rect x="0.6" y="10" width="18.8" height="3.6" fill="#a7b5c2"/>' +
-      '<rect x="0.6" y="2.4" width="18.8" height="11.2" rx="1.7" fill="none" ' +
-      'stroke="#74838f" stroke-width="0.8"/>' +
-      '<rect x="2" y="4.2" width="5.8" height="7.6" rx="0.8" fill="#4e5862"/>' +
-      '<rect x="2.8" y="5.3" width="4.2" height="1" rx="0.5" fill="#93a0ab"/>' +
-      '<rect x="2.8" y="7" width="4.2" height="1" rx="0.5" fill="#93a0ab"/>' +
-      '<circle cx="4.9" cy="10.2" r="0.85" fill="#63e04c"/>' +
-      '<rect x="9.4" y="5" width="8.2" height="1.1" rx="0.55" fill="#9aa8b5"/>' +
-      '<rect x="9.4" y="7.4" width="8.2" height="1.1" rx="0.55" fill="#adbac6"/>' +
-      '<rect x="9.4" y="9.8" width="5.6" height="1.1" rx="0.55" fill="#adbac6"/>',
-    minimise: '<path d="M2.5 8.4h7" fill="none" stroke="currentColor" stroke-linecap="square"/>',
-    // The maximise glyph of the era: a box with a heavier title edge.
+    // The three caption glyphs, from the source's own `assets/*.svg`: a shape
+    // filled with a white-to-grey gradient over a `#535666` outline. Placed
+    // into the twelve-unit box this layout draws them in, and their gradient
+    // ids made unique so three of them on one page do not share one.
+    minimise:
+      '<defs><linearGradient id="aero-min-f" x1="0" y1="1" x2="0" y2="0">' +
+      '<stop offset="0" stop-color="#e4e4e4"/><stop offset="1" stop-color="#fff"/>' +
+      '</linearGradient></defs>' +
+      '<g transform="translate(1.485 4.122)">' +
+      '<rect x="0.75" y="0.75" width="7.52941" height="2.25686" fill="url(#aero-min-f)"/>' +
+      '<path d="M8.27942.75V3.00687H.75V.75H8.27942m.75-.75H0V3.75687H9.02942V0Z" fill="#535666"/>' +
+      '</g>',
     maximise:
-      '<rect x="2.5" y="2.8" width="7" height="6.6" fill="none" stroke="currentColor"/>' +
-      '<path d="M2.5 4.4h7" fill="none" stroke="currentColor"/>',
-    close: '<path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="currentColor" stroke-linecap="square"/>',
+      '<defs><linearGradient id="aero-max-f" x1="0" y1="1" x2="0" y2="0">' +
+      '<stop offset="0" stop-color="#dadada"/><stop offset="1" stop-color="#fff"/>' +
+      '</linearGradient></defs>' +
+      '<g transform="translate(1.479 2.229)">' +
+      '<path d="M.75.75V6.79163H8.2917V.75ZM6.78474,5.26385H2.257V2.20831H6.78474Z" ' +
+      'fill="url(#aero-max-f)"/>' +
+      '<path d="M8.29169.75V6.79163H.75V.75H8.29169M2.257,5.26385H6.78473V2.20831H2.257V5.26385' +
+      'M9.04169,0H0V7.54163H9.04169V0ZM3.007,2.95831H6.03473V4.51385H3.007V2.95831Z" ' +
+      'fill="#535666"/>' +
+      '</g>',
+    close:
+      '<defs><linearGradient id="aero-close-f" x1="0" y1="1" x2="0" y2="0">' +
+      '<stop offset="0" stop-color="#dadada"/><stop offset="1" stop-color="#fff"/>' +
+      '</linearGradient></defs>' +
+      '<g transform="translate(1.158 2.287)">' +
+      '<polygon points="5.949 3.71 8.18 6.676 5.949 6.676 4.848 5.186 4.842 5.194 4.836 5.186 ' +
+      '3.735 6.676 1.504 6.676 3.735 3.71 1.504 0.75 3.71 0.75 4.842 2.223 5.975 0.75 8.18 0.75 ' +
+      '5.949 3.71" fill="url(#aero-close-f)"/>' +
+      '<path d="M8.18013.75,5.94894,3.70973l2.23119,2.9662H5.94894L4.84834,5.18562l-.00617.00824' +
+      'L4.8363,5.18562,3.73539,6.67593H1.5045l2.23089-2.9662L1.5045.75h2.205L4.84217,2.22266,' +
+      '5.97512.75h2.205M9.68475,0H5.60585L5.38068.29268,4.84225.99255,4.304.29276,4.07884,0H0' +
+      'L.90559,1.20143l1.891,2.50879L.90511,6.22513.002,7.42593H4.1138l.22485-.30436.50359-.68172' +
+      '.50339.68164.22484.30444H9.68279L8.7795,6.22508,6.88781,3.71022,8.779,1.20146,9.68475,0Z" ' +
+      'fill="#545767"/>' +
+      '</g>',
+    // The tick the source puts in a checked box, and the two arrows a number
+    // field steps with — drawn in its own ink.
+    tick:
+      '<path d="M2 7.4l3.4 3.4L12 3.6" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+      'stroke-linecap="square"/>',
+    up: '<path d="M4 1.4l3 3.2H1z" fill="currentColor"/>',
+    down: '<path d="M4 4.6l-3-3.2h6z" fill="currentColor"/>',
   },
 });

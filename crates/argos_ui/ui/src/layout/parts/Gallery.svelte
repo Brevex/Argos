@@ -14,6 +14,7 @@
    * pictures are the session's `previews/` thumbnails, the one path this
    * window is granted.
    */
+  import { untrack } from 'svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
 
@@ -140,8 +141,15 @@
     return file === '' ? '' : convertFileSrc(`${previewDir}/${file}`);
   }
 
+  // The session is the only thing that should start a fetch. `load` reads
+  // `loading` on its way in, and a reactive read there makes the fetch its own
+  // trigger: the flag goes up, the effect re-runs, the flag comes down when the
+  // reply lands and the effect runs again — a loop that re-fetches the gallery
+  // for as long as the window is open. Untracked, the effect depends on the
+  // session and nothing else.
   $effect(() => {
-    if (session !== '') void load(true);
+    const from = session;
+    if (from !== '') untrack(() => void load(true));
   });
 </script>
 
@@ -262,70 +270,84 @@
     flex-wrap: wrap;
   }
 
-  .filters button {
+  /* The ordinary button, in a row where one of them is held down: the same
+     object as Refresh, Browse and Config, and the chosen one wears the same
+     selection the drive table's chosen row wears. */
+  .filters button,
+  .export,
+  .more {
+    position: relative;
     padding: 0.3rem 0.7rem;
-    border: 1px solid var(--inset-border);
-    border-radius: 0.4rem;
-    background: var(--inset);
-    color: var(--text-dim);
     font: inherit;
-    font-size: 0.85em;
-    cursor: pointer;
+    font-size: var(--type-xs);
+    color: var(--button-text);
+    background: var(--button);
+    border: 1px solid var(--button-border);
+    border-radius: var(--button-radius);
+    box-shadow: var(--button-shadow);
     text-shadow: var(--text-glow);
+    cursor: pointer;
   }
 
-  .filters button:hover:not(:disabled) {
-    background: var(--row-hover);
-    color: var(--text);
+  .filters button::after,
+  .export::after,
+  .more::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: var(--specular);
+  }
+
+  .filters button:hover:not(:disabled),
+  .export:hover:not(:disabled),
+  .more:hover:not(:disabled) {
+    background: var(--button-hover);
+    border-color: var(--button-border-hover);
+    color: var(--button-text-hover);
+  }
+
+  .filters button:active:not(:disabled),
+  .export:active:not(:disabled),
+  .more:active:not(:disabled) {
+    background: var(--button-active);
+    box-shadow: var(--button-shadow-active);
+    color: var(--button-text-hover);
+  }
+
+  .filters button:disabled,
+  .export:disabled,
+  .more:disabled {
+    color: var(--disabled-text);
+    opacity: var(--disabled-opacity);
+    cursor: default;
+  }
+
+  .filters button:focus-visible,
+  .export:focus-visible,
+  .more:focus-visible {
+    outline: var(--focus-outline);
+    outline-offset: var(--focus-offset);
   }
 
   .filters button.on {
     background: var(--row-selected);
     border-color: var(--row-selected-border);
+    box-shadow: var(--row-selected-shadow);
     color: var(--text);
-  }
-
-  .filters button:disabled {
-    cursor: default;
-    opacity: 0.6;
   }
 
   .count,
   .empty,
-  .problem {
-    margin: 0;
-    color: var(--text-dim);
-    font-size: 0.85em;
-    text-shadow: var(--text-glow);
-  }
-
-  /* What the last export produced, kept until another one replaces it: a copy
-     that refused an artifact has to stay on screen long enough to be read. */
+  .problem,
   .exported {
     margin: 0;
+    max-width: var(--measure);
     color: var(--text-dim);
-    font-size: 0.85em;
+    font-size: var(--type-xs);
+    line-height: 1.5;
     text-shadow: var(--text-glow);
-  }
-
-  .export {
-    padding: 0.3rem 0.7rem;
-    font: inherit;
-    font-size: 0.78rem;
-    color: var(--text);
-    background: var(--inset);
-    border: 1px solid var(--inset-border);
-    border-radius: var(--radius);
-    cursor: pointer;
-  }
-
-  .export:hover:not(:disabled) {
-    background: var(--row-hover);
-  }
-
-  .export:disabled {
-    color: var(--text-faint);
-    cursor: default;
   }
 
   .problem {
@@ -348,7 +370,8 @@
     gap: 0.3rem;
     background: var(--inset);
     border: 1px solid var(--inset-border);
-    border-radius: 0.4rem;
+    border-radius: var(--input-radius);
+    box-shadow: var(--inset-shadow);
     padding: 0.35rem;
     overflow: hidden;
   }
@@ -359,7 +382,7 @@
     aspect-ratio: 4 / 3;
     object-fit: contain;
     background: var(--track);
-    border-radius: 0.25rem;
+    border-radius: var(--input-radius);
     display: block;
   }
 
@@ -367,7 +390,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
-    font-size: 0.72em;
+    font-size: var(--type-2xs);
     color: var(--text-faint);
     text-shadow: var(--text-glow);
     min-width: 0;
@@ -395,16 +418,6 @@
   .more {
     align-self: center;
     padding: 0.4rem 1.1rem;
-    border: 1px solid var(--action-border);
-    border-radius: 0.4rem;
-    background: var(--action);
-    color: var(--action-text);
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .more:disabled {
-    cursor: default;
-    opacity: 0.7;
+    font-size: var(--type-sm);
   }
 </style>

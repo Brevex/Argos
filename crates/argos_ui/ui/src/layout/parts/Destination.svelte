@@ -77,10 +77,10 @@
 
 <style>
   h2 {
-    font-size: 0.88rem;
+    font-size: var(--type-md);
     text-shadow: var(--text-glow);
     font-weight: 400;
-    color: var(--text-dim);
+    color: var(--heading);
     margin: 0 0 0.625rem;
   }
 
@@ -88,21 +88,29 @@
     color: var(--text-faint);
   }
 
+  /* A field is cut into the sheet rather than laid on it: the theme's sunken
+     bevel, and the button attached to its right edge shares the cut. */
   .field {
     display: flex;
     align-items: stretch;
     border: 1px solid var(--inset-border);
-    border-radius: var(--radius);
+    border-radius: var(--input-radius);
     background: var(--scanlines), var(--inset);
+    box-shadow: var(--inset-shadow);
     overflow: hidden;
   }
 
+  .field:hover:not(.disabled) {
+    border-color: var(--inset-border-hover);
+  }
+
   .field:focus-within {
-    border-color: var(--row-selected-border);
+    border-color: var(--inset-border-hover);
   }
 
   .field.disabled {
-    opacity: 0.78;
+    border-color: var(--inset-border);
+    opacity: var(--disabled-opacity);
   }
 
   input {
@@ -113,34 +121,59 @@
     border: 0;
     color: var(--text);
     font-family: var(--font);
-    font-size: 0.84rem;
+    font-size: var(--type-md);
   }
 
   input::placeholder {
     color: var(--text-faint);
   }
 
-  input:focus {
-    outline: none;
+  input:disabled {
+    color: var(--disabled-text);
   }
 
+  /* The field's own button: the ordinary one, attached. It keeps the button
+     fill so it reads as something to press, and gives up its corners on the
+     side that meets the field. */
   button {
+    position: relative;
     flex: none;
     padding: 0 1.375rem;
-    background: var(--row-hover);
+    background: var(--button);
     border: 0;
     border-left: 1px solid var(--inset-border);
-    color: var(--text);
+    color: var(--button-text);
     font: inherit;
-    font-size: 0.84rem;
+    font-size: var(--type-md);
     cursor: pointer;
   }
 
+  button::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: var(--specular);
+  }
+
   button:hover:not(:disabled) {
-    background: var(--row-selected);
+    background: var(--button-hover);
+    color: var(--button-text-hover);
+  }
+
+  button:active:not(:disabled) {
+    background: var(--button-active);
+    box-shadow: var(--button-shadow-active);
+    color: var(--button-text-hover);
   }
 
   button:disabled {
+    color: var(--disabled-text);
     cursor: not-allowed;
+  }
+
+  button:focus-visible {
+    outline: var(--focus-outline);
+    outline-offset: -3px;
   }
 </style>

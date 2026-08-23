@@ -120,9 +120,6 @@ class Session {
    */
   omitted = $state(0);
 
-  /** Everything the engine warned about, oldest first. */
-  warnings = $state<string[]>([]);
-
   /** Whatever went wrong, when something did. */
   problem = $state('');
 
@@ -154,15 +151,21 @@ class Session {
   now = $state(0);
 
   /**
-   * How far the examination of the medium has got, 0–1.
+   * How far the read of the medium has got, 0–1.
    *
-   * This is the stage in progress, not the run: reading the medium, validating
-   * what the read turned up and reassembling fragments are separate passes
-   * with separate totals, and one bar over all three would need a made-up
-   * exchange rate between bytes and candidates. The label beside it says which
-   * pass the figure belongs to.
+   * The sweep, for as long as the run lasts — not whichever stage happens to
+   * be running. The two are not the same figure, and showing the second under
+   * a label that says "Scan" is what put three per cent beside a byte count
+   * that said the whole disk had been read: the sweep had finished and a later
+   * pass with its own denominator had started.
+   *
+   * The passes that follow the read are narrated in words beside the arcs,
+   * where a percentage of candidates cannot be mistaken for a percentage of
+   * the disk. A run with no sweep at all — filesystem records only — has
+   * nothing else to show here, and falls back to the stage in progress.
    */
   get scanned(): number | null {
+    if (this.sweep.total > 0) return fraction(this.sweep);
     if (AFTER_RECOVERY.has(this.stage)) return 1;
     if (!showsPercentage(this.workUnit)) return null;
     return fraction(this.work);
@@ -236,7 +239,6 @@ class Session {
     this.stored = 0;
     this.artifacts = 0;
     this.omitted = 0;
-    this.warnings = [];
     this.problem = '';
     this.stopping = false;
     this.paused = false;
@@ -311,8 +313,13 @@ class Session {
         this.acquired = message.params;
         this.phase = 'done';
         break;
+      // What the engine warns about is a property of the medium, and the drive
+      // table reports those from the device record itself — mounted, writable,
+      // trimming — beside the drive they belong to. The sentence the engine
+      // sends is the same fact in prose, and it goes to the console, where a
+      // scan run from the command line is the one that has nowhere else to
+      // put it.
       case 'warning':
-        this.warnings = [...this.warnings, message.params.text];
         break;
       case 'unreadable':
         break;

@@ -2,11 +2,38 @@
  * The only stylesheet not scoped to a component, and the only place a theme's
  * tokens are consumed outside one.
  *
- * Every value here is `var(--token)`. There is no literal colour in this file
+ * Every colour here is `var(--token)`. There is no literal colour in this file
  * and there must not be one: a hardcoded colour is a part of the interface a
  * theme cannot reach, which is the failure mode the theme contract exists to
  * prevent.
  */
+
+/*
+ * Selawik, bundled.
+ *
+ * The Aero theme asks for Segoe UI, which exists on exactly one of the three
+ * platforms this runs on. Selawik is metric-compatible with it and licensed
+ * under the SIL Open Font License (the licence travels with the files, in
+ * `fonts/LICENSE-Selawik.txt`), so a Linux or macOS window renders that theme
+ * at the same widths a Windows one does instead of falling back to whatever
+ * the system calls a sans-serif. Two weights: text, and the semibold the
+ * title bar uses.
+ */
+@font-face {
+  font-family: Selawik;
+  src: url('./fonts/selawk.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: Selawik;
+  src: url('./fonts/selawksb.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
 
 *,
 *::before,
@@ -36,6 +63,27 @@ body {
  */
 html {
   font-size: clamp(11px, min(1.9vw, 1.98vh), 17px);
+
+  /*
+   * The type scale, and the only sizes this interface uses.
+   *
+   * Eight steps on a ratio near 1.12, named for what they are rather than for
+   * where they are used, so a size is chosen from a list instead of invented
+   * per component. `md` is the body; `2xl` and `3xl` exist for the two places
+   * a figure is the thing being read — the statistics strip and the middle of
+   * a progress ring.
+   */
+  --type-2xs: 0.7rem;
+  --type-xs: 0.75rem;
+  --type-sm: 0.8rem;
+  --type-md: 0.85rem;
+  --type-lg: 0.94rem;
+  --type-xl: 1.06rem;
+  --type-2xl: 1.56rem;
+  --type-3xl: 1.9rem;
+
+  /* Prose stops here. Longer lines are read by returning to the wrong one. */
+  --measure: 65ch;
 }
 
 /*
@@ -49,7 +97,7 @@ body {
   background: transparent;
   color: var(--text);
   font-family: var(--font);
-  font-size: 0.875rem;
+  font-size: var(--type-md);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -59,9 +107,14 @@ body {
   height: 100%;
 }
 
+/*
+ * The keyboard's own mark, in whatever form the theme draws one: an outline, a
+ * ring of shadow, or both. Never only a colour — the ring has to be visible on
+ * a control whose colours have already changed for another reason.
+ */
 :focus-visible {
-  outline: 2px solid var(--accent-strong);
-  outline-offset: 2px;
+  outline: var(--focus-outline);
+  outline-offset: var(--focus-offset);
 }
 
 ::selection {
@@ -69,23 +122,49 @@ body {
   color: var(--accent-text);
 }
 
+/*
+ * The scrollbar is a control like any other. Left to the browser it is the one
+ * thing on screen still wearing the platform's clothes.
+ */
 ::-webkit-scrollbar {
-  width: 0.625rem;
-  height: 0.625rem;
+  width: 0.7rem;
+  height: 0.7rem;
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--scrollbar-track);
 }
 
 ::-webkit-scrollbar-thumb {
-  border: 0.19rem solid transparent;
-  border-radius: 99px;
-  background: var(--track);
-  background-clip: content-box;
+  background: var(--scrollbar-thumb);
+  border: 1px solid var(--scrollbar-border);
+  border-radius: var(--scrollbar-radius);
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--pane-border);
-  background-clip: content-box;
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
+}
+
+/*
+ * Nothing here animates for a viewer who asked for that.
+ *
+ * The sweep along a progress arc is the only motion this application has that
+ * carries meaning, and it says the run is alive — which the figures beside it
+ * say as well. Everything else is a transition between two states that are
+ * both legible standing still.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
