@@ -12,15 +12,11 @@ pub mod naming;
 pub mod shadow;
 
 mod device;
-mod image;
-mod reader;
-
-#[cfg(feature = "test-util")]
-pub mod mock;
 
 pub use class::TrimState;
-pub use device::{Device, DeviceError};
-pub use image::ImageSource;
+pub use device::{BlockReader, Device, DeviceError, ImageSource};
 pub use inventory::{DeviceInfo, MountPoint};
-pub use reader::BlockReader;
 pub use shadow::ShadowCopy;
+
+#[cfg(feature = "test-util")]
+pub use device::Ctrl;

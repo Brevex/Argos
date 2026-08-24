@@ -9,8 +9,8 @@ use argos_core::artifact::ArtifactSink;
 use argos_core::classify::{AcceptAll, Classifier};
 use argos_core::progress::{ProgressSink, RunState, ScanEvent};
 
+use crate::ScanError;
 use crate::config::{ConfigError, ScanConfig};
-use crate::error::ScanError;
 use crate::finding::ScanReport;
 use crate::pipeline;
 

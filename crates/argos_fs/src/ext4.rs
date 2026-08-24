@@ -17,15 +17,15 @@ use std::time::{Duration, SystemTime};
 use argos_core::Confidence;
 use argos_core::geometry::{ByteOffset, ByteRange};
 
-use crate::bytes::{read_at, u16_le, u32_be, u32_le};
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
+use crate::{read_at, u16_le, u32_be, u32_le};
 
 /// Superblock magic, at offset 56 within the superblock. Source: ext4 layout.
 const SUPERBLOCK_MAGIC: u16 = 0xEF53;
 
 /// Byte offset of the primary superblock within a volume. Source: ext4 layout
 /// (the first 1024 bytes are reserved for boot code).
-pub const SUPERBLOCK_OFFSET: u64 = 1024;
+pub(crate) const SUPERBLOCK_OFFSET: u64 = 1024;
 
 /// Size of the superblock structure in bytes.
 const SUPERBLOCK_BYTES: usize = 1024;

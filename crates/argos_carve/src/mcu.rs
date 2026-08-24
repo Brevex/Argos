@@ -35,7 +35,7 @@ use std::io::{Read, Seek};
 
 use argos_core::geometry::ByteOffset;
 
-use crate::stream::Bytes;
+use crate::Bytes;
 use crate::{CarveError, Scratch};
 
 /// Components a frame may declare.

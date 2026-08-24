@@ -18,8 +18,8 @@ use std::time::{Duration, SystemTime};
 use argos_core::Confidence;
 use argos_core::geometry::{ByteOffset, ByteRange};
 
-use crate::bytes::{read_at, u16_le, u32_le, u64_le, utf16le_name};
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
+use crate::{read_at, u16_le, u32_le, u64_le, utf16le_name};
 
 /// Boot-sector signature at offset 510, shared by FAT and exFAT.
 const BOOT_SIG: u16 = 0xAA55;

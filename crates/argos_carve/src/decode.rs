@@ -35,7 +35,7 @@ pub const MAX_DECODE_BYTES: usize = 64 * 1024 * 1024;
 /// cannot demand an enormous plane.
 ///
 /// 512 megapixels is roughly twenty times the largest consumer sensor.
-pub const MAX_PIXELS: usize = 512 * 1024 * 1024;
+pub(crate) const MAX_PIXELS: usize = 512 * 1024 * 1024;
 
 /// Rows a frame needs before a seam ratio means anything.
 ///
@@ -70,7 +70,7 @@ impl Decoded {
     /// both score near `1.0` when there is no seam. `None` when the row is not
     /// in the frame or the frame is too small to have a median.
     #[must_use]
-    pub fn seam_ratio(&self, row: u32) -> Option<f32> {
+    pub(crate) fn seam_ratio(&self, row: u32) -> Option<f32> {
         let width = self.width as usize;
         let height = self.height as usize;
         if width == 0 || height < MIN_ROWS_FOR_SEAM || row == 0 || row as usize >= height {

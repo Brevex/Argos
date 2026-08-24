@@ -28,7 +28,7 @@ pub enum NodeKind {
 ///
 /// `\\.\PhysicalDriveN` is the Win32 device namespace name for the whole
 /// disk; partitions are `\\.\HarddiskVolumeN` or a drive letter.
-pub const WINDOWS_PHYSICAL_DRIVE: &str = r"\\.\PhysicalDrive";
+pub(crate) const WINDOWS_PHYSICAL_DRIVE: &str = r"\\.\PhysicalDrive";
 
 /// The Windows path addressing physical drive `index` as a whole.
 #[must_use]

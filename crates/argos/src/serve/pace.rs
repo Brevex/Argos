@@ -31,9 +31,9 @@ use argos_core::progress::ScanEvent;
 use argos_ipc::dto;
 use argos_ipc::wire::Notification;
 
+use super::Wire;
 use super::trace::Trace;
 use super::translate;
-use super::wire::Wire;
 
 /// Shortest interval between two cumulative notifications.
 ///

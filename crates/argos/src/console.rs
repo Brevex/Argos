@@ -3,11 +3,66 @@
 //! Everything that reaches a terminal is written here. The scan driver, the
 //! engine and every library crate stay silent and hand back structured values
 //! (`M-LOG-NOT-PRINT`); this module decides what a person sees.
+//!
+//! That includes what a run shows while it is still running: the live status
+//! line a scan redraws, and the keys that pause and stop it.
 
-use argos_engine::ScanReport;
+use std::io::{IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use argos_core::progress::{ProgressSink, RunState, ScanEvent, Unit};
+use argos_engine::{ScanReport, ScanSession};
 use argos_report::Manifest;
 
 use crate::scan::Notice;
+
+/// What a finished scan wrote, and whether it got there.
+pub fn finished(finished: &crate::scan::Finished) {
+    match &finished.report {
+        Some(report) => summarize(report),
+        None => println!("state     failed"),
+    }
+    println!("manifest  {}", finished.manifest.display());
+}
+
+/// What a resumed run has to go back to.
+pub fn resuming(points: usize) {
+    println!("resuming  {points} fragmentation points");
+}
+
+/// The frame the grafted strips are read in.
+pub fn reference(dimensions: (u16, u16)) {
+    let (width, height) = dimensions;
+    println!("reference  {width}x{height}");
+}
+
+/// What a graft sweep entered and decoded, and what that is not.
+pub fn grafted(entered: usize, written: usize) {
+    println!("entered {entered} orphaned runs, {written} decoded to a picture");
+    println!(
+        "these are pixels in a header this tool supplied, not files the medium held: the frame \
+         size is the reference's and each strip's position inside it is unknown"
+    );
+}
+
+/// What an export copied, and what it refused.
+pub fn exported(exported: &crate::results::Exported) {
+    println!("exported  {} artifacts", exported.copied.len());
+    if exported.previews > 0 {
+        println!("previews  {} copied", exported.previews);
+    }
+    for name in &exported.missing {
+        println!("missing   {name} is recorded in the manifest but not in the session directory");
+    }
+    for name in &exported.tampered {
+        println!(
+            "refused   {name} no longer reproduces the digest the scan recorded and was not \
+             exported"
+        );
+    }
+}
 
 /// Prints what a scan says about itself as it says it.
 #[derive(Clone, Copy, Debug, Default)]
@@ -449,13 +504,7 @@ pub fn manifest(manifest: &Manifest, all: bool) {
     // Strongest evidence first, then the largest picture, so what a person is
     // looking for is at the top of the list rather than somewhere in it. The
     // order is presentation; the manifest's own order is untouched.
-    let mut listed: Vec<&argos_report::ArtifactRecord> = manifest.artifacts.iter().collect();
-    listed.sort_by(|left, right| {
-        crate::standing::rank(right)
-            .cmp(&crate::standing::rank(left))
-            .then(crate::standing::long_side(right).cmp(&crate::standing::long_side(left)))
-            .then(right.length.cmp(&left.length))
-    });
+    let listed = crate::results::ordered(manifest, None, true);
 
     let shown = if all {
         listed.len()
@@ -470,7 +519,7 @@ pub fn manifest(manifest: &Manifest, all: bool) {
             record.confidence,
             record.source_offset
         );
-        print!("  {}", crate::standing::of(record));
+        print!("  {}", crate::results::standing_of(record));
         if let (Some(width), Some(height)) = (record.width, record.height) {
             print!("  {width}x{height}");
         }
@@ -494,5 +543,290 @@ pub fn manifest(manifest: &Manifest, all: bool) {
              manifest records every one either way",
             listed.len() - shown
         );
+    }
+}
+
+/// Shortest interval between status-line redraws. Ten a second reads as live
+/// without the scan spending its time on terminal writes.
+const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Bytes in a mebibyte, for the rate display.
+const MIB: f64 = 1024.0 * 1024.0;
+
+/// `seconds` as a clock a reader takes in at a glance.
+///
+/// `2h00m`, `52m10s`, `9s`: the largest two units that carry information, so a
+/// budget and how much of it is gone can be compared without counting digits.
+fn clock(seconds: u64) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Renders scan events to stderr, leaving stdout for the result.
+///
+/// On a terminal this is one status line rewritten in place; when stderr is
+/// redirected it degrades to one line per stage transition, so a log file does
+/// not fill with carriage returns.
+#[derive(Debug)]
+pub struct Renderer {
+    line: Mutex<Line>,
+    interactive: bool,
+}
+
+#[derive(Debug)]
+struct Line {
+    started: Instant,
+    last_drawn: Option<Instant>,
+    /// Whether an unterminated status line is on screen.
+    pending: bool,
+    /// Artifacts stored so far, as the report stage last said.
+    stored: u64,
+}
+
+impl Renderer {
+    /// A renderer bound to stderr.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            line: Mutex::new(Line {
+                started: Instant::now(),
+                last_drawn: None,
+                pending: false,
+                stored: 0,
+            }),
+            interactive: std::io::stderr().is_terminal(),
+        }
+    }
+
+    /// Clears any status line still on screen.
+    pub fn finish(&self) {
+        let mut line = self.lock();
+        if line.pending {
+            eprintln!();
+            line.pending = false;
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Line> {
+        self.line
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Ends the status line so the next message starts on a clean row.
+    fn break_line(line: &mut Line) {
+        if line.pending {
+            eprintln!();
+            line.pending = false;
+        }
+    }
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProgressSink for Renderer {
+    fn emit(&self, event: ScanEvent) {
+        let mut line = self.lock();
+        match event {
+            ScanEvent::StageProgress {
+                stage,
+                unit,
+                done,
+                total,
+            } => {
+                if !self.interactive {
+                    return;
+                }
+                let now = Instant::now();
+                let due = line
+                    .last_drawn
+                    .is_none_or(|last| now.duration_since(last) >= REDRAW_INTERVAL);
+                if !due {
+                    return;
+                }
+                line.last_drawn = Some(now);
+                let elapsed = now
+                    .duration_since(line.started)
+                    .as_secs_f64()
+                    .max(f64::MIN_POSITIVE);
+                // Only from a unit that supports one. Reassembly's steps cost
+                // different amounts and the expensive ones are handed out
+                // first, so a percentage of them reports a run doing its
+                // heaviest work as barely started (`docs/defects/09`).
+                let percent = unit
+                    .supports_percentage()
+                    .then(|| done.saturating_mul(100).checked_div(total))
+                    .flatten();
+                let measure = match unit {
+                    // A read rate belongs to a stage that reads; a stage
+                    // counting candidates reports the count itself.
+                    Unit::Bytes => {
+                        #[expect(
+                            clippy::cast_precision_loss,
+                            reason = "a rate display does not need more than f64 precision"
+                        )]
+                        let rate = done as f64 / MIB / elapsed;
+                        format!("{rate:>7.1} MiB/s")
+                    }
+                    Unit::Items | Unit::Steps => format!("{done} of {total} {unit}"),
+                    // A budget reads as a clock, not as a count of seconds.
+                    Unit::Seconds => format!("{} of {}", clock(done), clock(total)),
+                };
+                match percent {
+                    Some(percent) => eprint!("\r  {stage:<10} {percent:>3}%   {measure}"),
+                    None => eprint!("\r  {stage:<10}         {measure}"),
+                }
+                let _ = std::io::stderr().flush();
+                line.pending = true;
+            }
+            ScanEvent::ArtifactStored { artifacts, bytes } => {
+                line.stored = artifacts;
+                if !self.interactive {
+                    return;
+                }
+                Renderer::break_line(&mut line);
+                eprint!("\r  recovered  {artifacts} artifacts, {bytes} bytes");
+                let _ = std::io::stderr().flush();
+                line.pending = true;
+            }
+            ScanEvent::StageFinished { stage, findings } => {
+                Renderer::break_line(&mut line);
+                eprintln!("  {stage:<10} done, {findings} findings");
+            }
+            ScanEvent::StateChanged { state } => {
+                if matches!(state, RunState::Paused | RunState::Cancelled) {
+                    Renderer::break_line(&mut line);
+                    eprintln!("  {state}");
+                }
+            }
+            ScanEvent::RegionUnreadable { range } => {
+                Renderer::break_line(&mut line);
+                eprintln!("  unreadable {range}");
+            }
+            // Named as it starts, so a stage that turns out to have nothing to
+            // report is still visibly the one running.
+            ScanEvent::StageStarted { stage, .. } => {
+                Renderer::break_line(&mut line);
+                eprint!("\r  {stage:<10} started");
+                let _ = std::io::stderr().flush();
+                line.pending = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A background reader that turns console keys into session control.
+#[derive(Debug)]
+pub struct Controls {
+    active: Arc<AtomicBool>,
+}
+
+impl Controls {
+    /// Stops acting on further input.
+    pub fn stop(&self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+/// Watches stdin for `q` and raises `stop` when it arrives.
+///
+/// An acquisition of a large medium runs for hours and has no stages to pause
+/// between, so it takes the one control that means something: stop. What was
+/// copied before the stop stays copied, and the report says how much of the
+/// medium was never reached.
+///
+/// The thread is detached for the same reason as [`spawn_console_controls`].
+#[must_use]
+pub fn spawn_stop_control(stop: Arc<AtomicBool>) -> Controls {
+    let active = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&active);
+    std::thread::spawn(move || {
+        let mut command = String::new();
+        loop {
+            command.clear();
+            match std::io::stdin().read_line(&mut command) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            if !flag.load(Ordering::Acquire) {
+                return;
+            }
+            if command.trim() == "q" {
+                stop.store(true, Ordering::Release);
+                return;
+            }
+        }
+    });
+    Controls { active }
+}
+
+/// Watches stdin for `p`, `r` and `q` and drives `session` accordingly.
+///
+/// `q` stops the search and lets the run write what it found; a second `q`,
+/// while it is writing, stops that too. So the reader keeps listening after the
+/// first one.
+///
+/// The thread is detached: it may be parked on a read from a console that
+/// never sends anything, and the process must still be able to exit.
+#[must_use]
+pub fn spawn_console_controls(session: ScanSession) -> Controls {
+    let active = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&active);
+    std::thread::spawn(move || {
+        let mut command = String::new();
+        loop {
+            command.clear();
+            match std::io::stdin().read_line(&mut command) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            if !flag.load(Ordering::Acquire) {
+                return;
+            }
+            match command.trim() {
+                "p" => session.pause(),
+                "r" => session.resume(),
+                "q" => session.cancel(),
+                _ => {}
+            }
+        }
+    });
+    Controls { active }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clock;
+
+    /// A budget and how much of it is gone are read side by side, so the two
+    /// must never be shown in different units or in a form that has to be
+    /// counted out. These are the boundaries where that could slip.
+    #[test]
+    fn a_clock_carries_the_largest_two_units_that_say_anything() {
+        assert_eq!(clock(0), "0s");
+        assert_eq!(clock(9), "9s");
+        assert_eq!(clock(59), "59s");
+        // A minute is the first thing worth naming, and the seconds beside it
+        // stay two digits so 1m05s does not read as 1m50s.
+        assert_eq!(clock(60), "1m00s");
+        assert_eq!(clock(65), "1m05s");
+        assert_eq!(clock(3599), "59m59s");
+        // Past an hour the seconds stop earning their place and the minutes
+        // take the same two digits for the same reason.
+        assert_eq!(clock(3600), "1h00m");
+        assert_eq!(clock(3661), "1h01m");
+        assert_eq!(clock(7200), "2h00m");
+        assert_eq!(clock(86_399), "23h59m");
     }
 }

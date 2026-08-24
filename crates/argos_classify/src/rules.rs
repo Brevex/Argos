@@ -36,7 +36,7 @@ use argos_core::classify::{Decision, PixelImage, TriageLabel, TriageScore};
 /// tolerates a decoder emitting a stray translucent edge without letting a
 /// mostly-transparent icon through. On the eval corpus every photograph
 /// measures 0% and every alpha-using asset measures far above 2%.
-pub const TRANSPARENT_ASSET_FRACTION: f32 = 0.02;
+pub(crate) const TRANSPARENT_ASSET_FRACTION: f32 = 0.02;
 
 /// Distinct-color ceiling under which a large image may be called an asset.
 ///
@@ -45,7 +45,7 @@ pub const TRANSPARENT_ASSET_FRACTION: f32 = 0.02;
 /// photograph's noise floor alone produces thousands of distinct colors.
 ///
 /// Never sufficient on its own — see [`PALETTE_LUMA_ASSET_MAX`].
-pub const PALETTE_ASSET_MAX: u32 = 256;
+pub(crate) const PALETTE_ASSET_MAX: u32 = 256;
 
 /// Distinct-luminance ceiling the palette rule additionally requires.
 ///
@@ -63,7 +63,7 @@ pub const PALETTE_ASSET_MAX: u32 = 256;
 /// side, because the two errors do not cost the same: labelling a photograph
 /// an asset pushes it down the ordering an examiner reads, while labelling an
 /// asset a photograph only leaves it in the pile.
-pub const PALETTE_LUMA_ASSET_MAX: u32 = 48;
+pub(crate) const PALETTE_LUMA_ASSET_MAX: u32 = 48;
 
 /// Pixels an image needs before the palette rule may fire.
 ///
@@ -71,7 +71,7 @@ pub const PALETTE_LUMA_ASSET_MAX: u32 = 48;
 /// 48x48 photo crop can both fit hundreds of colors — so the rule only speaks
 /// when the image is large enough that a photograph would be forced into
 /// thousands of distinct values.
-pub const PALETTE_RULE_MIN_PIXELS: u64 = 128 * 128;
+pub(crate) const PALETTE_RULE_MIN_PIXELS: u64 = 128 * 128;
 
 /// Fraction of horizontally byte-identical neighbour pixels above which an
 /// image is called an asset.
@@ -127,7 +127,7 @@ pub const PHOTOGRAPH_MAX_FLAT_RUN: f32 = 0.20;
 /// design uses a handful. Over the validation range the first percentile of
 /// photographs is 66 and the most varied asset measured 47. The threshold sits
 /// between them.
-pub const PHOTOGRAPH_MIN_LUMA: u32 = 56;
+pub(crate) const PHOTOGRAPH_MIN_LUMA: u32 = 56;
 
 /// Sample budget for the single statistics pass.
 ///

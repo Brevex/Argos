@@ -14,8 +14,8 @@ use std::io::{Read, Seek};
 
 use argos_core::geometry::ByteOffset;
 
+use crate::Bytes;
 use crate::exif;
-use crate::stream::Bytes;
 use crate::{CarveError, Scratch, Thumbnail, Verdict};
 
 /// Marker codes from ITU-T T.81, Table B.1. Only the codes the state machine

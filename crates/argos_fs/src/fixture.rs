@@ -355,7 +355,7 @@ pub fn ntfs_volume_with_attribute_list(len: usize, mft_offset: usize, file: &Fil
 /// A deleted-file record whose `$ATTRIBUTE_LIST` names `extensions` as holding
 /// the rest of its unnamed `$DATA`.
 #[must_use]
-pub fn ntfs_record_with_attribute_list(
+pub(crate) fn ntfs_record_with_attribute_list(
     name: &str,
     runs: &[u8],
     size: u64,
@@ -943,7 +943,7 @@ pub fn ext4_inode_with_extents(
 /// The index entries point at `leaf_blocks`, and [`ext4_extent_leaf`] builds
 /// what has to be written at each.
 #[must_use]
-pub fn ext4_inode_with_index(
+pub(crate) fn ext4_inode_with_index(
     mode: u16,
     links: u16,
     dtime: u32,
@@ -1110,7 +1110,7 @@ pub fn fat32_volume_with_subdirectory(len: usize, folder: &str, file: &FilePlan)
 
 /// A root-directory region naming one live subdirectory.
 #[must_use]
-pub fn fat_dir_subdirectory(name: &str, cluster: u32) -> Vec<u8> {
+pub(crate) fn fat_dir_subdirectory(name: &str, cluster: u32) -> Vec<u8> {
     let mut dir = vec![0_u8; FAT_CLUSTER];
     let short = name.to_ascii_uppercase();
     for (index, byte) in short.bytes().take(8).enumerate() {
@@ -1231,7 +1231,7 @@ pub fn exfat_boot_sector(len: usize, heap_sector: u32) -> Vec<u8> {
 
 /// An exFAT root directory with one deleted entry set.
 #[must_use]
-pub fn exfat_dir_deleted(name: &str, cluster: u32, size: u64) -> Vec<u8> {
+pub(crate) fn exfat_dir_deleted(name: &str, cluster: u32, size: u64) -> Vec<u8> {
     let mut dir = vec![0_u8; FAT_CLUSTER];
     let units: Vec<u16> = name.encode_utf16().collect();
     let name_entries = units.len().div_ceil(15).max(1);

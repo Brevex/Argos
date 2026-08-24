@@ -73,28 +73,7 @@ pub fn gallery(
     standing: Option<argos_classify::rank::Standing>,
     include_unwritten: bool,
 ) -> dto::Gallery {
-    let admits = |record: &&argos_report::ArtifactRecord| {
-        if !include_unwritten && !record.written {
-            return false;
-        }
-        let Some(floor) = standing else {
-            return true;
-        };
-        // A session written before standings existed carries none; the
-        // standing is derived from its own record rather than waived, so an
-        // older session filters exactly as a new one does.
-        crate::standing::of(record) >= floor
-    };
-
-    let mut chosen: Vec<&argos_report::ArtifactRecord> =
-        manifest.artifacts.iter().filter(admits).collect();
-    chosen.sort_by(|left, right| {
-        crate::standing::rank(right)
-            .cmp(&crate::standing::rank(left))
-            .then(crate::standing::long_side(right).cmp(&crate::standing::long_side(left)))
-            .then(right.length.cmp(&left.length))
-            .then(left.sha256.cmp(&right.sha256))
-    });
+    let chosen = crate::results::ordered(manifest, standing, include_unwritten);
 
     let total = u32::try_from(chosen.len()).unwrap_or(u32::MAX);
     let from = usize::try_from(offset)
@@ -128,7 +107,7 @@ fn artifact(record: &argos_report::ArtifactRecord) -> dto::Artifact {
         created_unix: record.created_unix,
         modified_unix: record.modified_unix,
         recovered_name: record.recovered_name.clone(),
-        standing: Some(crate::standing::of(record).to_string()),
+        standing: Some(crate::results::standing_of(record).to_string()),
         width: record.width,
         height: record.height,
         // Joined here rather than in the window: two fields that are one fact
@@ -223,7 +202,7 @@ fn extent(record: &argos_report::ExtentRecord) -> dto::Extent {
 }
 
 /// What an export produced.
-pub fn exported(exported: &crate::export::Exported) -> dto::Exported {
+pub fn exported(exported: &crate::results::Exported) -> dto::Exported {
     dto::Exported {
         copied: exported.copied.len() as u64,
         previews: exported.previews,

@@ -10,16 +10,35 @@
 //! Keeping one driver rather than two is what makes `A-CLI-FIRST` checkable:
 //! the UI cannot recover anything the CLI does not, because both reach the
 //! engine through this function.
+//!
+//! Beside the artifacts a run also writes `scan.log`: a scan of a large medium
+//! runs for hours in stages a person cannot see into, and a graphical launch
+//! has no console to fall back on, so the run keeps its own plain-text account
+//! in the session directory. It records the shape of the work and nothing about
+//! its content — stages, times, counts and ceilings, never a recovered byte, a
+//! recovered name or a path from the medium (`A-NO-CONTENT-IN-LOGS`).
+//!
+//! Reading a raw device needs administrator privileges, so a scan of one runs
+//! as root and everything it writes is created by root. Every way of becoming
+//! root leaves a trace of who asked; the run reads whichever is there and hands
+//! the output back to that account. Absent all of them the process was root to
+//! begin with and there is nobody to hand anything to.
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use argos_core::geometry::ByteOffset;
-use argos_core::progress::ProgressSink;
+use argos_core::progress::{ProgressSink, ScanEvent};
+use argos_engine::graft::JpegReference as Reference;
 use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession, Stages};
+use argos_report::Owner;
 
-use crate::{destination, source};
+use crate::medium;
 
 /// What the caller asked of one scan, beyond where to read and write.
 #[derive(Clone, Debug, Default)]
@@ -115,7 +134,7 @@ where
     P: ProgressSink + ?Sized,
     N: Notice + ?Sized,
 {
-    destination::refuse_writing_onto_source(source, out)?;
+    medium::refuse_writing_onto_source(source, out)?;
 
     let mut config = ScanConfig::builder()
         .stages(options.stages)
@@ -144,12 +163,12 @@ where
     }
     let config = config.build().context("invalid scan settings")?;
 
-    let opened = source::open(source, config.workers().get())
+    let opened = medium::open(source, config.workers().get())
         .with_context(|| format!("cannot open {} read-only", source.display()))?;
     let description = opened.describe();
     let medium = Medium::new(opened.views, opened.len).context("cannot read the source")?;
 
-    let owner = crate::invoker::owner();
+    let owner = owner();
     let mut store = argos_report::Store::create(out, owner)
         .with_context(|| format!("cannot prepare output directory {}", out.display()))?;
     // Said before the scan rather than after it: a person who learns at the
@@ -161,13 +180,13 @@ where
 
     // The run's own account, next to what it recovers. A scan that has to be
     // killed leaves nothing else behind to say where it was.
-    let log = crate::scanlog::ScanLog::create(out, owner)
+    let log = ScanLog::create(out, owner)
         .with_context(|| format!("cannot open the scan log in {}", out.display()))?;
     log.line(&format!(
         "source         {description}, {} workers",
         config.workers()
     ));
-    let progress = &crate::scanlog::Tee {
+    let progress = &Tee {
         inner: progress,
         log: &log,
     };
@@ -230,8 +249,8 @@ fn graft_after<N: Notice + ?Sized>(
     notice: &N,
 ) {
     let span = range.map_or(0..u64::MAX, |(start, end)| start..end.unwrap_or(u64::MAX));
-    let outcome = crate::graft::reference_from(reference)
-        .and_then(|reference| crate::graft::run(source, &out.join("grafted"), &reference, span));
+    let outcome = reference_from(reference)
+        .and_then(|reference| graft(source, &out.join("grafted"), &reference, span));
     match outcome {
         Ok((entered, written)) => notice.warning(&format!(
             "grafted {written} of {entered} headerless fragments into grafted/: pixels in a header this tool supplied, not files the medium held"
@@ -495,4 +514,255 @@ fn triage_record(report: &ScanReport, disabled: Option<&str>) -> argos_report::T
         unscored: report.triage_unscored,
         degraded: report.triage_degraded,
     }
+}
+
+/// Shortest interval between two progress lines for one stage.
+///
+/// A stage emits progress two hundred times; at one line each a long run is
+/// unreadable and a short one is noise. Five seconds is short enough that a
+/// stalled stage is obvious from the gaps and long enough that the file stays
+/// a page rather than a scroll.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The log of one run.
+pub struct ScanLog {
+    out: Mutex<BufWriter<File>>,
+    started: Instant,
+    /// When the last progress line was written, so they can be spaced.
+    last: Mutex<Option<Instant>>,
+}
+
+impl ScanLog {
+    /// Creates `scan.log` in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be created.
+    pub fn create(dir: &Path, owner: Option<Owner>) -> std::io::Result<Self> {
+        let path = dir.join("scan.log");
+        let file = File::create(&path)?;
+        if let Some(owner) = owner {
+            // The same handback the recovered files get: a log the person who
+            // ran the scan cannot open is not a log.
+            let _ = owner.give(&path);
+        }
+        let log = Self {
+            out: Mutex::new(BufWriter::new(file)),
+            started: Instant::now(),
+            last: Mutex::new(None),
+        };
+        log.line("scan started");
+        Ok(log)
+    }
+
+    /// Writes one line, stamped with how long the run has been going.
+    pub fn line(&self, text: &str) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let mut out = lock(&self.out);
+        let _ = writeln!(out, "[{elapsed:9.3}s] {text}");
+        // Flushed per line on purpose: the reason this file exists is to be
+        // readable while the run is still going, and most of all after a run
+        // that had to be killed.
+        let _ = out.flush();
+    }
+
+    /// Records the final counts, including every ceiling the run hit.
+    pub fn summary(&self, report: &argos_engine::ScanReport) {
+        self.line(&format!("state          {}", report.state));
+        self.line(&format!("swept          {} bytes", report.bytes_swept));
+        self.line(&format!(
+            "findings       {} artifacts, {} rejected, {} duplicates, {} unrecoverable",
+            report.artifacts, report.rejected_candidates, report.duplicates, report.unrecoverable
+        ));
+        self.line(&format!(
+            "reassembly     {} recovered of {} attempted",
+            report.reassembled, report.reassembly_attempted
+        ));
+        self.line(&format!(
+            "unreadable     {} regions, {} findings dropped for overlapping one",
+            report.unreadable.len(),
+            report.dropped_unreadable
+        ));
+        self.line(&format!(
+            "not written    {} under the size floor, {} partial prefixes reported, {} \
+             fragmented candidates skipped as too small",
+            report.omitted_assets, report.partial_prefixes, report.reassembly_skipped_small
+        ));
+        // The two figures that say whether the metadata of an earlier
+        // filesystem could be read at all. A residual anchor is the trace of a
+        // format that came before; an unattributed region is a run list that
+        // survived one and could not be resolved for want of the geometry it is
+        // counted against.
+        let residual = report
+            .volumes
+            .iter()
+            .filter(|volume| volume.origin == argos_engine::Origin::Residual)
+            .count();
+        self.line(&format!(
+            "volumes        {} located, {residual} left by earlier formats",
+            report.volumes.len()
+        ));
+        self.line(&format!(
+            "residue        {} orphaned metadata regions could not be tied to a volume",
+            report.unattributed_residue
+        ));
+        for name in report.ceilings.reached() {
+            self.line(&format!(
+                "ceiling        {name} reached; the run looked at less than it set out to"
+            ));
+        }
+        self.line("scan ended");
+    }
+}
+
+impl std::fmt::Debug for ScanLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanLog").finish_non_exhaustive()
+    }
+}
+
+/// A progress sink that writes to the log on the way to another sink.
+///
+/// The log has to see the same events the screen sees, and the screen must not
+/// wait for the disk, so this forwards first-class and writes at a distance:
+/// stage boundaries always, progress at most every few seconds.
+#[derive(Debug)]
+pub struct Tee<'a, P: ?Sized> {
+    /// Where the events were going.
+    pub inner: &'a P,
+    /// Where they are also recorded.
+    pub log: &'a ScanLog,
+}
+
+impl<P: ProgressSink + ?Sized> ProgressSink for Tee<'_, P> {
+    fn emit(&self, event: ScanEvent) {
+        self.record(event);
+        self.inner.emit(event);
+    }
+}
+
+impl<P: ?Sized> Tee<'_, P> {
+    /// Decides whether `event` is worth a line, and writes it if so.
+    fn record(&self, event: ScanEvent) {
+        match event {
+            ScanEvent::StageStarted { stage, unit, total } => {
+                *lock(&self.log.last) = None;
+                self.log.line(&format!("{stage:<10} began, {total} {unit}"));
+            }
+            ScanEvent::StageProgress {
+                stage,
+                unit,
+                done,
+                total,
+            } => {
+                let mut last = lock(&self.log.last);
+                let now = Instant::now();
+                if last.is_some_and(|at| now.duration_since(at) < PROGRESS_INTERVAL) {
+                    return;
+                }
+                *last = Some(now);
+                drop(last);
+                self.log
+                    .line(&format!("{stage:<10}  {done}/{total} {unit}"));
+            }
+            ScanEvent::StageFinished { stage, findings } => {
+                *lock(&self.log.last) = None;
+                self.log
+                    .line(&format!("{stage:<10} ended, {findings} findings"));
+            }
+            ScanEvent::StateChanged { state } => self.log.line(&format!("state {state}")),
+            // Everything else is per-artifact or per-region and belongs to the
+            // counts in the summary, not to a line each: a failing disk would
+            // otherwise write a log longer than the recovery.
+            _ => {}
+        }
+    }
+}
+
+/// Locks a mutex, ignoring poisoning: a panic in one line must not silence the
+/// log for the rest of the run.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Set by the Argos shell when it starts an engine on someone's behalf.
+const SHELL_UID: &str = "ARGOS_INVOKER_UID";
+/// Group counterpart of [`SHELL_UID`].
+const SHELL_GID: &str = "ARGOS_INVOKER_GID";
+
+/// The account to give recovered files to, if this process is acting for one.
+#[must_use]
+pub fn owner() -> Option<Owner> {
+    // In order of how much they know. The shell passes both parts; `sudo`
+    // publishes both; `pkexec` publishes only the user, and leaving the group
+    // alone is better than inventing one.
+    for (uid, gid) in [(SHELL_UID, Some(SHELL_GID)), ("SUDO_UID", Some("SUDO_GID"))] {
+        if let Some(uid) = read(uid) {
+            return Some(Owner::new(uid, gid.and_then(read)));
+        }
+    }
+    read("PKEXEC_UID").map(|uid| Owner::new(uid, None))
+}
+
+/// One environment variable as a user or group id.
+fn read(name: &str) -> Option<u32> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+/// Reads `path` as the header its lost siblings were written with.
+pub fn reference_from(path: &Path) -> anyhow::Result<Reference> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("cannot read the reference {}", path.display()))?;
+    Reference::read(&bytes)
+        .map_err(|error| anyhow::anyhow!("{} {error}", path.display()))
+        .context(
+            "a reference must be a whole baseline or extended sequential JPEG — one of the \
+             photographs this medium already gave back, from the same camera as what is missing",
+        )
+}
+
+/// Sweeps `range` of `src`, writing every graft that decoded into `out`.
+pub fn graft(
+    src: &Path,
+    out: &Path,
+    reference: &Reference,
+    range: std::ops::Range<u64>,
+) -> anyhow::Result<(usize, usize)> {
+    crate::medium::refuse_writing_onto_source(src, out)?;
+    std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
+
+    let mut opened = medium::open(src, 1)?;
+    for warning in &opened.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let end = range.end.min(opened.len);
+    let mut view = opened
+        .views
+        .pop()
+        .context("opening the medium yielded no view")?;
+
+    let mut written = 0_usize;
+    let mut failed = Ok(());
+    let entered = argos_engine::graft::sweep(&mut view, range.start..end, reference, |grafted| {
+        if failed.is_err() {
+            return;
+        }
+        let name = format!("grafted-{:016x}.jpg", grafted.at.get());
+        match std::fs::write(out.join(&name), &grafted.bytes) {
+            Ok(()) => {
+                written += 1;
+                println!(
+                    "  {name}  {}x{} entered at medium offset {}",
+                    grafted.dimensions.0,
+                    grafted.dimensions.1,
+                    grafted.at.get()
+                );
+            }
+            Err(error) => failed = Err(anyhow::anyhow!("cannot write {name}: {error}")),
+        }
+    });
+    failed?;
+    Ok((entered, written))
 }

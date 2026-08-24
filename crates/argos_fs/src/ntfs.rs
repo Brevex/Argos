@@ -19,8 +19,8 @@ use std::time::{Duration, SystemTime};
 use argos_core::Confidence;
 use argos_core::geometry::{ByteOffset, ByteRange};
 
-use crate::bytes::{read_at, u16_le, u32_le, u64_le, utf16le_name};
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
+use crate::{read_at, u16_le, u32_le, u64_le, utf16le_name};
 
 /// OEM id at byte 3 of an NTFS boot sector.
 const OEM_NTFS: &[u8; 8] = b"NTFS    ";
@@ -53,7 +53,7 @@ const ATTR_END: u32 = 0xFFFF_FFFF;
 
 /// MFT record size used when no boot sector is available (orphan scan).
 /// 1024 bytes is the NTFS default on every shipping cluster size.
-pub const DEFAULT_RECORD_SIZE: u32 = 1024;
+pub(crate) const DEFAULT_RECORD_SIZE: u32 = 1024;
 
 /// Caps on medium-derived counts, so crafted metadata cannot balloon a walk:
 /// attributes per record (record is ≤ 4 KiB), runs per run list, name chars.

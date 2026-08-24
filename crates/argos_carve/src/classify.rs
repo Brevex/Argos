@@ -30,10 +30,10 @@ pub const MIN_BLOCK_BYTES: usize = 256;
 /// Shannon entropy of 8-bit symbols runs 0..=8 bits. Compressed data measures
 /// ~7.9; natural text and structured records stay below ~6. The gap is wide,
 /// so 7.0 separates them without being sensitive to where exactly it sits.
-pub const HIGH_ENTROPY_BITS: f32 = 7.0;
+pub(crate) const HIGH_ENTROPY_BITS: f32 = 7.0;
 
 /// Entropy at or below which a block is treated as sparse or padding.
-pub const LOW_ENTROPY_BITS: f32 = 2.0;
+pub(crate) const LOW_ENTROPY_BITS: f32 = 2.0;
 
 /// Minimum `0xFF 0x00` stuffing occurrences per block before the JPEG-stream
 /// detector will claim a block.

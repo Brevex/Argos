@@ -34,7 +34,7 @@ pub struct ShadowCopy {
 }
 
 /// Prefix of a shadow copy's device path in the NT object namespace.
-pub const SHADOW_COPY_PREFIX: &str = r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy";
+pub(crate) const SHADOW_COPY_PREFIX: &str = r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy";
 
 /// The device path of shadow copy `index`.
 #[must_use]

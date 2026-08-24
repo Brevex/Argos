@@ -139,8 +139,8 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
     assert_eq!(json["artifacts"][0]["source_object"], 77);
     assert_eq!(json["scan_state"], "finished");
     // The run's reach, so a reader can tell a medium that held nothing from a
-    // run that stopped short of looking. Each of these was previously visible
-    // only on a console the window discards.
+    // run that stopped short of looking — from the manifest alone, rather than
+    // from a console the window discards.
     assert_eq!(json["coverage"]["omitted_assets"], 11);
     assert_eq!(json["coverage"]["dropped_unreadable"], 2);
     assert_eq!(json["coverage"]["unattributed_residue"], 5);

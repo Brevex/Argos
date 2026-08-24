@@ -10,8 +10,8 @@ use std::io::{Read, Seek};
 
 use argos_core::geometry::{ByteOffset, ByteRange};
 
-use crate::bytes::{read_at, u16_le, u32_le, u64_le};
 use crate::{FsError, FsKind};
+use crate::{read_at, u16_le, u32_le, u64_le};
 
 /// MBR boot signature at offset 510. Source: classic PC/AT layout.
 const MBR_BOOT_SIG: u16 = 0xAA55;

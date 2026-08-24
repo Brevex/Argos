@@ -4,8 +4,8 @@
 //! swallowed a region of the surface is one weakly evidenced finding spanning
 //! thousands of files the filesystem also named — and because its evidence is
 //! *weaker* than theirs, it can cover none of them. Every one of them is kept,
-//! which is correct, and used to mean every one of them was compared against
-//! every one kept before it.
+//! which is correct — and what makes the naive shape of this stage quadratic in
+//! findings that all survive.
 //!
 //! That is a silent stage between the sweep and the first recovered image, so
 //! nothing on screen moves while it runs. A test that only checked the result

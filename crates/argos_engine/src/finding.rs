@@ -1,7 +1,10 @@
 //! What the pipeline produces before it becomes an artifact.
 
+use std::cmp::Reverse;
+use std::collections::BTreeSet;
 use std::fmt;
 
+use argos_core::artifact::Digest;
 use argos_core::classify::ModelIdentity;
 use argos_core::geometry::{ByteOffset, ByteRange};
 use argos_core::progress::RunState;
@@ -279,7 +282,7 @@ pub struct ScanReport {
     /// of than photographs. It is a count of neighbours and nothing more: no
     /// artifact is removed, reclassified or ranked by it
     /// (A-CONFIDENCE-HONEST).
-    pub cache_runs: Vec<crate::cache_run::CacheRun>,
+    pub cache_runs: Vec<CacheRun>,
     /// Preview images rendered. Zero when previews were not requested.
     pub previews_written: u64,
     /// Artifacts whose preview could not be written. Each one is a thumbnail
@@ -295,5 +298,384 @@ impl ScanReport {
         self.state == RunState::Finished
             && self.unreadable.is_empty()
             && self.ceilings.reached().next().is_none()
+    }
+}
+
+/// Drops what cannot honestly be reported and orders what remains.
+///
+/// Two stages routinely find the same image: filesystem metadata names it and
+/// carving re-derives it from its signature. Merging keeps the strongest
+/// evidence for each set of bytes and never invents a stronger tier than the
+/// evidence that produced it (A-CONFIDENCE-HONEST). Content-hash deduplication
+/// happens later, at emit time, because it needs the bytes.
+///
+/// In order: findings with no bytes, findings whose bytes lie in a region the
+/// medium could not read, exact-extent duplicates (strongest tier wins), and
+/// findings entirely covered by another of at least equal tier. Embedded
+/// thumbnails survive coverage — a thumbnail always lies inside its parent and
+/// is a separate artifact.
+///
+/// Returns how many were dropped for touching an unreadable range. That one is
+/// counted and the others are not, because it is the only drop here that is
+/// about the *medium* rather than about the findings: the signature that
+/// started each of them was real, and a run that lost recoveries to damage must
+/// not read as one that found the medium empty (A-CONFIDENCE-HONEST).
+///
+/// The resulting order is a total order over the findings' own fields, so two
+/// runs over the same medium produce the same manifest.
+pub(crate) fn consolidate(findings: &mut Vec<Finding>, unreadable: &[ByteRange]) -> u64 {
+    let mut dropped_unreadable = 0_u64;
+    let mut truncated = Vec::new();
+    findings.retain_mut(|finding| {
+        if finding.extents.is_empty() || finding.length() == 0 {
+            return false;
+        }
+        if !unreadable.iter().any(|range| finding.intersects(*range)) {
+            return true;
+        }
+        // The bytes before the damage are still the medium's own, and they are
+        // still the start of this image. Damage is recorded at retry-span
+        // granularity, so a bad sector condemns a whole span around it and the
+        // photograph that reached into it loses everything — including the
+        // part that read cleanly.
+        dropped_unreadable += 1;
+        if let Some(head) = head_before_damage(finding, unreadable) {
+            truncated.push(head);
+        }
+        false
+    });
+    findings.append(&mut truncated);
+
+    findings.sort_by(|a, b| {
+        a.start()
+            .cmp(&b.start())
+            // Longest first, so a container is seen before what it contains.
+            .then(b.length().cmp(&a.length()))
+            // Strongest evidence first, so it is the one kept.
+            .then(b.confidence.cmp(&a.confidence))
+            .then(a.stage.cmp(&b.stage))
+            .then(a.format.cmp(&b.format))
+            .then(a.extents.cmp(&b.extents))
+    });
+
+    // Exact-extent duplicates: keep the strongest, but carry over the metadata
+    // the weaker one had and the stronger one lacks.
+    findings.dedup_by(|dropped, kept| {
+        if dropped.extents != kept.extents {
+            return false;
+        }
+        // A name and the object it was read from move together or not at all.
+        // Splicing one finding's name onto another's object would assert an
+        // association that exists nowhere on the medium (A-PROVENANCE).
+        if kept.name.is_none() && kept.source_object.is_none() {
+            kept.name = dropped.name.take();
+            kept.source_object = dropped.source_object;
+        } else if kept.name.is_none() && kept.source_object == dropped.source_object {
+            kept.name = dropped.name.take();
+        } else if kept.source_object.is_none() && dropped.name.is_none() {
+            kept.source_object = dropped.source_object;
+        }
+        if kept.timestamps.is_empty() && kept.source_object == dropped.source_object {
+            kept.timestamps = dropped.timestamps;
+        }
+        if kept.declared_size.is_none() && kept.source_object == dropped.source_object {
+            kept.declared_size = dropped.declared_size;
+        }
+        if kept.parent.is_none() && dropped.parent.is_some() {
+            kept.parent = dropped.parent;
+            // Being an embedded thumbnail is a fact about what these bytes
+            // *are*, and it outranks how they were found: a thumbnail that
+            // also carves cleanly on its own is still a thumbnail. Metadata
+            // evidence is never overridden this way — only carving is.
+            if kept.stage == Stage::Carve {
+                kept.confidence = kept.confidence.min(dropped.confidence);
+            }
+        }
+        true
+    });
+
+    let mut kept: Vec<Finding> = Vec::with_capacity(findings.len());
+    // Indices into `kept`, ordered by the byte each one reaches, furthest
+    // first.
+    //
+    // A container has to reach at least as far as what it contains, so a
+    // search can stop at the first candidate that does not reach far enough.
+    // Without that order the search is against everything kept so far, and
+    // there is a shape of medium that makes that quadratic: one weakly
+    // evidenced carve spanning thousands of files the filesystem also named.
+    // It cannot cover any of them — its evidence is weaker — so every one of
+    // them is kept, and every one of them is then compared against every one
+    // before it. That is a real disk, not a contrived one, and it costs hours
+    // in a stage that says nothing while it runs.
+    let mut by_reach: BTreeSet<(Reverse<u64>, usize)> = BTreeSet::new();
+    let mut furthest_end = 0_u64;
+    for finding in findings.drain(..) {
+        let end = finding
+            .extents
+            .iter()
+            .map(|extent| extent.end_saturating().get())
+            .max()
+            .unwrap_or(0);
+        // Reaching past everything kept so far cannot be covered by it: the
+        // common case, and the cheapest possible answer.
+        let covered = end <= furthest_end
+            && finding.parent.is_none()
+            && by_reach
+                .iter()
+                .take_while(|(Reverse(reach), _)| *reach >= end)
+                .any(|&(_, index)| {
+                    let container = &kept[index];
+                    container.confidence >= finding.confidence
+                        && container.extents != finding.extents
+                        && finding.is_covered_by(container)
+                });
+        if !covered {
+            furthest_end = furthest_end.max(end);
+            by_reach.insert((Reverse(end), kept.len()));
+            kept.push(finding);
+        }
+    }
+    *findings = kept;
+    dropped_unreadable
+}
+
+/// The part of `finding` that lies before the first damage it meets.
+///
+/// Damage is recorded at the granularity a failed read is retried at, so one
+/// bad sector condemns a whole span around it. A photograph reaching into that
+/// span still has extents that read cleanly and are, byte for byte, the start
+/// of the picture.
+///
+/// So the head is kept and the rest is not. What comes back is the medium's
+/// own bytes up to the damage, at the weakest tier and with the length the
+/// metadata expected recorded beside it, exactly as a decoder-truncated
+/// recovery is. Nothing is padded and no zero is ever presented as data
+/// (`A-CONFIDENCE-HONEST`).
+///
+/// `None` when the damage starts at or before the first extent: there is no
+/// head, only a finding whose bytes are unknown.
+fn head_before_damage(finding: &Finding, unreadable: &[ByteRange]) -> Option<Finding> {
+    let first_damage = unreadable
+        .iter()
+        .filter(|range| finding.intersects(**range))
+        .map(|range| range.start.get())
+        .min()?;
+
+    let mut extents = Vec::new();
+    for extent in &finding.extents {
+        let start = extent.start.get();
+        if start >= first_damage {
+            break;
+        }
+        let len = extent.len.min(first_damage.saturating_sub(start));
+        if len == 0 {
+            break;
+        }
+        extents.push(ByteRange::new(extent.start, len));
+        // A later extent may sit before the damage on the medium while a
+        // earlier one already reached it; stopping here keeps the head a
+        // prefix of the *file* rather than of the disk.
+        if len < extent.len {
+            break;
+        }
+    }
+    if extents.is_empty() {
+        return None;
+    }
+
+    Some(Finding {
+        format: finding.format,
+        stage: finding.stage,
+        // Never above the weakest tier: what this describes is a file that
+        // stops, and how it was found does not change that.
+        confidence: argos_core::Confidence::PartialOrThumbnail,
+        extents: extents.into_boxed_slice(),
+        // What the file was supposed to be, so the shortfall is stated rather
+        // than the head presented as whole.
+        declared_size: finding.declared_size.or_else(|| Some(finding.length())),
+        timestamps: finding.timestamps,
+        deleted: finding.deleted,
+        name: finding.name.clone(),
+        source_object: finding.source_object,
+        parent: finding.parent,
+    })
+}
+
+/// Artifacts that must share dimensions in a row before the run is a cache.
+///
+/// Two pictures of one size are a coincidence and three are a set; a cache
+/// holds hundreds. The threshold sits low enough to catch a small one and high
+/// enough that a burst of photographs from one camera — which vary in
+/// orientation, and whose sizes therefore alternate — never reaches it.
+const MIN_RUN: usize = 8;
+
+/// How far apart two entries of one cache may sit and still be one run.
+///
+/// Entries of a cache file are consecutive; the slack is for the records
+/// between them and for entries a scan could not recover.
+const MAX_GAP_BYTES: u64 = 4 * 1024 * 1024;
+
+/// One artifact, as this pass needs to see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Entry {
+    /// Where the artifact starts on the medium.
+    pub offset: u64,
+    /// Its decoded dimensions, when it decoded.
+    pub pixels: Option<(u32, u32)>,
+    /// Content hash, which is how the manifest is told about it.
+    pub sha256: Digest,
+}
+
+/// One artifact found among same-sized neighbours, and how many there were.
+///
+/// A desktop or a phone keeps previews of every picture it has shown, in one
+/// file, written once. That file survives long after the photographs it
+/// describes are overwritten, so a recovery of a used disk turns up far more
+/// cache entries than photographs — and each one looks, on its own, exactly
+/// like a small photograph, because that is what it is a copy of.
+///
+/// What gives a cache away is not any one entry but the run: a cache writes
+/// one size, so its entries share dimensions to the pixel and sit next to each
+/// other. Measured on a 1 TB disk of ten years' use, 51 of 60 artifacts within
+/// four megabytes of one offset were exactly 256x192.
+///
+/// Naming it is what stops the report from presenting a preview of a lost
+/// photograph as the photograph (`A-CONFIDENCE-HONEST`). Nothing here removes
+/// or reclassifies anything: it counts neighbours and says how many.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheRun {
+    /// Content hash of the artifact, which is how a manifest is told.
+    pub sha256: Digest,
+    /// How many artifacts of identical dimensions the run held, this one
+    /// included. A large number is a thumbnail cache; there is no size at
+    /// which it becomes a verdict about any single picture.
+    pub neighbours: u32,
+}
+
+/// Every artifact that belongs to a run of same-sized neighbours, with the
+/// size of the run it belongs to.
+///
+/// `entries` are expected in medium order, which is the order the report stage
+/// produces them in.
+pub(crate) fn runs(entries: &[Entry]) -> Vec<CacheRun> {
+    let mut found = Vec::new();
+    let mut start = 0;
+    while start < entries.len() {
+        let Some(pixels) = entries[start].pixels else {
+            start += 1;
+            continue;
+        };
+        let mut end = start + 1;
+        while end < entries.len()
+            && entries[end].pixels == Some(pixels)
+            && entries[end].offset.saturating_sub(entries[end - 1].offset) <= MAX_GAP_BYTES
+        {
+            end += 1;
+        }
+        let length = end - start;
+        if length >= MIN_RUN {
+            let size = u32::try_from(length).unwrap_or(u32::MAX);
+            found.extend(entries[start..end].iter().map(|entry| CacheRun {
+                sha256: entry.sha256,
+                neighbours: size,
+            }));
+        }
+        start = end;
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Entry, MIN_RUN, runs};
+    use argos_core::artifact::Digest;
+
+    fn entry(offset: u64, pixels: Option<(u32, u32)>, tag: u64) -> Entry {
+        Entry {
+            offset,
+            pixels,
+            sha256: Digest::new([u8::try_from(tag % 256).unwrap_or(0); Digest::LEN]),
+        }
+    }
+
+    #[test]
+    fn a_run_of_identical_sizes_is_named_with_its_length() {
+        // The shape measured on a real disk: a stretch of one size, packed.
+        let entries: Vec<_> = (0..40)
+            .map(|index| entry(1_000_000 + index * 8_000, Some((256, 192)), index))
+            .collect();
+        let found = runs(&entries);
+        assert_eq!(found.len(), 40, "every entry of the run is named");
+        assert!(found.iter().all(|run| run.neighbours == 40));
+    }
+
+    #[test]
+    fn a_handful_of_one_size_is_not_a_cache() {
+        let entries: Vec<_> = (0..MIN_RUN as u64 - 1)
+            .map(|index| entry(index * 5_000, Some((640, 480)), index))
+            .collect();
+        assert!(
+            runs(&entries).is_empty(),
+            "a few photographs of one size are a coincidence, not a cache"
+        );
+    }
+
+    #[test]
+    fn photographs_between_two_caches_are_left_alone() {
+        let mut entries: Vec<_> = (0..12)
+            .map(|index| entry(index * 4_000, Some((258, 258)), index))
+            .collect();
+        entries.push(entry(60_000, Some((4128, 3096)), 200));
+        entries.extend(
+            (0..10).map(|index| entry(80_000 + index * 4_000, Some((258, 258)), 100 + index)),
+        );
+
+        let found = runs(&entries);
+        let named: Vec<_> = found.iter().map(|run| run.sha256).collect();
+        assert_eq!(
+            found.len(),
+            22,
+            "both runs are named, the photograph is not"
+        );
+        assert!(
+            !named.contains(&Digest::new([200; Digest::LEN])),
+            "the camera frame between two caches is not part of either"
+        );
+    }
+
+    #[test]
+    fn a_distant_neighbour_starts_a_new_run() {
+        let mut entries: Vec<_> = (0..10)
+            .map(|index| entry(index * 1_000, Some((96, 96)), index))
+            .collect();
+        // Far enough away to be another file entirely.
+        entries.extend((0..3).map(|index| {
+            entry(
+                500 * 1024 * 1024 + index * 1_000,
+                Some((96, 96)),
+                50 + index,
+            )
+        }));
+        let found = runs(&entries);
+        assert_eq!(
+            found.len(),
+            10,
+            "the three on their own are not a run: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_artifact_that_did_not_decode_belongs_to_no_run() {
+        let mut entries: Vec<_> = (0..10)
+            .map(|index| entry(index * 1_000, Some((64, 64)), index))
+            .collect();
+        entries.insert(5, entry(4_500, None, 99));
+        let found = runs(&entries);
+        assert!(
+            !found
+                .iter()
+                .any(|run| run.sha256 == Digest::new([99; Digest::LEN])),
+            "a size nobody measured cannot match a size"
+        );
     }
 }

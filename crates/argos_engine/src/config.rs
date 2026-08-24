@@ -12,7 +12,7 @@ use argos_core::geometry::{ByteOffset, ByteRange};
 
 /// Bytes carried between consecutive chunks so a structure straddling the
 /// boundary is still found whole: the larger of what the two detectors need.
-pub const CHUNK_OVERLAP_BYTES: usize =
+pub(crate) const CHUNK_OVERLAP_BYTES: usize =
     if argos_fs::residue::WINDOW_OVERLAP_BYTES > argos_carve::SIGNATURE_OVERLAP_BYTES {
         argos_fs::residue::WINDOW_OVERLAP_BYTES
     } else {
@@ -24,7 +24,7 @@ pub const CHUNK_OVERLAP_BYTES: usize =
 /// 8 MiB keeps the reader in large sequential requests — the throughput driver
 /// on rotational media — while bounding both the memory a queued chunk costs
 /// and the cancellation latency, which is one chunk.
-pub const DEFAULT_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const DEFAULT_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Smallest chunk a scan may use. A chunk must exceed the overlap by a wide
 /// margin, or the sweep re-reads more than it advances.
@@ -194,7 +194,7 @@ impl ScanConfig {
     /// One per worker plus one in reserve, capped so the buffers in flight
     /// never exceed [`MAX_INFLIGHT_BYTES`].
     #[must_use]
-    pub fn queue_depth(&self) -> usize {
+    pub(crate) fn queue_depth(&self) -> usize {
         let affordable = MAX_INFLIGHT_BYTES / self.chunk_bytes.max(1);
         self.workers
             .get()
@@ -221,7 +221,7 @@ impl ScanConfig {
     /// The byte range of a medium of `medium_len` bytes this scan covers,
     /// clamped to the medium.
     #[must_use]
-    pub fn range_within(&self, medium_len: u64) -> ByteRange {
+    pub(crate) fn range_within(&self, medium_len: u64) -> ByteRange {
         let start = self.start.min(medium_len);
         let end = self.end.unwrap_or(medium_len).min(medium_len).max(start);
         ByteRange::new(ByteOffset::new(start), end.saturating_sub(start))

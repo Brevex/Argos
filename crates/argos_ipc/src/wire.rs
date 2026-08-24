@@ -303,16 +303,6 @@ pub enum Notification {
     Finished(Box<dto::Summary>),
 }
 
-/// One message on the wire, in either direction.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum Message {
-    /// An answer to a request.
-    Response(Box<Response>),
-    /// An unsolicited engine message.
-    Notification(Box<Notification>),
-}
-
 /// Serializes `value` as one line, newline included.
 ///
 /// # Errors
@@ -327,7 +317,7 @@ pub fn line<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Call, ErrorCode, Message, Notification, Reply, Request, Response, line};
+    use super::{Call, ErrorCode, Reply, Request, Response, line};
     use crate::dto;
 
     #[test]
@@ -359,33 +349,6 @@ mod tests {
         let text = r#"{"jsonrpc":"2.0","id":1,"method":"scan.teleport","params":{}}"#;
         serde_json::from_str::<Request>(text)
             .expect_err("an unknown method must not parse into a call");
-    }
-
-    #[test]
-    fn a_response_and_a_notification_are_told_apart_on_one_stream() {
-        // Both directions share the child's stdout, so a client must be able
-        // to classify a line without knowing what it asked for.
-        let answer = line(&Response::ok(
-            Some(1),
-            Reply::Hello(dto::Hello {
-                schema: crate::SCHEMA_VERSION,
-                tool_version: "0.1.0".to_owned(),
-            }),
-        ))
-        .expect("serialize");
-        let event = line(&Notification::State(dto::State {
-            state: "running".to_owned(),
-        }))
-        .expect("serialize");
-
-        assert!(matches!(
-            serde_json::from_str::<Message>(&answer).expect("parse"),
-            Message::Response(_)
-        ));
-        assert!(matches!(
-            serde_json::from_str::<Message>(&event).expect("parse"),
-            Message::Notification(_)
-        ));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! question from the same decoded pixels.
 
 use argos_classify::fixture::{Slice, sample};
-use argos_classify::{Triage, phash, rules};
+use argos_classify::{Triage, rules};
 use argos_core::classify::PixelImage;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -46,7 +46,7 @@ fn perceptual_hash(c: &mut Criterion) {
     let mut group = c.benchmark_group("phash");
     group.throughput(criterion::Throughput::Elements(image.pixel_count()));
     group.bench_function("perceptual_hash", |b| {
-        b.iter(|| black_box(phash::perceptual_hash(black_box(&image))));
+        b.iter(|| black_box(argos_classify::perceptual_hash(black_box(&image))));
     });
     group.finish();
 }

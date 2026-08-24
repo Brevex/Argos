@@ -12,24 +12,28 @@
 //! **Stdout is the protocol.** Nothing in this module or anything it calls may
 //! print; the scan driver was separated from the console output for exactly
 //! this reason. Diagnostics, if any, go to stderr.
+//!
+//! In this mode every byte on stdout is a JSON-RPC message, so [`Wire`] is the
+//! only thing allowed to write there and `println!` is a bug anywhere in the
+//! serve path. Its lock exists because a running scan emits progress from the
+//! pipeline's threads while the dispatch loop answers calls on its own.
 
 mod pace;
 mod trace;
 mod translate;
-mod wire;
 
-use std::io::BufRead;
+use std::io::{BufRead, BufWriter, Stdout, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use argos_core::progress::{ProgressSink, ScanEvent};
 use argos_ipc::wire::{Call, Done, ErrorCode, Notification, Reply, Request, Response};
-use argos_ipc::{SCHEMA_VERSION, dto};
+use argos_ipc::{SCHEMA_VERSION, dto, wire};
 use argos_report::Manifest;
+use serde::Serialize;
 
 use crate::scan;
-use wire::Wire;
 
 /// Just enough of a request to answer it when the rest does not parse.
 #[derive(serde::Deserialize)]
@@ -203,16 +207,16 @@ impl Engine {
                 standing,
             } => {
                 let standing = Self::parse_standing(standing.as_deref())?;
-                crate::export::run(
+                crate::results::run(
                     session.as_ref(),
                     to.as_ref(),
                     // The remaining criteria — a pixel floor, a camera, a date
                     // range — stay on the command line: they are queries a
                     // person writes, and no client asks for them yet.
-                    &crate::export::Filter {
+                    &crate::results::Filter {
                         hashes,
                         standing,
-                        ..crate::export::Filter::default()
+                        ..crate::results::Filter::default()
                     },
                 )
                 .map(|exported| Reply::Exported(translate::exported(&exported)))
@@ -668,5 +672,50 @@ impl scan::Notice for Notices {
         self.out.send(&Notification::Warning(dto::Warning {
             text: text.to_owned(),
         }));
+    }
+}
+
+/// The outbound half of a connection.
+#[derive(Debug)]
+pub struct Wire {
+    out: Mutex<BufWriter<Stdout>>,
+}
+
+impl Wire {
+    /// Wraps this process' stdout.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            out: Mutex::new(BufWriter::new(std::io::stdout())),
+        }
+    }
+
+    /// Writes one message and flushes it.
+    ///
+    /// Flushed per message because the client is waiting on it: a progress
+    /// event still sitting in a buffer is a user interface that has stopped
+    /// moving. Events are emitted per chunk of work, never per candidate, so
+    /// this is not a hot path (`M-LOG-OVERHEAD`).
+    ///
+    /// Failures are dropped on purpose. A broken pipe means the client is
+    /// gone, and the dispatch loop learns that from end-of-input on stdin a
+    /// moment later; there is nowhere to report a write failure to when the
+    /// thing being written to is the report channel.
+    pub fn send<T: Serialize>(&self, message: &T) {
+        let Ok(text) = wire::line(message) else {
+            return;
+        };
+        let mut out = self
+            .out
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+    }
+}
+
+impl Default for Wire {
+    fn default() -> Self {
+        Self::new()
     }
 }

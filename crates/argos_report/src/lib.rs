@@ -19,16 +19,17 @@ use std::path::{Path, PathBuf};
 
 use argos_core::artifact::{Artifact, ArtifactSink, Digest};
 use argos_core::classify::PixelImage;
-use serde::{Deserialize, Serialize};
+
 use sha2::{Digest as _, Sha256};
 
-mod handback;
-mod preview;
+mod manifest;
 
-pub use handback::{Handback, Owner};
+use manifest::MANIFEST_FILE;
 
-/// Name of the manifest file inside the output directory.
-const MANIFEST_FILE: &str = "manifest.json";
+pub use manifest::{
+    ArtifactRecord, CoverageRecord, ExtentRecord, FragmentRecord, LostFileRecord, Manifest,
+    TriageAnnotation, TriageRecord, VolumeRecord,
+};
 
 /// Subdirectory of the output holding preview images.
 ///
@@ -41,438 +42,6 @@ pub const PREVIEW_DIR: &str = "previews";
 /// Bytes copied per streaming step while hashing and writing an artifact.
 /// 64 KiB balances syscall count against buffer size.
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
-
-/// The scan manifest: tool identity, source description and every artifact.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Manifest {
-    /// Version of the tool that produced this manifest.
-    pub tool_version: String,
-    /// User-supplied description of the scanned source (path or label).
-    pub source: String,
-    /// How the run ended: `finished`, `cancelled`, or `failed`. A manifest is
-    /// written for every outcome, so artifacts already on disk are never left
-    /// unattributed (A-PROVENANCE).
-    pub scan_state: String,
-    /// Signature hits that failed validation and were not recovered.
-    pub rejected_candidates: u64,
-    /// Byte ranges the medium could not read; their contents are unknown and
-    /// were never fabricated.
-    pub unreadable: Vec<ExtentRecord>,
-    /// How triage ran over this scan, when the caller reported it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triage: Option<TriageRecord>,
-    /// What the run reached and what it left behind, when the caller reported
-    /// it. This is what separates "the medium held nothing more" from "the run
-    /// did not look" (A-CONFIDENCE-HONEST).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<CoverageRecord>,
-    /// Volumes the run located, current and residual.
-    ///
-    /// A medium re-formatted more than once carries the anchors of the
-    /// filesystems that came before, and which of them were found is what
-    /// decides whether their metadata could be read at all.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub volumes: Vec<VolumeRecord>,
-    /// One record per fragmentation point carving localized.
-    ///
-    /// Where the search can be picked up without sweeping the medium again.
-    /// Locating these is what a scan's expensive stages produce; searching from
-    /// them is minutes where the scan was hours, which is what lets a search be
-    /// run again with a longer budget or a lower floor.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fragmentation: Vec<FragmentRecord>,
-    /// Files a surviving metadata record names, whose content the run could
-    /// not place.
-    ///
-    /// Held apart from `artifacts` and never counted among them: nothing here
-    /// was read from the medium and no extent is claimed. A re-format destroys
-    /// the boot sector that says where a volume began, and without it a run
-    /// list — which counts clusters of that volume — locates nothing. The
-    /// record's own name, size and times survive it, and they are the only
-    /// evidence left that a particular file was ever there
-    /// (`A-CONFIDENCE-HONEST`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lost_files: Vec<LostFileRecord>,
-    /// One record per recovered artifact.
-    pub artifacts: Vec<ArtifactRecord>,
-}
-
-/// What a run reached, and what it stopped short of.
-///
-/// Every field here is a count the run already keeps; recording them is what
-/// makes the difference between a recovery that failed and one that was never
-/// attempted answerable after the fact, from the manifest alone. Without them
-/// the only account of a scan's own reach is its console output, which a
-/// window discards.
-///
-/// Plain numbers rather than the engine's own vocabulary, like every other
-/// record here: this crate writes the manifest and depends on nothing that
-/// recovers.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CoverageRecord {
-    /// Bytes of the medium the sweep covered.
-    pub bytes_swept: u64,
-    /// Findings dropped because an identical content hash was already stored.
-    pub duplicates: u64,
-    /// Findings whose claimed bytes could not be read back, so they were
-    /// dropped rather than reported from whatever was there.
-    pub unrecoverable: u64,
-    /// Findings dropped because their bytes lie in a range the medium refused.
-    ///
-    /// Their content is unknown and nothing was fabricated for it, but the
-    /// signature that started them was real: a high count here means damage
-    /// cost recoveries, not that the medium held nothing.
-    pub dropped_unreadable: u64,
-    /// Artifacts recognised, recorded and deliberately not written because
-    /// they fell under the run's size floor. Each is in `artifacts` with its
-    /// extents and dimensions, so a rerun with a lower floor produces them.
-    pub omitted_assets: u64,
-    /// Images reported as the part of themselves that decodes.
-    pub partial_prefixes: u64,
-    /// Broken candidates reassembly was offered.
-    pub reassembly_attempted: u64,
-    /// Images recovered by reassembling fragments.
-    pub reassembled: u64,
-    /// Broken candidates the search left alone because the frame declares a
-    /// picture below the size floor. Not lost — a run with a lower floor
-    /// searches them.
-    pub reassembly_skipped_small: u64,
-    /// Deletion events read from the volumes' change journals.
-    ///
-    /// Names and moments, never extents. A run of artifacts sharing one
-    /// `deleted_unix` is a batch deletion — files removed in one action, which
-    /// nothing else on an NTFS volume records.
-    pub journal_deletions: u64,
-    /// Residual `FILE`-record regions that could not be attributed to a
-    /// located volume, so their extents could not be resolved.
-    ///
-    /// These are run lists — the exact map of a deleted file's fragments —
-    /// that survived a re-format and could not be read for want of the volume
-    /// geometry they are counted against. They are counted, never guessed at.
-    pub unattributed_residue: u64,
-    /// Ceilings the run reached, named. Each means it looked at less than it
-    /// set out to.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ceilings: Vec<String>,
-}
-
-/// One filesystem volume a run located.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VolumeRecord {
-    /// Filesystem family detected at the anchor, as its canonical name.
-    pub kind: String,
-    /// `current` when the partition table lists it, `residual` when only the
-    /// residue sweep found it — the anchor of a filesystem an earlier format
-    /// left behind.
-    pub origin: String,
-    /// Where the volume starts on the medium.
-    pub offset: u64,
-    /// Length the anchor claims, capped at the medium.
-    pub length: u64,
-    /// Bytes in the unit this filesystem allocates in. Zero when the anchor
-    /// did not state a usable one.
-    pub allocation_bytes: u64,
-}
-
-/// One image that started decoding on the medium and stopped.
-///
-/// Plain numbers rather than the engine's own vocabulary: this crate is what
-/// writes the manifest and depends on nothing that recovers.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FragmentRecord {
-    /// Where the image starts on the medium.
-    pub offset: u64,
-    /// Where the stream stopped being this image.
-    pub break_at: u64,
-    /// First byte past the last part of the picture that decoded whole.
-    pub decoded_end: u64,
-    /// Image format, as its canonical display name.
-    pub format: String,
-    /// Pixel width the frame header declares, when it declares one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_width: Option<u32>,
-    /// Pixel height the frame header declares.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_height: Option<u32>,
-    /// Units of the picture that decoded, and how many it needs.
-    pub decoded: u32,
-    /// Units the whole picture requires.
-    pub required: u32,
-}
-
-/// A file a surviving metadata record still names, and nothing more.
-///
-/// Deliberately without an extents field: there is no honest value for one.
-/// What is here is what a `FILE` record states about itself, none of which
-/// needs the volume's geometry — plus the run list in the volume's own units,
-/// which is what lets a later run test a candidate geometry against it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LostFileRecord {
-    /// Name the record carries, when one survived.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Content length in bytes the record claims.
-    pub size: u64,
-    /// Where the record itself lay — where the lost `$MFT` was.
-    pub record_at: u64,
-    /// Creation time, as Unix seconds, when the record carried one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_unix: Option<i64>,
-    /// Last modification time, as Unix seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modified_unix: Option<i64>,
-    /// First logical cluster of the content, in the lost volume's units.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_cluster: Option<u64>,
-    /// Clusters the run list accounts for, in the lost volume's units.
-    ///
-    /// With `size`, this is a test of any candidate cluster size: the right
-    /// one is the one whose clusters account for the size stated.
-    pub clusters: u64,
-}
-
-impl Manifest {
-    /// Reads the manifest of the session directory `dir`.
-    ///
-    /// This is how anything other than the scan that produced it learns what a
-    /// session recovered — the export command, the report command, and the
-    /// engine's IPC surface all read it rather than keeping a second account
-    /// of the same facts.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the manifest is missing, unreadable, or not the JSON this
-    /// tool writes.
-    pub fn read(dir: impl AsRef<Path>) -> Result<Self, ReportError> {
-        let path = dir.as_ref().join(MANIFEST_FILE);
-        let bytes = fs::read(&path).map_err(|source| ReportError::new(&path, source))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|source| ReportError::new(&path, io::Error::other(source)))
-    }
-
-    /// Writes this manifest into the directory `dir`, returning its path.
-    ///
-    /// Used where a manifest is assembled from records rather than from a
-    /// scan — an export describing exactly the artifacts that landed in its
-    /// destination, for instance. The format is the one [`Store::finish`]
-    /// writes, because there is only one.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the manifest cannot be serialized or written.
-    pub fn write(&self, dir: impl AsRef<Path>) -> Result<PathBuf, ReportError> {
-        let path = dir.as_ref().join(MANIFEST_FILE);
-        let json = serde_json::to_vec_pretty(self)
-            .map_err(|source| ReportError::new(&path, io::Error::other(source)))?;
-        fs::write(&path, json).map_err(|source| ReportError::new(&path, source))?;
-        Ok(path)
-    }
-}
-
-/// How ML triage ran over a scan.
-///
-/// Recorded whatever happened: a disabled triage is stated with its reason,
-/// never silently absent, so the absence of scores is attributable
-/// (A-MODEL-PINNED).
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct TriageRecord {
-    /// `scored` when triage ran, `disabled` when it did not.
-    pub status: String,
-    /// Why triage did not run, when it did not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disabled_reason: Option<String>,
-    /// Version of the decision procedure that labelled the scan, which is what
-    /// makes a label reproducible (A-MODEL-PINNED).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_version: Option<String>,
-    /// Artifacts that received a score.
-    pub scored: u64,
-    /// Artifacts triage saw but could not score.
-    pub unscored: u64,
-    /// Whether the classifier failed mid-run, leaving artifacts unscored that
-    /// a healthy one would have scored.
-    pub degraded: bool,
-}
-
-/// Triage annotation for one stored artifact, matched by content hash.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TriageAnnotation {
-    /// SHA-256 (lowercase hex) of the artifact the annotation belongs to.
-    pub sha256: String,
-    /// Perceptual hash of the decoded image, as 16 hex digits.
-    pub perceptual_hash: Option<String>,
-    /// SHA-256 of the artifact this one is a near-duplicate of.
-    pub near_duplicate_of: Option<String>,
-    /// Triage label.
-    pub label: Option<String>,
-    /// The property that settled the label.
-    pub decided_by: Option<String>,
-}
-
-/// One contiguous source range, as recorded in the manifest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ExtentRecord {
-    /// Absolute byte offset of the range's first byte in the source.
-    pub offset: u64,
-    /// Range length in bytes.
-    pub length: u64,
-}
-
-/// Provenance record of one recovered artifact.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct ArtifactRecord {
-    /// File name of the artifact inside the output directory, when its bytes
-    /// were stored.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Recovery stage that produced the artifact.
-    pub stage: String,
-    /// Image format the artifact validated as.
-    pub format: String,
-    /// Absolute byte offset of the artifact's first byte in the source.
-    pub source_offset: u64,
-    /// Artifact length in bytes: what was actually recovered and stored.
-    pub length: u64,
-    /// Width of the decoded picture, in pixels, when it decoded.
-    ///
-    /// The property that separates a photograph from the derived images a
-    /// used medium is full of, and the one a byte count cannot stand in for.
-    /// Absent means the artifact did not decode here — a statement about the
-    /// decoder, not about the bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<u32>,
-    /// Height of the decoded picture, on the same terms as [`width`].
-    ///
-    /// [`width`]: ArtifactRecord::width
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<u32>,
-    /// Camera manufacturer the picture records about itself.
-    ///
-    /// This and the three fields below are how a person finds their own
-    /// photographs among a used disk's hundreds of thousands of recovered
-    /// images: an offset and a byte count separate nothing, while a camera and
-    /// a date separate one afternoon from ten years of everything else. They
-    /// survive a picture that does not, because they sit ahead of its data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub camera_make: Option<String>,
-    /// Camera model the picture records about itself.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub camera_model: Option<String>,
-    /// When the picture was taken, as stored: `YYYY:MM:DD HH:MM:SS`. Verbatim,
-    /// because it carries no zone and turning it into an instant would be
-    /// inventing one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub taken: Option<String>,
-    /// Pixel width the picture's own metadata claims, which may differ from
-    /// the decoded [`width`] and survives when the picture does not.
-    ///
-    /// [`width`]: ArtifactRecord::width
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_width: Option<u32>,
-    /// Pixel height the picture's own metadata claims.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_height: Option<u32>,
-    /// Length the source metadata claimed, when it said one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_length: Option<u64>,
-    /// Bytes the metadata expected that were not recovered. Absent when the
-    /// recovery is whole; present and non-zero states the truncation plainly
-    /// (A-CONFIDENCE-HONEST).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub missing_bytes: Option<u64>,
-    /// Evidence tier, as its canonical display name.
-    pub confidence: String,
-    /// Every source extent the artifact was assembled from, in file order.
-    pub extents: Vec<ExtentRecord>,
-    /// Creation time recovered from metadata, in seconds since the Unix
-    /// epoch. Never inferred; absent when the filesystem did not record one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_unix: Option<i64>,
-    /// Last modification time recovered from metadata, in seconds since the
-    /// Unix epoch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modified_unix: Option<i64>,
-    /// When a change journal recorded this file being deleted, in seconds
-    /// since the Unix epoch. Absent when no journal named it.
-    ///
-    /// The only timestamp about the *removal* rather than about the file. A
-    /// run of artifacts sharing this moment is a batch deletion — files
-    /// removed in one action, which nothing else on a volume records.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deleted_unix: Option<i64>,
-    /// File name recovered from filesystem metadata, when one survived.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovered_name: Option<String>,
-    /// Filesystem object the metadata came from — MFT record number, inode
-    /// number or first cluster.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_object: Option<u64>,
-    /// For embedded thumbnails, the source offset of the parent candidate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_offset: Option<u64>,
-    /// SHA-256 of the artifact bytes, computed while writing them.
-    pub sha256: String,
-    /// Triage label, when the artifact was scored. A label orders and groups;
-    /// every artifact stays in this manifest whatever it says
-    /// (A-TRIAGE-NOT-VERDICT).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triage_label: Option<String>,
-    /// The property that settled the label, when there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triage_decided_by: Option<String>,
-    /// Whether the artifact's bytes were stored in the output directory.
-    ///
-    /// False when the artifact did not clear the run's size floor. The record
-    /// still describes it completely — extents, digest, dimensions — so the
-    /// account of what the medium held stays whole either way, and the extents
-    /// locate the bytes exactly for a rerun with a lower floor.
-    ///
-    /// `argos export` reads the session directory, so it cannot produce these:
-    /// they have no file there. Getting them is a rerun of the scan.
-    #[serde(default = "stored_by_default")]
-    pub written: bool,
-    /// Why the bytes were not stored, when they were not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub omitted_because: Option<String>,
-    /// How many artifacts of identical dimensions this one was found among,
-    /// consecutively, when it was found among any.
-    ///
-    /// The signature of a thumbnail cache: a cache writes one size and writes
-    /// it in one place, so its entries share dimensions to the pixel. A large
-    /// number here says the artifact is a preview of a picture, which may or
-    /// may not itself have survived — and saying that is what stops a report
-    /// presenting the preview as the picture (A-CONFIDENCE-HONEST). It is a
-    /// count of neighbours, never a verdict about this artifact.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub same_size_neighbours: Option<u32>,
-    /// Where this artifact stands in a list, named by the strongest fact that
-    /// put it there.
-    ///
-    /// A sort key, and only that. A recovery of a used disk writes hundreds of
-    /// thousands of artifacts and a few hundred photographs; without an order
-    /// the photographs are present and unreachable. Every stored artifact
-    /// carries one, the weakest is still one, and nothing is removed or hidden
-    /// by it (A-TRIAGE-NOT-VERDICT).
-    ///
-    /// Derived from fields recorded beside it — dimensions, camera, capture
-    /// date, same-size neighbours — so it can be recomputed from this record
-    /// alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub standing: Option<String>,
-    /// Perceptual hash of the decoded image, 16 hex digits.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub perceptual_hash: Option<String>,
-    /// SHA-256 of the artifact this one is a near-duplicate of; both stay.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub near_duplicate_of: Option<String>,
-    /// Path of this artifact's preview, relative to the output directory.
-    ///
-    /// Derived presentation, reproducible from the artifact at any time.
-    /// Absent when previews were not requested, or when this artifact did not
-    /// decode into one — which says nothing about the recovery itself.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview: Option<String>,
-}
 
 /// Writes artifacts and the manifest into one output directory.
 #[derive(Debug)]
@@ -697,7 +266,7 @@ impl Store {
     /// medium while the directory holds only what the caller asked for: the
     /// bytes are still at the extents recorded here, which locate them on the
     /// source exactly.
-    pub fn record_only(&mut self, artifact: &Artifact<'_>, reason: &str) {
+    fn record_only(&mut self, artifact: &Artifact<'_>, reason: &str) {
         self.records.push(ArtifactRecord {
             name: None,
             stage: artifact.stage.to_string(),
@@ -795,7 +364,7 @@ impl Store {
     /// The artifact itself is already stored and recorded by then, so a caller
     /// that counts the failure and continues loses a thumbnail rather than
     /// evidence.
-    pub fn save_preview(
+    fn save_preview(
         &mut self,
         sha256: &argos_core::artifact::Digest,
         image: &PixelImage,
@@ -807,7 +376,7 @@ impl Store {
         // An image the encoder declines is one with no pixels to show. That is
         // not a failure of the output directory, and reporting it as one would
         // make a caller count it against the medium.
-        let Some(encoded) = preview::encode(image) else {
+        let Some(encoded) = encode(image) else {
             return Ok(());
         };
 
@@ -981,8 +550,330 @@ pub fn unix_seconds(at: std::time::SystemTime) -> i64 {
     }
 }
 
-/// A manifest written before this field existed described stored artifacts
-/// only, so an absent flag means the bytes are there.
-const fn stored_by_default() -> bool {
-    true
+/// The account that recovered files belong to once written.
+///
+/// Constructed from the identity a privileged process was started on behalf
+/// of, which the process running the scan resolves; this crate is given the
+/// answer rather than looking for it, so what it does is visible in its
+/// signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owner {
+    uid: u32,
+    gid: Option<u32>,
+}
+
+impl Owner {
+    /// The account with this user id, and optionally this group.
+    ///
+    /// The group is optional because not every elevation path reports one:
+    /// `pkexec` publishes the caller's user id alone, and leaving the group
+    /// untouched is better than guessing at one.
+    #[must_use]
+    pub fn new(uid: u32, gid: Option<u32>) -> Self {
+        Self { uid, gid }
+    }
+
+    /// Gives `path` to this owner.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the filesystem cannot represent the change — no ownership at
+    /// all on FAT and exFAT — or when this process is not allowed to make it.
+    #[cfg(unix)]
+    pub fn give(self, path: &Path) -> Result<(), std::io::Error> {
+        std::os::unix::fs::chown(path, Some(self.uid), self.gid)
+    }
+
+    /// Gives `path` to this owner.
+    ///
+    /// Windows has nothing to do here: a file created by an elevated process
+    /// inherits the destination folder's access rules, so the person who chose
+    /// the folder keeps the access they already had to it.
+    ///
+    /// # Errors
+    ///
+    /// Never on this platform. The signature is the Unix one so that the caller
+    /// stays free of `cfg`.
+    #[cfg(not(unix))]
+    pub fn give(self, path: &Path) -> Result<(), std::io::Error> {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Whether an output directory could be handed to its [`Owner`].
+///
+/// Reported rather than hidden: files left belonging to the administrator are
+/// something the person reading the result has to know, and it is the kind of
+/// thing that is discovered hours later, at the end of a long scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handback {
+    /// Nothing to do: no owner was named, or the platform has no notion of one.
+    NotNeeded,
+    /// The output directory now belongs to the owner, and its files will too.
+    Done,
+    /// The output directory could not be handed over, and neither will its
+    /// files be. Carries what to tell the user.
+    Refused(String),
+}
+
+impl Handback {
+    /// Attempts to give `dir` to `owner`, and says what happened.
+    pub(crate) fn attempt(dir: &Path, owner: Option<Owner>) -> Self {
+        let Some(owner) = owner else {
+            return Self::NotNeeded;
+        };
+        match owner.give(dir) {
+            Ok(()) => Self::Done,
+            // The message names no recovered content and no filename, only the
+            // directory the user themselves chose (A-NO-CONTENT-IN-LOGS).
+            Err(err) => Self::Refused(format!(
+                "recovered files will belong to the administrator account rather than to you, \
+                 because the destination does not allow changing ownership ({err}); copy them \
+                 elsewhere or take ownership of {} afterwards",
+                dir.display()
+            )),
+        }
+    }
+
+    /// The owner to apply to each file written, if any.
+    pub(crate) fn owner(&self, owner: Option<Owner>) -> Option<Owner> {
+        matches!(self, Self::Done).then_some(owner).flatten()
+    }
+}
+
+/// Longest edge of a preview, in pixels.
+///
+/// Large enough to recognise a photograph in a gallery, small enough that a
+/// directory of thousands costs less than one recovered image.
+pub(crate) const MAX_EDGE: u32 = 256;
+
+/// JPEG quality of a preview. Previews are looked at, never analysed, and past
+/// this the extra bytes stop being visible at this size.
+const QUALITY: u8 = 80;
+
+/// Channels in the encoder's input.
+const RGB_CHANNELS: usize = 3;
+
+/// Full opacity, and the divisor of the alpha composite below.
+const OPAQUE: u32 = 255;
+
+/// A downscaled JPEG of `image`, or `None` when it has no pixels to show.
+///
+/// Transparency is composited over white, so an icon with an alpha channel
+/// looks in a gallery the way it looks in a file manager rather than as a
+/// black square.
+pub(crate) fn encode(image: &PixelImage) -> Option<Vec<u8>> {
+    let (width, height) = (image.width(), image.height());
+    let (target_width, target_height) = fit(width, height)?;
+
+    let mut rgb = vec![
+        0_u8;
+        usize::try_from(target_width)
+            .ok()?
+            .checked_mul(usize::try_from(target_height).ok()?)?
+            .checked_mul(RGB_CHANNELS)?
+    ];
+    resample(image, target_width, target_height, &mut rgb);
+
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, QUALITY)
+        .encode(
+            &rgb,
+            u16::try_from(target_width).ok()?,
+            u16::try_from(target_height).ok()?,
+            jpeg_encoder::ColorType::Rgb,
+        )
+        .ok()?;
+    Some(out)
+}
+
+/// The preview's dimensions: `width`×`height` scaled to fit [`MAX_EDGE`],
+/// never enlarged, never collapsed to zero.
+///
+/// `None` for an image with no pixels — there is nothing to show, and the
+/// division below would have no defined answer.
+fn fit(width: u32, height: u32) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let longest = width.max(height);
+    if longest <= MAX_EDGE {
+        return Some((width, height));
+    }
+    // In `u64`: the products below exceed `u32` for any image wider than
+    // 16 megapixels on one edge, and the medium decides these numbers
+    // (A-UNTRUSTED-ONDISK).
+    let scale = |edge: u32| -> u32 {
+        let scaled = u64::from(edge) * u64::from(MAX_EDGE) / u64::from(longest);
+        u32::try_from(scaled).unwrap_or(MAX_EDGE).max(1)
+    };
+    Some((scale(width), scale(height)))
+}
+
+/// Averages each target pixel over the source box it covers.
+///
+/// Box sampling rather than point sampling: a photograph point-sampled to a
+/// sixteenth of its width aliases into something that can look like a
+/// synthetic asset, and a preview that misrepresents what was recovered is
+/// worse than no preview.
+fn resample(image: &PixelImage, target_width: u32, target_height: u32, out: &mut [u8]) {
+    let (width, height) = (image.width(), image.height());
+    let pixels = image.rgba();
+    let stride = usize::try_from(width).unwrap_or(0) * PixelImage::BYTES_PER_PIXEL;
+
+    for ty in 0..target_height {
+        let (top, bottom) = box_edges(ty, target_height, height);
+        for tx in 0..target_width {
+            let (left, right) = box_edges(tx, target_width, width);
+
+            let (mut red, mut green, mut blue, mut count) = (0_u64, 0_u64, 0_u64, 0_u64);
+            for y in top..bottom {
+                let row = usize::try_from(y).unwrap_or(0) * stride;
+                for x in left..right {
+                    let at = row + usize::try_from(x).unwrap_or(0) * PixelImage::BYTES_PER_PIXEL;
+                    let Some(pixel) = pixels.get(at..at + PixelImage::BYTES_PER_PIXEL) else {
+                        continue;
+                    };
+                    let alpha = u32::from(pixel[3]);
+                    red += u64::from(over_white(u32::from(pixel[0]), alpha));
+                    green += u64::from(over_white(u32::from(pixel[1]), alpha));
+                    blue += u64::from(over_white(u32::from(pixel[2]), alpha));
+                    count += 1;
+                }
+            }
+
+            let at = (usize::try_from(ty).unwrap_or(0)
+                * usize::try_from(target_width).unwrap_or(0)
+                + usize::try_from(tx).unwrap_or(0))
+                * RGB_CHANNELS;
+            let Some(target) = out.get_mut(at..at + RGB_CHANNELS) else {
+                continue;
+            };
+            // A box with no samples cannot happen — `box_edges` never returns
+            // an empty span — but a preview must not panic over a thumbnail.
+            let mean = |sum: u64| u8::try_from(sum / count.max(1)).unwrap_or(u8::MAX);
+            target[0] = mean(red);
+            target[1] = mean(green);
+            target[2] = mean(blue);
+        }
+    }
+}
+
+/// The half-open source span target index `at` of `target_len` covers in a
+/// source of `source_len` pixels. Never empty, never past the source.
+fn box_edges(at: u32, target_len: u32, source_len: u32) -> (u32, u32) {
+    let span = |index: u64| -> u32 {
+        let scaled = index * u64::from(source_len) / u64::from(target_len.max(1));
+        u32::try_from(scaled).unwrap_or(source_len).min(source_len)
+    };
+    let start = span(u64::from(at));
+    let end = span(u64::from(at) + 1)
+        .max(start.saturating_add(1))
+        .min(source_len);
+    (start, end)
+}
+
+/// One channel composited over an opaque white background.
+fn over_white(channel: u32, alpha: u32) -> u8 {
+    let blended = (channel * alpha + OPAQUE * (OPAQUE - alpha)) / OPAQUE;
+    u8::try_from(blended).unwrap_or(u8::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use argos_core::classify::PixelImage;
+
+    #[cfg(unix)]
+    use super::Owner;
+    use super::{Handback, MAX_EDGE, encode, fit};
+
+    #[test]
+    fn no_owner_means_nothing_to_do() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        assert_eq!(Handback::attempt(dir.path(), None), Handback::NotNeeded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handing_a_directory_to_its_current_owner_succeeds() {
+        // Every account may give a file it owns to itself, so this exercises
+        // the real syscall without needing privileges.
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let owner = current();
+        assert_eq!(Handback::attempt(dir.path(), Some(owner)), Handback::Done);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_handback_stops_the_per_file_attempts() {
+        // Once the directory could not be handed over, its files are on the
+        // same filesystem and will not be either; retrying per artifact would
+        // fail once per recovered image.
+        let refused = Handback::Refused("no".to_owned());
+        assert_eq!(refused.owner(Some(current())), None);
+        assert_eq!(Handback::Done.owner(Some(current())), Some(current()));
+        assert_eq!(Handback::Done.owner(None), None);
+    }
+
+    #[cfg(unix)]
+    fn current() -> Owner {
+        use std::os::unix::fs::MetadataExt;
+
+        let me = std::fs::metadata("/proc/self")
+            .or_else(|_| std::fs::metadata("."))
+            .expect("this process can stat something it owns");
+        Owner::new(me.uid(), Some(me.gid()))
+    }
+
+    fn solid(width: u32, height: u32, rgba: [u8; 4]) -> PixelImage {
+        let count = (width as usize) * (height as usize);
+        PixelImage::new(width, height, rgba.repeat(count))
+    }
+
+    #[test]
+    fn a_preview_never_enlarges_a_small_image() {
+        // Upscaling a 32×32 icon to 256 would put more pixels in the preview
+        // than the artifact has, which says something false about it.
+        assert_eq!(fit(32, 32), Some((32, 32)));
+        assert_eq!(fit(MAX_EDGE, MAX_EDGE), Some((MAX_EDGE, MAX_EDGE)));
+    }
+
+    #[test]
+    fn a_large_image_keeps_its_aspect_ratio() {
+        assert_eq!(fit(4000, 3000), Some((256, 192)));
+        assert_eq!(fit(3000, 4000), Some((192, 256)));
+        // An extreme panorama still has a visible edge rather than none.
+        let (width, height) = fit(100_000, 10).expect("a panorama has pixels");
+        assert_eq!(width, MAX_EDGE);
+        assert!(height >= 1, "an edge must not round away to nothing");
+    }
+
+    #[test]
+    fn an_empty_image_has_no_preview() {
+        assert_eq!(fit(0, 100), None);
+        assert_eq!(fit(100, 0), None);
+        assert!(encode(&solid(0, 0, [0; 4])).is_none());
+    }
+
+    #[test]
+    fn a_preview_is_a_decodable_jpeg() {
+        let bytes = encode(&solid(300, 200, [200, 40, 40, 255])).expect("a solid image encodes");
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "a JPEG starts with SOI");
+        assert_eq!(
+            &bytes[bytes.len() - 2..],
+            &[0xFF, 0xD9],
+            "and ends with EOI"
+        );
+    }
+
+    #[test]
+    fn transparency_is_composited_over_white_not_over_black() {
+        // A fully transparent asset must not preview as a black rectangle:
+        // that is what an overwritten region looks like, and confusing the two
+        // in a gallery is exactly the wrong mistake for this tool to make.
+        let clear = encode(&solid(64, 64, [0, 0, 0, 0])).expect("a clear image encodes");
+        let black = encode(&solid(64, 64, [0, 0, 0, 255])).expect("a black image encodes");
+        assert_ne!(clear, black);
+    }
 }

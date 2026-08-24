@@ -9,8 +9,8 @@
 //! No event carries recovered content, a recovered filename or an identifying
 //! path (A-NO-CONTENT-IN-LOGS); offsets, sizes and counts only.
 
+use crate::Stage;
 use crate::geometry::ByteRange;
-use crate::recovery::Stage;
 
 /// Lifecycle state of a scan run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

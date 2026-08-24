@@ -38,7 +38,7 @@ pub fn run(
     notice: &dyn Notice,
     cancelled: &dyn Fn() -> bool,
 ) -> anyhow::Result<()> {
-    crate::destination::refuse_writing_onto_source(source, to)?;
+    crate::medium::refuse_writing_onto_source(source, to)?;
     refuse_device_destination(to)?;
 
     // Created exclusively: an acquisition that silently overwrote an earlier
@@ -94,7 +94,7 @@ fn open_source(source: &Path) -> anyhow::Result<Source> {
     let metadata = std::fs::metadata(source);
     let is_device = metadata
         .as_ref()
-        .map(is_device_node)
+        .map(crate::medium::is_device_node)
         .ok()
         // A device-namespace path cannot be stat'd; it is a device by name.
         .unwrap_or(true);
@@ -128,18 +128,6 @@ fn refuse_device_destination(to: &Path) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn is_device_node(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::FileTypeExt as _;
-    let kind = metadata.file_type();
-    kind.is_block_device() || kind.is_char_device()
-}
-
-#[cfg(not(unix))]
-fn is_device_node(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 /// What an acquisition tells the person waiting for it.

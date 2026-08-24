@@ -100,21 +100,35 @@ Dependency DAG (arrows = "depends on"; must stay acyclic — enforce with `cargo
 argos    ──▶ argos_engine ──▶ argos_fs ──▶ argos_core
                           ──▶ argos_carve ──▶ argos_core
                           ──▶ argos_classify ──▶ argos_core
-                          ──▶ argos_report ──▶ argos_core
 argos    ──▶ argos_device ──▶ argos_core           (adapter injected into engine)
+argos    ──▶ argos_report ──▶ argos_core           (sink injected into engine)
+argos    ──▶ argos_classify                        (standings for report and export)
+argos    ──▶ argos_core                            (the composition root names the ports)
 argos    ──▶ argos_ipc                             (translates engine ↔ wire)
 argos_ui ──▶ argos_ipc                             (+ tauri; and nothing else)
 ```
+
+`argos_engine` does **not** depend on `argos_report`. Results leave the engine through
+`argos_core::artifact::ArtifactSink`, which the binary implements with a `Store` and injects, so
+the engine cannot name a report type and the sink stays a port rather than a call. The three
+edges out of `argos` that are not the engine — `argos_device`, `argos_report`, `argos_classify` —
+are the composition root constructing adapters and handing them in, which is where that belongs.
 
 `argos_ui` does **not** appear above `argos_ipc`. It cannot reach `argos_engine`, `argos_carve`
 or `argos_fs`, so it cannot contain recovery logic — `A-SHELL-NO-DOMAIN` is a property of this
 graph rather than something a review has to keep noticing (§6.1). `argos_ipc` depends on nothing
 in the workspace, which is what makes it unable to leak an engine type onto the wire.
 
-`argos_fs` and `argos_carve` never depend on each other or on `argos_device`; they meet only in
-`argos_engine`. `argos_core` depends on nothing in the workspace. Circular references are
-impossible by construction as long as this DAG is respected; any new edge must be justified
-against it.
+`argos_fs`, `argos_carve` and `argos_classify` never depend on each other or on `argos_device`;
+they meet only in `argos_engine`. `argos_core` and `argos_ipc` depend on nothing in the
+workspace. Circular references are impossible by construction as long as this DAG is respected;
+any new edge must be justified against it.
+
+The rule is about the **library** graph, which is the one that ships. `argos_classify` carries a
+`dev-dependencies` edge to `argos_carve`, because its threshold harness decodes real fixtures to
+measure them; `crates/argos_classify/src/` names `argos_carve` nowhere. A `cargo tree` check in
+CI has to exclude dev-dependencies (`--edges normal`) or it will read that test-only edge as a
+violation of this graph.
 
 Phase 0 updates the CLAUDE.md **Layout** section to this table.
 

@@ -20,8 +20,8 @@ use std::time::{Duration, SystemTime};
 use argos_core::Confidence;
 use argos_core::geometry::{ByteOffset, ByteRange};
 
-use crate::bytes::{read_at, u16_le, u32_le, u64_le};
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
+use crate::{read_at, u16_le, u32_le, u64_le};
 
 /// Container superblock magic (`NXSB`). Source: APFS reference, `nx_magic`.
 const NX_MAGIC: u32 = 0x4253_584E;
@@ -317,7 +317,7 @@ struct NxSuperblock {
 /// (`M-HOTPATH`). It decides nothing on its own: the magic is a hint, and
 /// [`Apfs::open`] still verifies everything before a container is reported.
 #[must_use]
-pub fn has_container_magic(raw: &[u8]) -> bool {
+pub(crate) fn has_container_magic(raw: &[u8]) -> bool {
     u32_le(raw, 32) == Some(NX_MAGIC)
 }
 

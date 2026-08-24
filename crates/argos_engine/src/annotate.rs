@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 
 use argos_carve::decode;
-use argos_classify::phash;
+use argos_classify::{NEAR_DUPLICATE_DISTANCE, hamming, perceptual_hash};
 use argos_core::Stage;
 use argos_core::artifact::{ArtifactSink, Digest};
 use argos_core::classify::{Classifier, PixelImage, TriageScore};
@@ -221,7 +221,7 @@ pub(crate) fn run<V, S, C, P>(
 /// Collapses near-duplicate images so one decision speaks for a group.
 ///
 /// Two artifacts whose perceptual hashes are within
-/// [`phash::NEAR_DUPLICATE_DISTANCE`] are the same picture as far as a label
+/// [`NEAR_DUPLICATE_DISTANCE`] are the same picture as far as a label
 /// is concerned — a thumbnail and its parent, or one file recovered twice from
 /// two places on the medium. Both stay in the manifest; only one is scored.
 struct Dedup {
@@ -243,7 +243,7 @@ struct Dedup {
 
 /// Bands the 64-bit perceptual hash is split into for the lookup above.
 ///
-/// Two hashes within [`phash::NEAR_DUPLICATE_DISTANCE`] differ in at most that
+/// Two hashes within [`NEAR_DUPLICATE_DISTANCE`] differ in at most that
 /// many bits, so with strictly more bands than that distance at least one band
 /// has to be identical. Four bands cover a distance of three, which is what
 /// that constant is — the index therefore finds every pair the exhaustive
@@ -287,9 +287,10 @@ impl Dedup {
             };
             // Buckets are appended in group order, so the first match in one is
             // the earliest it holds.
-            let found = bucket.iter().copied().find(|&at| {
-                phash::hamming(hash, self.groups[at].0) <= phash::NEAR_DUPLICATE_DISTANCE
-            });
+            let found = bucket
+                .iter()
+                .copied()
+                .find(|&at| hamming(hash, self.groups[at].0) <= NEAR_DUPLICATE_DISTANCE);
             if let Some(at) = found {
                 best = Some(best.map_or(at, |current| current.min(at)));
             }
@@ -328,7 +329,7 @@ impl Dedup {
         // An image with no structure gets no hash, and therefore no group:
         // sharing a score between two pictures the hash cannot tell apart
         // would attribute one image's label to another.
-        let hash = phash::perceptual_hash(image);
+        let hash = perceptual_hash(image);
         let near = hash.and_then(|hash| self.nearest(hash));
         let at = self.outcomes.len();
 
@@ -448,7 +449,7 @@ fn decode_finding<V: Read + Seek>(
     }
     buf.clear();
     buf.reserve(length);
-    let mut bytes = crate::pipeline::ExtentReader::new(view, &finding.extents);
+    let mut bytes = argos_carve::reassemble::Assembled::new(view, &finding.extents);
     bytes.read_to_end(buf).ok()?;
     if buf.len() != length {
         return None;
@@ -464,7 +465,7 @@ fn decode_finding<V: Read + Seek>(
 
 #[cfg(test)]
 mod tests {
-    use argos_classify::phash;
+    use argos_classify::{NEAR_DUPLICATE_DISTANCE, hamming};
 
     use super::{BANDS, Dedup, band};
 
@@ -472,7 +473,7 @@ mod tests {
     fn exhaustive(groups: &[(u64, usize)], hash: u64) -> Option<usize> {
         groups
             .iter()
-            .find(|(other, _)| phash::hamming(hash, *other) <= phash::NEAR_DUPLICATE_DISTANCE)
+            .find(|(other, _)| hamming(hash, *other) <= NEAR_DUPLICATE_DISTANCE)
             .map(|&(_, at)| at)
     }
 
@@ -541,7 +542,7 @@ mod tests {
             for b in 0..u64::BITS {
                 for c in 0..u64::BITS {
                     let other = (1 << a) | (1 << b) | (1 << c);
-                    assert!(phash::hamming(0, other) <= phash::NEAR_DUPLICATE_DISTANCE);
+                    assert!(hamming(0, other) <= NEAR_DUPLICATE_DISTANCE);
                     assert!(
                         (0..BANDS).any(|index| band(0, index) == band(other, index)),
                         "bits {a},{b},{c} spoiled every band"

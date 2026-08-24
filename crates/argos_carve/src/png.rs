@@ -14,7 +14,7 @@ use argos_core::geometry::ByteOffset;
 use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 
-use crate::stream::Bytes;
+use crate::Bytes;
 use crate::{CarveError, Scratch, Verdict};
 
 /// Largest chunk data length the spec allows (2^31 − 1). Source: ISO 15948
@@ -276,7 +276,7 @@ fn feed_inflater(
 /// # Errors
 ///
 /// Fails only when reading or seeking `src` fails.
-pub fn header_dimensions<R: Read + Seek>(
+pub(crate) fn header_dimensions<R: Read + Seek>(
     src: &mut R,
     start: ByteOffset,
     limit: u64,

@@ -12,7 +12,7 @@ use std::io::Read;
 
 use crate::classify::PixelImage;
 use crate::geometry::{ByteOffset, ByteRange};
-use crate::recovery::{Confidence, Format, Stage, Timestamps};
+use crate::{Confidence, Format, Stage, Timestamps};
 
 /// A SHA-256 digest, displayed as lowercase hex.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

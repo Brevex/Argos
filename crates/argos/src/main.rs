@@ -10,16 +10,10 @@
 
 mod acquire;
 mod console;
-mod destination;
-mod export;
-mod graft;
-mod invoker;
-mod progress;
+mod medium;
+mod results;
 mod scan;
-mod scanlog;
 mod serve;
-mod source;
-mod standing;
 
 use std::path::PathBuf;
 
@@ -28,7 +22,7 @@ use argos_engine::Stages;
 use clap::{Parser, Subcommand};
 use mimalloc::MiMalloc;
 
-use crate::progress::Renderer;
+use crate::console::Renderer;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -358,7 +352,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             run_export(
                 &from,
                 &to,
-                &export::Filter {
+                &results::Filter {
                     hashes,
                     min_long_side,
                     standing: standing.as_deref().map(str::parse).transpose().map_err(
@@ -385,7 +379,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
 /// how much of the medium was never reached.
 fn run_acquire(source: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let controls = progress::spawn_stop_control(std::sync::Arc::clone(&stop));
+    let controls = console::spawn_stop_control(std::sync::Arc::clone(&stop));
     let outcome = acquire::run(source, to, &console::Console, &|| {
         stop.load(std::sync::atomic::Ordering::Acquire)
     });
@@ -406,7 +400,7 @@ fn run_scan(
         options,
         &renderer,
         &console::Console,
-        |session| controls = Some(progress::spawn_console_controls(session.clone())),
+        |session| controls = Some(console::spawn_console_controls(session.clone())),
     );
     if let Some(controls) = controls {
         controls.stop();
@@ -414,11 +408,7 @@ fn run_scan(
     renderer.finish();
 
     let finished = finished?;
-    match &finished.report {
-        Some(report) => console::summarize(report),
-        None => println!("state     failed"),
-    }
-    println!("manifest  {}", finished.manifest.display());
+    console::finished(&finished);
     // A scan that ran and failed partway still wrote its manifest above; the
     // failure is reported after it, never instead of it.
     anyhow::ensure!(
@@ -447,7 +437,7 @@ fn run_reassemble(
          version of this tool that did not record them",
         from.display()
     );
-    println!("resuming  {} fragmentation points", broken.len());
+    console::resuming(broken.len());
     run_scan(
         source,
         out,
@@ -487,7 +477,7 @@ fn run_graft(
     out: &std::path::Path,
     range: Option<&str>,
 ) -> anyhow::Result<()> {
-    let reference = graft::reference_from(reference)?;
+    let reference = scan::reference_from(reference)?;
     let span = match range {
         Some(text) => {
             let (start, end) = scan::parse_range(text)?;
@@ -495,36 +485,19 @@ fn run_graft(
         }
         None => 0..u64::MAX,
     };
-    let (width, height) = reference.dimensions();
-    println!("reference  {width}x{height}");
-    let (entered, written) = graft::run(source, out, &reference, span)?;
-    println!("entered {entered} orphaned runs, {written} decoded to a picture");
-    println!(
-        "these are pixels in a header this tool supplied, not files the medium held: the frame \
-         size is the reference's and each strip's position inside it is unknown"
-    );
+    console::reference(reference.dimensions());
+    let (entered, written) = scan::graft(source, out, &reference, span)?;
+    console::grafted(entered, written);
     Ok(())
 }
 
 fn run_export(
     from: &std::path::Path,
     to: &std::path::Path,
-    filter: &export::Filter,
+    filter: &results::Filter,
 ) -> anyhow::Result<()> {
-    let exported = export::run(from, to, filter)?;
-    println!("exported  {} artifacts", exported.copied.len());
-    if exported.previews > 0 {
-        println!("previews  {} copied", exported.previews);
-    }
-    for name in &exported.missing {
-        println!("missing   {name} is recorded in the manifest but not in the session directory");
-    }
-    for name in &exported.tampered {
-        println!(
-            "refused   {name} no longer reproduces the digest the scan recorded and was not \
-             exported"
-        );
-    }
+    let exported = results::run(from, to, filter)?;
+    console::exported(&exported);
     anyhow::ensure!(
         exported.tampered.is_empty(),
         "{} artifacts changed since the scan and were not exported",

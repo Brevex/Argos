@@ -13,10 +13,10 @@ use std::io::{Read, Seek};
 use argos_core::geometry::{ByteOffset, ByteRange};
 
 use crate::apfs::Apfs;
-use crate::bytes::read_at;
 use crate::ext4::{Ext4, SUPERBLOCK_OFFSET};
 use crate::fat::Fat;
 use crate::ntfs::Ntfs;
+use crate::read_at;
 use crate::{Anchor, FsError, FsKind, Origin, Volume};
 
 /// Sector granularity of the sweep. Volume anchors are always sector-aligned;

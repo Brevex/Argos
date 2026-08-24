@@ -7,12 +7,24 @@
 //! instead, because "this artifact changed on disk since the scan" is
 //! information an examiner needs, and quietly copying it anyway would put an
 //! unattributable file in the destination (A-PROVENANCE).
+//!
+//! Where each recorded artifact stands is decided here too, in one place,
+//! because three readers need the same answer — the report, the export filter
+//! and the gallery — and three implementations of an ordering would be three
+//! orderings (`A-ONE-IMPLEMENTATION`).
+//!
+//! A session written before standings existed carries none. It is still
+//! ordered, and correctly: a standing is derived from dimensions, camera,
+//! capture date and same-size neighbours, and a manifest records all four
+//! beside every artifact. So an older session sorts exactly as a new one does,
+//! without re-reading the medium and without a migration.
 
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use argos_classify::rank::{Evidence, Standing};
 use argos_core::artifact::Digest;
 use argos_report::{ArtifactRecord, Manifest};
 use sha2::{Digest as _, Sha256};
@@ -96,12 +108,7 @@ impl Filter {
     /// undescribed picture would hide most of a carved disk.
     fn admits(&self, record: &ArtifactRecord) -> bool {
         if let Some(floor) = self.min_long_side {
-            let long_side = record
-                .width
-                .unwrap_or(0)
-                .max(record.height.unwrap_or(0))
-                .max(record.declared_width.unwrap_or(0))
-                .max(record.declared_height.unwrap_or(0));
+            let long_side = long_side(record);
             // Nothing measured clears the floor, as it does during a scan: a
             // decoder that gave up is not evidence the bytes are worthless.
             if long_side > 0 && long_side < floor {
@@ -111,7 +118,7 @@ impl Filter {
         if let Some(floor) = self.standing {
             // Derived when the session did not record one, so an older
             // session filters exactly as a new one does.
-            if crate::standing::of(record) < floor {
+            if standing_of(record) < floor {
                 return false;
             }
         }
@@ -329,4 +336,96 @@ fn copy_preview(from: &Path, to: &Path, relative: &str) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::copy(from.join(&relative), target).map(|_| ())
+}
+
+/// The standing of `record`: the one the scan recorded, or the one its own
+/// fields imply.
+///
+/// Deriving rather than defaulting is what makes this work on a session the
+/// running version did not produce. The two agree by construction — the scan
+/// computes it from the same four facts it then writes down.
+#[must_use]
+pub fn standing_of(record: &ArtifactRecord) -> Standing {
+    if let Some(recorded) = record
+        .standing
+        .as_deref()
+        .and_then(|text| text.parse::<Standing>().ok())
+    {
+        return recorded;
+    }
+
+    // The picture's measured size, falling back to what its metadata declares
+    // when the decode produced nothing — exactly as the export filter does.
+    let pixels = match (
+        record.width.or(record.declared_width),
+        record.height.or(record.declared_height),
+    ) {
+        (Some(width), Some(height)) => Some((width, height)),
+        _ => None,
+    };
+    let evidence = Evidence {
+        pixels,
+        camera_named: record.camera_make.is_some() || record.camera_model.is_some(),
+        dated: record.taken.is_some(),
+        same_size_neighbours: record.same_size_neighbours,
+    };
+    argos_classify::rank::standing(&evidence)
+}
+
+/// Sort order of a record's standing, strongest last.
+#[must_use]
+pub fn rank(record: &ArtifactRecord) -> u8 {
+    match standing_of(record) {
+        Standing::CacheNeighbour => 0,
+        Standing::Unremarkable => 1,
+        Standing::PhotographSized => 2,
+        Standing::Dated => 3,
+        Standing::CameraNamed => 4,
+    }
+}
+
+/// Long side of a record's picture, zero when nothing said what it was.
+#[must_use]
+pub fn long_side(record: &ArtifactRecord) -> u32 {
+    record
+        .width
+        .unwrap_or(0)
+        .max(record.height.unwrap_or(0))
+        .max(record.declared_width.unwrap_or(0))
+        .max(record.declared_height.unwrap_or(0))
+}
+
+/// Every artifact a reader should see, strongest evidence first.
+///
+/// Strongest standing, then the largest picture, then the longest run of bytes,
+/// and finally the content hash. That last key is what makes the order *total*:
+/// a paged gallery asks for the same list twice and must not shuffle equal
+/// artifacts between the pages, and `A-CLI-FIRST` forbids the report and the
+/// wire disagreeing about what "first" means.
+///
+/// The order is presentation only — the manifest's own order is untouched.
+#[must_use]
+pub fn ordered(
+    manifest: &Manifest,
+    standing: Option<Standing>,
+    include_unwritten: bool,
+) -> Vec<&ArtifactRecord> {
+    let admits = |record: &&ArtifactRecord| {
+        if !include_unwritten && !record.written {
+            return false;
+        }
+        // A session written before standings existed carries none; the standing
+        // is derived from its own record rather than waived, so an older session
+        // filters exactly as a new one does.
+        standing.is_none_or(|floor| standing_of(record) >= floor)
+    };
+    let mut chosen: Vec<&ArtifactRecord> = manifest.artifacts.iter().filter(admits).collect();
+    chosen.sort_by(|left, right| {
+        rank(right)
+            .cmp(&rank(left))
+            .then(long_side(right).cmp(&long_side(left)))
+            .then(right.length.cmp(&left.length))
+            .then(left.sha256.cmp(&right.sha256))
+    });
+    chosen
 }

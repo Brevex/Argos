@@ -46,7 +46,7 @@ const BLOCK: usize = argos_carve::classify::BLOCK_BYTES;
 /// [`BLOCK`] as the search's own offsets count it.
 const BLOCK_BYTES: u64 = argos_carve::classify::BLOCK_BYTES as u64;
 
-/// Bytes one region holds, as `argos_engine::search::REGION_BYTES` sets it.
+/// Bytes one region holds, as `argos_engine::pipeline::region::REGION_BYTES` sets it.
 const REGION_BYTES: usize = 256 * 1024 * 1024;
 
 /// Hypotheses one stratum is timed over.
@@ -179,7 +179,7 @@ fn main() {
 
 /// Throughput as workers are added, over one shared region.
 ///
-/// `argos_engine::pipeline::in_parallel` gives every worker its own view of
+/// `argos_engine::pipeline::reassembly::in_parallel` gives every worker its own view of
 /// the held bytes and its own buffers, so nothing is locked and the ideal is
 /// linear. What it does not give them is their own memory bandwidth: each
 /// hypothesis copies trial bytes out of a 256 MiB region, and twelve of those
@@ -356,7 +356,7 @@ fn limits(ceiling: u32) -> Limits {
     }
 }
 
-/// The region's blocks that could hold image data, as `search::Region` picks
+/// The region's blocks that could hold image data, as `pipeline::region::Region` picks
 /// them: every 4 KiB chunk whose profile can carry a compressed stream.
 fn blocks_of(region: &[u8]) -> Vec<reassemble::Candidate> {
     region

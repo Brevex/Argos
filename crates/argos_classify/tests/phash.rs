@@ -6,7 +6,7 @@
 //! measured here on generated images.
 
 use argos_classify::fixture::{Slice, sample};
-use argos_classify::phash::{NEAR_DUPLICATE_DISTANCE, hamming, perceptual_hash};
+use argos_classify::{NEAR_DUPLICATE_DISTANCE, hamming, perceptual_hash};
 use argos_core::classify::PixelImage;
 
 /// The hash of an image the suite expects to be hashable.
