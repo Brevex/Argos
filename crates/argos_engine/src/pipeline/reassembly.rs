@@ -97,7 +97,16 @@ pub(super) fn reassemble_broken<V: Read + Seek, P: ProgressSink + ?Sized>(
         .iter()
         .flat_map(|finding| finding.extents.iter().copied())
         .collect();
-    let mut buffer = Vec::new();
+    // Sized once, to the largest region the plans ask for. Growing it region
+    // by region instead would hold the old span and the new one at the same
+    // time on every step up, which is resident memory the run never addresses
+    // — and the last of those steps is the peak (`M-INITIAL-CAPACITY`).
+    let widest = plans
+        .iter()
+        .map(|plan| plan.range.len)
+        .max()
+        .unwrap_or_default();
+    let mut buffer = Vec::with_capacity(usize::try_from(widest).unwrap_or(0));
 
     // One thread does nothing but look at the clock while the search runs. The
     // stage's items are minutes long and the counter only speaks when one ends,
@@ -250,7 +259,7 @@ where
 /// whole medium. It is narrowed to this region once, here: a hypothesis cannot
 /// reach past what was held, so a claim that lies outside can never match one,
 /// and a search handed all of them would rule out the whole surface once per
-/// candidate (`crates/argos_carve/tests/reassemble_scale.rs`).
+/// candidate (`crates/argos_carve/tests/reassemble_at_scale.rs`).
 fn search_region<P: ProgressSink + ?Sized>(
     region: &region::Region,
     headers: &[Broken],
