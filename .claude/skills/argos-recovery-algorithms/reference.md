@@ -39,7 +39,9 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   "NTFS    "`, valid BPB sanity ranges), NTFS `FILE` record signature, ext2/3/4 superblock (magic
   `0xEF53` at offset 56 within the block, valid `s_log_block_size`, plausible counts) at primary
   and backup-superblock positions, APFS `NXSB` container superblock (checksummed), FAT/exFAT boot
-  sectors. Group hits into hypothesized volumes: an anchor plus self-consistent geometry fields
+  sectors, btrfs superblock (`_BHRfS_M` at offset 64, `crc32c` verified, `bytenr` naming which of
+  the four mirror offsets this copy is — so the volume start is read off the anchor rather than
+  assumed from its position). Group hits into hypothesized volumes: an anchor plus self-consistent geometry fields
   defines a candidate region `[start, start + size)`.
 - **Invariants**: anchors are validated by internal consistency (checksums, sanity ranges), never
   by position; overlapping candidate volumes are all kept — later stages decide by yield.
@@ -133,6 +135,61 @@ Recovers the geometry of filesystems destroyed by re-formatting.
   recently deleted; its file extents are in the older tree. Enumerate local snapshots the same way.
 - All B-tree walks are bounded (checked depth, node counts) per `A-UNTRUSTED-ONDISK`.
 - **Tier**: `FsMetadata` (checkpoint data is genuine filesystem metadata).
+
+## Spec: btrfs deleted-file recovery
+
+- **Input**: a volume anchor from the residue sweep, and the medium.
+- Read the superblock (4096 bytes, magic `_BHRfS_M` at offset 64) at its four fixed physical
+  offsets — 64 KiB, 64 MiB, 256 GiB, 1 EiB — taking the copy with the highest `generation` that
+  validates. A copy states its own physical offset in `bytenr`, so an anchor found at `at` fixes the
+  volume start at `at - bytenr`: a wiped primary is recovered from a mirror without guessing where
+  the volume began. Validation is magic, `bytenr` equal to one of the four mirror offsets, and the
+  `crc32c` over bytes 32.. matching the stored checksum.
+- **Build the chunk map before reading any tree.** Every tree pointer and every extent address in
+  btrfs is *logical* and is mapped to a physical offset by the chunk tree. Bootstrap the map from
+  the superblock's `sys_chunk_array` — a packed sequence of (`btrfs_disk_key`, `btrfs_chunk`) pairs,
+  which is exactly enough to reach the chunk root — then complete it by walking the chunk tree for
+  `CHUNK_ITEM` keys. A parser that treats logical as physical reads the wrong bytes and reports them
+  as evidence.
+- **One device, so one stripe.** Resolve a chunk through the first stripe whose `devid` matches the
+  superblock's `dev_item.devid`. That is exact for `SINGLE`, `DUP`, `RAID1`, `RAID1C3` and `RAID1C4`,
+  because each of those stripes is a whole copy. The striped profiles — `RAID0`, `RAID10`, `RAID5`,
+  `RAID6` — put only part of each stripe on any one device, so such a chunk is **not mapped** and the
+  extents inside it yield nothing rather than a guessed offset.
+- **Path A — backup roots.** `super_roots` holds four `btrfs_root_backup` entries, each naming a
+  historical `tree_root` and `fs_root` with their generations: the copy-on-write counterpart of the
+  APFS checkpoint ring. Walk an older generation's fs tree and the current one, and report inodes
+  present then and absent now, with their extents. Walk the root tree for `ROOT_ITEM` keys so every
+  subvolume and snapshot is covered, not only `FS_TREE`.
+- **Path B — stale tree blocks.** Copy-on-write does not overwrite the leaf that described a deleted
+  file: a new leaf is written elsewhere and the old one is freed but survives until reallocated.
+  Sweep the volume's range at `nodesize` granularity for blocks whose `fsid` matches the volume,
+  whose `crc32c` validates, and whose `bytenr` maps back through the chunk map to the offset the
+  block was found at; report what the leaves of those no live root reaches still describe. Driven by
+  the located volume rather than by the whole-surface sweep, because it needs the volume's `fsid`,
+  `nodesize` and chunk map — and because `nodesize` granularity is what makes it affordable.
+- Records read from a leaf: `INODE_ITEM` for size, mode and timestamps, `INODE_REF` for the name,
+  `EXTENT_DATA` for the extents. A regular-file extent's logical start is `disk_bytenr + offset` and
+  its length `num_bytes`; an inline extent's bytes are in the item itself, from byte 21, and are
+  reported as a range inside the leaf, as NTFS reports a resident `$DATA`.
+- Implemented subset: `csum_type` 0 (`crc32c`) only, and uncompressed extents only. A volume sealed
+  with `xxhash64`, `sha256` or `blake2b` fails its superblock parse; a file with any extent whose
+  `compression` field is non-zero is not reported at all, because the bytes on disk are not the
+  file's bytes and reporting them would be reporting compressed noise as a photograph. In practice
+  this costs little for what Argos looks for: btrfs declines to compress already-compressed data, so
+  JPEG and PNG land uncompressed even under `compress=zstd`. The extent tree, the free-space cache,
+  seed devices and multi-device pools are not read. Removing any of these limitations updates this
+  paragraph in the same change.
+- All tree walks are bounded in depth and node count per `A-UNTRUSTED-ONDISK`: `MAX_TREE_DEPTH`
+  follows the format's own `BTRFS_MAX_LEVEL` of 8, and `MAX_NODES`, `MAX_QUEUED`, `MAX_RECORDS`,
+  `MAX_CHUNKS` and `MAX_EXTENTS_PER_FILE` bound what a crafted tree can demand independently of any
+  on-disk count.
+- **Tier**: `FsMetadata` for path A — a complete, checksummed historical tree the filesystem itself
+  retains for recovery, which is the APFS checkpoint case exactly. `JournalResidue` for path B — the
+  leaf is checksum-valid but orphaned, the tree it belonged to is gone, and the extent it names may
+  since have been reallocated, which is the ext4 journal case exactly.
+- Reference: the btrfs on-disk format documentation and `include/uapi/linux/btrfs_tree.h`; Rodeh,
+  Bacik & Mason, *BTRFS: The Linux B-Tree Filesystem*, ACM Transactions on Storage 9(3), 2013.
 
 ## Spec: JPEG validation state machine
 

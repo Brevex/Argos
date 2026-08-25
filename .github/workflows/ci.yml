@@ -122,7 +122,7 @@ jobs:
       - name: Run every filesystem fuzz target for a fixed budget
         working-directory: crates/argos_fs
         run: |
-          for target in part_scan ntfs_record ext4_parse fat_dir apfs_open residue_sweep; do
+          for target in part_scan ntfs_record ext4_parse fat_dir apfs_open btrfs_parse residue_sweep; do
             cargo +nightly fuzz run "$target" -- -max_total_time=120 -rss_limit_mb=2048
           done
 

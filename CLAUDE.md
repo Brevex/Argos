@@ -79,7 +79,7 @@ crates/argos_device/   BlockSource adapters: per-OS HAL (Linux/Windows/macOS), d
                        crate allowed to contain unsafe. Path conventions and device-class
                        decisions live in modules compiled on every target, so they are
                        tested everywhere; only syscalls sit behind cfg
-crates/argos_fs/       partition tables + filesystem metadata recovery (NTFS/ext4/FAT/APFS)
+crates/argos_fs/       partition tables + filesystem metadata recovery (NTFS/ext4/FAT/APFS/btrfs)
                        + prior-filesystem residue scan
 crates/argos_carve/    signature carving, block classification and fragment reassembly over
                        `impl Read + Seek` (sans-IO, testable in memory)

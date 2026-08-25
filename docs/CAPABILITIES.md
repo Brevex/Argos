@@ -44,7 +44,7 @@ is one sample: the ordering between stages is dependable, the absolute figures a
 | # | Capability | Reachable from | Cost |
 | --- | --- | --- | --- |
 | C09 | Carve the whole surface by signature | CLI, GUI | **2 h 01 m** (138 MB/s) |
-| C10 | Recover from filesystem metadata: NTFS, ext2/3/4, FAT32, exFAT, APFS | CLI, GUI | **32 m** |
+| C10 | Recover from filesystem metadata: NTFS, ext2/3/4, FAT32, exFAT, APFS, btrfs | CLI, GUI | **32 m** |
 | C11 | Sweep for residue of filesystems that were on the medium before the current one | CLI, GUI | in C10 |
 | C12 | Read partition tables | CLI, GUI | instant |
 | C13 | Validate every candidate through its format's state machine (JPEG, PNG) | CLI, GUI | **41 m** (2,026,184 candidates) |

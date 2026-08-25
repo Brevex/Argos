@@ -9,13 +9,16 @@ use std::io::Cursor;
 use argos_core::Confidence;
 use argos_core::geometry::{ByteOffset, ByteRange};
 use argos_fs::fixture::{
-    APFS_BLOCK, EXT4_BLOCK, FAT_CLUSTER, FilePlan, Image, NTFS_CLUSTER, SECTOR, apfs_container,
-    apfs_cyclic_tree, exfat_boot_sector, exfat_volume, ext4_dir_block, ext4_inode_with_extents,
-    ext4_volume, fat32_volume, gpt_image, mbr, ntfs_boot_sector, ntfs_indx, ntfs_record,
-    ntfs_record_resident, ntfs_usn_record, ntfs_volume, resident_payload_offset, run_list,
-    truncated, usn_journal, with_u16_le, with_u32_le, zero_filled,
+    APFS_BLOCK, BTRFS_DATA_AT, BTRFS_NODE, BTRFS_SECTOR, BTRFS_SUPERBLOCK_AT, EXT4_BLOCK,
+    FAT_CLUSTER, FilePlan, Image, NTFS_CLUSTER, SECTOR, apfs_container, apfs_cyclic_tree,
+    btrfs_cyclic_tree, btrfs_node_logical, btrfs_node_offset, btrfs_reseal, btrfs_volume,
+    btrfs_volume_compressed, btrfs_volume_striped_data, exfat_boot_sector, exfat_volume,
+    ext4_dir_block, ext4_inode_with_extents, ext4_volume, fat32_volume, gpt_image, mbr,
+    ntfs_boot_sector, ntfs_indx, ntfs_record, ntfs_record_resident, ntfs_usn_record, ntfs_volume,
+    resident_payload_offset, run_list, truncated, usn_journal, with_u16_le, with_u32_le,
+    zero_filled,
 };
-use argos_fs::{FsKind, Origin, apfs, ext4, fat, ntfs, part, residue};
+use argos_fs::{FsKind, Origin, apfs, btrfs, ext4, fat, ntfs, part, residue};
 
 /// The extents a recovered file must claim, given its plan.
 fn expect_extents(file: &FilePlan) -> Vec<ByteRange> {
@@ -503,6 +506,16 @@ fn no_debug_impl_ever_renders_a_name_read_off_the_medium() {
             "{:?}",
             ext4::dir_entries(&ext4_dir_block(&[("private-photo.jpg", 12)]))
         ),
+        {
+            let planted = FilePlan::new("private-photo.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+            let volume = btrfs_volume(BTRFS_VOLUME, &planted);
+            let mut src = Cursor::new(&volume);
+            let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+                .expect("read")
+                .expect("valid");
+            let live = fs.live(&mut src).expect("read");
+            format!("{:?}", fs.recover_deleted(&mut src, &live).expect("read"))
+        },
     ];
     for output in rendered {
         assert!(
@@ -737,6 +750,321 @@ fn a_cyclic_apfs_tree_terminates_instead_of_looping() {
         found.is_empty(),
         "a cyclic tree carries no recoverable records"
     );
+}
+
+// --- btrfs ----------------------------------------------------------------
+
+/// The fixture volume size every btrfs case uses: enough for the metadata
+/// chunk plus room to plant content past it.
+const BTRFS_VOLUME: usize = 1 << 20;
+
+#[test]
+fn btrfs_recovers_an_inode_present_in_an_older_backup_root() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, 3 * BTRFS_SECTOR);
+    let image = btrfs_volume(BTRFS_VOLUME, &file);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    assert!(
+        fs.backups.len() >= 2,
+        "the superblock must retain an older root set"
+    );
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name.as_deref(), Some("shot.jpg"));
+    assert_eq!(found[0].fs, FsKind::Btrfs);
+    assert_eq!(found[0].confidence, Confidence::FsMetadata);
+    assert!(
+        found[0].timestamps.modified.is_some(),
+        "the inode item's times must be carried through"
+    );
+    assert_recovers_the_planted_bytes(&image, &file, &found[0].extents);
+}
+
+#[test]
+fn btrfs_recovers_a_fragmented_file_in_extent_order() {
+    let file = FilePlan::fragmented(
+        "holiday.jpg",
+        &[
+            (BTRFS_DATA_AT + 4 * BTRFS_SECTOR, BTRFS_SECTOR),
+            (BTRFS_DATA_AT, 2 * BTRFS_SECTOR),
+            (BTRFS_DATA_AT + 8 * BTRFS_SECTOR, BTRFS_SECTOR),
+        ],
+    );
+    let image = btrfs_volume(BTRFS_VOLUME, &file);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].extents.len(), 3);
+    // Extents must come back in *file* order, not in medium order — the parts
+    // above are deliberately out of order on the medium.
+    assert_recovers_the_planted_bytes(&image, &file, &found[0].extents);
+}
+
+#[test]
+fn btrfs_resolves_extents_through_the_chunk_tree() {
+    let file = FilePlan::new("mapped.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let image = btrfs_volume(BTRFS_VOLUME, &file);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+
+    assert_eq!(found.len(), 1);
+    // The fixture maps the metadata chunk to a physical offset well away from
+    // its logical address, so a parser that skipped the chunk tree and read the
+    // logical address as a physical one could not have got here at all.
+    assert_ne!(
+        btrfs_node_logical(0),
+        btrfs_node_offset(0) as u64,
+        "the fixture must not let logical and physical coincide"
+    );
+    assert_recovers_the_planted_bytes(&image, &file, &found[0].extents);
+}
+
+#[test]
+fn a_stale_tree_block_no_root_reaches_still_names_its_file() {
+    let file = FilePlan::new("gone.jpg", BTRFS_DATA_AT, 2 * BTRFS_SECTOR);
+    let image = btrfs_volume(BTRFS_VOLUME, &file);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs
+        .orphan_scan(
+            &mut src,
+            &live,
+            ByteRange::new(ByteOffset::new(0), image.len() as u64),
+        )
+        .expect("in-memory read");
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name.as_deref(), Some("gone.jpg"));
+    // A leaf no live root reaches names a file whose extents may since have
+    // been reallocated, so it is residue rather than current metadata.
+    assert_eq!(found[0].confidence, Confidence::JournalResidue);
+    assert_recovers_the_planted_bytes(&image, &file, &found[0].extents);
+}
+
+#[test]
+fn btrfs_rejects_a_block_whose_checksum_does_not_match() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let mut image = btrfs_volume(BTRFS_VOLUME, &file);
+    // Corrupt a byte the seal covers, and leave the seal alone.
+    image[btrfs_node_offset(4) + 64] ^= 0xFF;
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+
+    assert!(
+        found.is_empty(),
+        "a block failing its checksum must never be trusted"
+    );
+}
+
+#[test]
+fn a_superblock_whose_checksum_does_not_match_locates_no_volume() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let mut image = btrfs_volume(BTRFS_VOLUME, &file);
+    image[BTRFS_SUPERBLOCK_AT + 100] ^= 0xFF;
+
+    assert!(
+        btrfs::Btrfs::open(&mut Cursor::new(&image), ByteOffset::new(0))
+            .expect("in-memory read")
+            .is_none()
+    );
+    assert!(
+        residue::sweep(&mut Cursor::new(&image), image.len() as u64, &[])
+            .expect("in-memory sweep")
+            .volumes
+            .is_empty(),
+        "a corrupt superblock must not be reported as a volume"
+    );
+}
+
+#[test]
+fn a_cyclic_btrfs_tree_terminates_instead_of_looping() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let mut image = btrfs_volume(BTRFS_VOLUME, &file);
+    // Replace the past generation's filesystem tree with an interior node
+    // pointing back at its own block: a crafted cycle.
+    let cyclic = btrfs_cyclic_tree(btrfs_node_logical(4));
+    let at = btrfs_node_offset(4);
+    image[at..at + BTRFS_NODE].copy_from_slice(&cyclic);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    // The bounded walk must return; that this call ends is the assertion.
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+    assert!(
+        found.is_empty(),
+        "a cyclic tree carries no recoverable records"
+    );
+}
+
+#[test]
+fn a_truncated_btrfs_superblock_is_never_misread() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let image = btrfs_volume(BTRFS_VOLUME, &file);
+    for keep in [0, 64, 100, BTRFS_SUPERBLOCK_AT, BTRFS_SUPERBLOCK_AT + 2048] {
+        let cut = truncated(&image, keep);
+        let opened =
+            btrfs::Btrfs::open(&mut Cursor::new(&cut), ByteOffset::new(0)).expect("in-memory read");
+        assert!(
+            opened.is_none(),
+            "a superblock cut at {keep} must not yield a volume"
+        );
+    }
+}
+
+#[test]
+fn an_overflowed_item_count_is_rejected_before_any_allocation() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let mut image = btrfs_volume(BTRFS_VOLUME, &file);
+    // `nritems` at offset 96 of the block header, claiming the u32 maximum —
+    // then re-sealed, so the count itself is what has to be rejected rather
+    // than the checksum.
+    let at = btrfs_node_offset(4);
+    image[at + 96..at + 100].copy_from_slice(&u32::MAX.to_le_bytes());
+    btrfs_reseal(&mut image, at);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    // Bounded by what the block can hold, so this returns rather than walking
+    // four billion items.
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+    assert!(
+        found.len() <= 1,
+        "an absurd item count must not multiply records"
+    );
+}
+
+#[test]
+fn a_striped_chunk_yields_no_extents_rather_than_wrong_ones() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let image = btrfs_volume_striped_data(BTRFS_VOLUME, &file);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+
+    assert!(
+        found.is_empty(),
+        "a chunk whose stripes are partly on another device must not be resolved"
+    );
+}
+
+#[test]
+fn a_compressed_extent_is_not_reported_as_the_file() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let image = btrfs_volume_compressed(BTRFS_VOLUME, &file);
+
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, ByteOffset::new(0))
+        .expect("in-memory read")
+        .expect("the superblock must validate");
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+
+    assert!(
+        found.is_empty(),
+        "compressed bytes on the medium are not the file's bytes"
+    );
+}
+
+#[test]
+fn a_btrfs_mirror_locates_the_volume_when_the_primary_is_gone() {
+    let file = FilePlan::new("shot.jpg", BTRFS_DATA_AT, BTRFS_SECTOR);
+    let mut image = btrfs_volume(BTRFS_VOLUME, &file);
+    // A re-format overwrites the head of the volume. The superblock states
+    // which copy it is, so a surviving copy still fixes the volume's start —
+    // here the primary is destroyed and the anchor must come from elsewhere.
+    let mirror = argos_fs::fixture::btrfs_superblock(
+        BTRFS_SUPERBLOCK_AT as u64,
+        image.len() as u64,
+        9,
+        btrfs_node_logical(1),
+        btrfs_node_logical(0),
+        &[(6, btrfs_node_logical(3)), (9, btrfs_node_logical(1))],
+    );
+    assert_eq!(
+        &image[BTRFS_SUPERBLOCK_AT..BTRFS_SUPERBLOCK_AT + 4096],
+        &*mirror,
+        "the fixture's superblock must be reproducible for this test to mean anything"
+    );
+    image[..BTRFS_SUPERBLOCK_AT].fill(0);
+
+    let sweep =
+        residue::sweep(&mut Cursor::new(&image), image.len() as u64, &[]).expect("in-memory sweep");
+    let volume = sweep
+        .volumes
+        .iter()
+        .find(|volume| volume.kind == FsKind::Btrfs)
+        .expect("the btrfs volume must be found");
+    assert_eq!(volume.range.start, ByteOffset::new(0));
+    assert_eq!(volume.allocation_bytes, BTRFS_SECTOR as u64);
+}
+
+#[test]
+fn residue_sweep_finds_a_btrfs_volume_under_a_later_format() {
+    let file = FilePlan::new("old.jpg", BTRFS_DATA_AT, 2 * BTRFS_SECTOR);
+    let mut image = btrfs_volume(BTRFS_VOLUME, &file);
+    // Re-formatted as NTFS: a fresh boot sector at the volume's first sector,
+    // while the btrfs superblock a further 64 KiB in survives, along with the
+    // trees and the content.
+    let boot = ntfs_boot_sector(image.len(), 64 * NTFS_CLUSTER);
+    image[..SECTOR].copy_from_slice(&boot);
+
+    let sweep =
+        residue::sweep(&mut Cursor::new(&image), image.len() as u64, &[]).expect("in-memory sweep");
+    let kinds: Vec<FsKind> = sweep.volumes.iter().map(|volume| volume.kind).collect();
+    assert!(
+        kinds.contains(&FsKind::Btrfs),
+        "the pre-format btrfs volume must still be found: {kinds:?}"
+    );
+
+    let residual = sweep
+        .volumes
+        .iter()
+        .find(|volume| volume.kind == FsKind::Btrfs)
+        .expect("btrfs residue");
+    assert_eq!(residual.origin, Origin::Residual);
+    let mut src = Cursor::new(&image);
+    let fs = btrfs::Btrfs::open(&mut src, residual.range.start)
+        .expect("in-memory read")
+        .expect("the residual superblock must validate");
+    let live = fs.live(&mut src).expect("in-memory read");
+    let found = fs.recover_deleted(&mut src, &live).expect("in-memory read");
+    assert_eq!(found.len(), 1);
+    assert_recovers_the_planted_bytes(&image, &file, &found[0].extents);
 }
 
 // --- residue sweep --------------------------------------------------------

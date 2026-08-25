@@ -1,6 +1,6 @@
 ---
 name: argos-recovery-algorithms
-description: Use BEFORE implementing or modifying any recovery technique — residue sweep, NTFS/ext4/FAT/APFS deleted-file recovery, JPEG/PNG validation state machines, block classification, bifragment gap carving, graph reassembly — so the implementation follows the written spec instead of improvising. Covers A-ALGORITHM-FROM-SPEC.
+description: Use BEFORE implementing or modifying any recovery technique — residue sweep, NTFS/ext4/FAT/APFS/btrfs deleted-file recovery, JPEG/PNG validation state machines, block classification, bifragment gap carving, graph reassembly — so the implementation follows the written spec instead of improvising. Covers A-ALGORITHM-FROM-SPEC.
 ---
 
 # Recovery algorithms
@@ -25,6 +25,7 @@ exists only in code drifts, and two agents will implement it two ways.
 | ext4 backup superblocks + jbd2 journal inode mining | C |
 | FAT32/exFAT deleted dirents + contiguity assumption | C |
 | APFS checkpoint history, omap, snapshots | C |
+| btrfs backup roots, chunk map, stale copy-on-write tree blocks | C |
 | JPEG validation state machine (+ EXIF thumbnails) | D |
 | PNG validation state machine | D |
 | Block classification (entropy/histogram/JPEG-stream/zlib) | E |
@@ -37,4 +38,4 @@ When implementing, also invoke `argos-ondisk-parsing` (the parsers these specs n
 
 ## Full text
 
-[reference.md](reference.md) — `A-ALGORITHM-FROM-SPEC` plus the twelve specs above.
+[reference.md](reference.md) — `A-ALGORITHM-FROM-SPEC` plus the specs above.

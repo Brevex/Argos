@@ -334,6 +334,22 @@ fn recover_volume<V: Read + Seek>(
             .ok()
             .flatten()
             .and_then(|fs| fs.recover_deleted(view).ok()),
+        // Two paths, and the second is the one that pays on a used volume: the
+        // backup-root ring reaches four generations, while copy-on-write leaves
+        // a deleted file's leaf on the surface long after the ring has rotated
+        // past it. Both are diffed against the live trees, so a file that still
+        // exists is never reported as deleted.
+        FsKind::Btrfs => argos_fs::btrfs::Btrfs::open(view, at)
+            .ok()
+            .flatten()
+            .and_then(|fs| {
+                let live = fs.live(view).ok()?;
+                let mut files = fs.recover_deleted(view, &live).ok()?;
+                if let Ok(stale) = fs.orphan_scan(view, &live, volume.range) {
+                    files.extend(stale);
+                }
+                Some(files)
+            }),
         // A filesystem family with no metadata parser yet. Carving still
         // covers its surface; claiming a recovery here would not be honest.
         _ => None,

@@ -1533,3 +1533,439 @@ pub fn with_u32_le(bytes: &[u8], at: usize, value: u32) -> Vec<u8> {
 pub fn zero_filled(len: usize) -> Vec<u8> {
     vec![0_u8; len]
 }
+
+// --- btrfs ----------------------------------------------------------------
+
+/// Bytes per sector in btrfs fixtures.
+pub const BTRFS_SECTOR: usize = 4096;
+
+/// Bytes per tree block in btrfs fixtures.
+pub const BTRFS_NODE: usize = 16384;
+
+/// Physical offset of the primary superblock. Source: `BTRFS_SUPER_INFO_OFFSET`.
+pub const BTRFS_SUPERBLOCK_AT: usize = 0x1_0000;
+
+/// Physical offset of the first superblock mirror. Source:
+/// `BTRFS_SUPER_MIRROR_OFFSET(1)`.
+pub const BTRFS_MIRROR_AT: usize = 0x400_0000;
+
+/// The filesystem identity every block of a fixture volume carries.
+const BTRFS_FSID: [u8; 16] = *b"ArgosBtrfsFixtr\x00";
+
+/// Logical address the fixture's metadata chunk starts at.
+///
+/// Deliberately different from its physical offset: a parser that treats
+/// logical addresses as physical ones reads the wrong bytes, and a fixture
+/// where the two coincide would not catch it.
+const META_LOGICAL: u64 = 0x100_0000;
+
+/// Logical address the fixture's data chunk starts at. It maps to physical
+/// zero, so a file's planted offset is `DATA_LOGICAL + offset`.
+const DATA_LOGICAL: u64 = 0x200_0000;
+
+/// Physical offset the fixture's metadata chunk starts at.
+const META_PHYSICAL: u64 = 0x2_0000;
+
+/// Bytes the fixture's metadata chunk spans.
+const META_LENGTH: u64 = 0x4_0000;
+
+/// First offset a fixture volume's file content may occupy.
+///
+/// Everything below it is the superblock and the metadata chunk holding the
+/// trees, so content planted there would overwrite the metadata describing it.
+pub const BTRFS_DATA_AT: usize = (META_PHYSICAL + META_LENGTH) as usize;
+
+/// Logical address of tree block `index` in the fixture's metadata chunk.
+#[must_use]
+pub fn btrfs_node_logical(index: u64) -> u64 {
+    META_LOGICAL + index * BTRFS_NODE as u64
+}
+
+/// Physical offset of tree block `index` in the fixture's metadata chunk.
+#[must_use]
+pub fn btrfs_node_offset(index: u64) -> usize {
+    META_PHYSICAL as usize + index as usize * BTRFS_NODE
+}
+
+/// A btrfs volume of `len` bytes whose previous generation still describes
+/// `file`, deleted in the newest.
+///
+/// Block map, in the metadata chunk: 0 chunk tree, 1 current root tree,
+/// 2 current filesystem tree (empty), 3 past root tree, 4 past filesystem tree
+/// (holds `file`).
+///
+/// Content must be planted at or after [`BTRFS_DATA_AT`]: the metadata chunk
+/// holds the trees that describe the file, and a plan that overlapped it would
+/// overwrite its own metadata.
+///
+/// # Panics
+///
+/// Panics if the fixed fixture layout does not fit `len`, or if any part of
+/// `file` lands inside the metadata chunk, with the offending offset.
+#[must_use]
+pub fn btrfs_volume(len: usize, file: &FilePlan) -> Vec<u8> {
+    btrfs_image(len, file, BTRFS_PROFILE_SINGLE, 0)
+}
+
+/// A btrfs volume whose data chunk uses a striped profile.
+///
+/// `RAID0` puts part of every stripe on another device, which this scan cannot
+/// see, so the chunk must not be mapped at all and the file must yield nothing
+/// rather than bytes read from the wrong place.
+///
+/// # Panics
+///
+/// As [`btrfs_volume`].
+#[must_use]
+pub fn btrfs_volume_striped_data(len: usize, file: &FilePlan) -> Vec<u8> {
+    btrfs_image(len, file, BTRFS_PROFILE_RAID0, 0)
+}
+
+/// A btrfs volume whose deleted file has a compressed extent.
+///
+/// The bytes on the medium are then not the file's bytes, so the file must not
+/// be reported at all.
+///
+/// # Panics
+///
+/// As [`btrfs_volume`].
+#[must_use]
+pub fn btrfs_volume_compressed(len: usize, file: &FilePlan) -> Vec<u8> {
+    btrfs_image(len, file, BTRFS_PROFILE_SINGLE, 1)
+}
+
+/// `BTRFS_BLOCK_GROUP_SYSTEM`, an unstriped profile. Source: btrfs block-group
+/// flags.
+const BTRFS_PROFILE_SINGLE: u64 = 1 << 1;
+
+/// `BTRFS_BLOCK_GROUP_RAID0`, which splits a stripe across devices.
+const BTRFS_PROFILE_RAID0: u64 = 1 << 3;
+
+fn btrfs_image(len: usize, file: &FilePlan, data_profile: u64, compression: u8) -> Vec<u8> {
+    assert!(
+        len >= BTRFS_DATA_AT,
+        "btrfs fixture needs at least {BTRFS_DATA_AT} bytes, got {len}"
+    );
+    for &(offset, bytes) in &file.parts {
+        assert!(
+            offset >= BTRFS_DATA_AT,
+            "btrfs fixture content must start at or after {BTRFS_DATA_AT}, got {offset}"
+        );
+        assert!(
+            offset + bytes <= len,
+            "btrfs fixture content ends at {} past the {len}-byte volume",
+            offset + bytes
+        );
+    }
+    let inode = 257_u64;
+    let extents: Vec<BtrfsExtent> = {
+        let mut at = 0_u64;
+        file.parts
+            .iter()
+            .map(|&(offset, bytes)| {
+                let part = (at, DATA_LOGICAL + offset as u64, bytes as u64);
+                at += bytes as u64;
+                part
+            })
+            .collect()
+    };
+    let size = file.content.len() as u64;
+
+    let image = Image::new(len)
+        .with(
+            btrfs_node_offset(0),
+            &btrfs_chunk_tree(
+                btrfs_node_logical(0),
+                &[(DATA_LOGICAL, len as u64, 0, data_profile)],
+            ),
+        )
+        .with(
+            btrfs_node_offset(1),
+            &btrfs_root_tree(btrfs_node_logical(1), 9, btrfs_node_logical(2)),
+        )
+        .with(
+            btrfs_node_offset(2),
+            &btrfs_fs_tree(btrfs_node_logical(2), 9, &[]),
+        )
+        .with(
+            btrfs_node_offset(3),
+            &btrfs_root_tree(btrfs_node_logical(3), 6, btrfs_node_logical(4)),
+        )
+        .with(
+            btrfs_node_offset(4),
+            &btrfs_fs_tree_compressed(
+                btrfs_node_logical(4),
+                6,
+                &[BtrfsFile {
+                    inode,
+                    name: file.name.as_str(),
+                    size,
+                    extents: extents.as_slice(),
+                }],
+                compression,
+            ),
+        )
+        .with(
+            BTRFS_SUPERBLOCK_AT,
+            &btrfs_superblock(
+                BTRFS_SUPERBLOCK_AT as u64,
+                len as u64,
+                9,
+                btrfs_node_logical(1),
+                btrfs_node_logical(0),
+                &[(6, btrfs_node_logical(3)), (9, btrfs_node_logical(1))],
+            ),
+        );
+    file.place(image).into_bytes()
+}
+
+/// A superblock copy for a volume of `total` bytes.
+///
+/// `bytenr` is the physical offset this copy sits at, which is what a reader
+/// uses to work back to the volume's start; `backups` are the historical
+/// (generation, root-tree) pairs `super_roots` retains.
+#[must_use]
+pub fn btrfs_superblock(
+    bytenr: u64,
+    total: u64,
+    generation: u64,
+    tree_root: u64,
+    chunk_root: u64,
+    backups: &[(u64, u64)],
+) -> Vec<u8> {
+    let mut block = vec![0_u8; BTRFS_SECTOR];
+    block[32..48].copy_from_slice(&BTRFS_FSID);
+    block[48..56].copy_from_slice(&bytenr.to_le_bytes());
+    block[64..72].copy_from_slice(&0x4D5F_5366_5248_425F_u64.to_le_bytes()); // _BHRfS_M
+    block[72..80].copy_from_slice(&generation.to_le_bytes());
+    block[80..88].copy_from_slice(&tree_root.to_le_bytes());
+    block[88..96].copy_from_slice(&chunk_root.to_le_bytes());
+    block[112..120].copy_from_slice(&total.to_le_bytes());
+    block[144..148].copy_from_slice(&(BTRFS_SECTOR as u32).to_le_bytes());
+    block[148..152].copy_from_slice(&(BTRFS_NODE as u32).to_le_bytes());
+    // csum_type 0 (crc32c) is already zero; dev_item.devid at 201, its
+    // total_bytes at 209.
+    block[201..209].copy_from_slice(&1_u64.to_le_bytes());
+    block[209..217].copy_from_slice(&total.to_le_bytes());
+
+    // The bootstrap chunk: enough to reach the chunk tree, and no more.
+    let system = btrfs_chunk_item(
+        META_LOGICAL,
+        META_LENGTH,
+        META_PHYSICAL,
+        BTRFS_PROFILE_SINGLE,
+    );
+    block[160..164].copy_from_slice(&(system.len() as u32).to_le_bytes());
+    block[811..811 + system.len()].copy_from_slice(&system);
+
+    for (index, &(generation, tree_root)) in backups.iter().take(4).enumerate() {
+        let at = 2859 + index * 168;
+        block[at..at + 8].copy_from_slice(&tree_root.to_le_bytes());
+        block[at + 8..at + 16].copy_from_slice(&generation.to_le_bytes());
+    }
+    btrfs_seal(block)
+}
+
+/// One (key, `btrfs_chunk`) pair as `sys_chunk_array` and the chunk tree store
+/// it, mapping `logical` to `physical` for `length` bytes.
+#[must_use]
+pub fn btrfs_chunk_item(logical: u64, length: u64, physical: u64, profile: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    // btrfs_disk_key: objectid 256 (first chunk tree), type 228, offset logical.
+    out.extend_from_slice(&256_u64.to_le_bytes());
+    out.push(228);
+    out.extend_from_slice(&logical.to_le_bytes());
+    // btrfs_chunk: length, owner, stripe_len, type, io fields, stripe count.
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(&2_u64.to_le_bytes());
+    out.extend_from_slice(&65536_u64.to_le_bytes());
+    out.extend_from_slice(&profile.to_le_bytes());
+    out.extend_from_slice(&4096_u32.to_le_bytes());
+    out.extend_from_slice(&4096_u32.to_le_bytes());
+    out.extend_from_slice(&4096_u32.to_le_bytes());
+    out.extend_from_slice(&1_u16.to_le_bytes()); // num_stripes
+    out.extend_from_slice(&0_u16.to_le_bytes()); // sub_stripes
+    // btrfs_stripe: devid, physical offset, uuid.
+    out.extend_from_slice(&1_u64.to_le_bytes());
+    out.extend_from_slice(&physical.to_le_bytes());
+    out.extend_from_slice(&[0_u8; 16]);
+    out
+}
+
+/// A chunk-tree leaf mapping each (logical, length, physical, profile) entry.
+#[must_use]
+pub fn btrfs_chunk_tree(bytenr: u64, chunks: &[(u64, u64, u64, u64)]) -> Vec<u8> {
+    let items: Vec<(u64, u8, u64, Vec<u8>)> = chunks
+        .iter()
+        .map(|&(logical, length, physical, profile)| {
+            let item = btrfs_chunk_item(logical, length, physical, profile);
+            // The key is stored in the item header, so only the chunk body
+            // itself is the payload.
+            (256, 228, logical, item[17..].to_vec())
+        })
+        .collect();
+    btrfs_leaf(bytenr, 9, 3, &items)
+}
+
+/// A root-tree leaf naming the filesystem tree at `fs_tree`.
+#[must_use]
+pub fn btrfs_root_tree(bytenr: u64, generation: u64, fs_tree: u64) -> Vec<u8> {
+    /// Bytes of a `btrfs_root_item`. Source: the struct.
+    const ROOT_ITEM_BYTES: usize = 439;
+
+    let mut item = vec![0_u8; ROOT_ITEM_BYTES];
+    item[176..184].copy_from_slice(&fs_tree.to_le_bytes());
+    btrfs_leaf(bytenr, generation, 1, &[(5, 132, 0, item)])
+}
+
+/// One extent of a fixture file: file offset, logical address, bytes.
+pub type BtrfsExtent = (u64, u64, u64);
+
+/// One file's records in a btrfs filesystem tree.
+#[derive(Clone, Copy, Debug)]
+pub struct BtrfsFile<'a> {
+    /// Inode number.
+    pub inode: u64,
+    /// File name, as an `INODE_REF` carries it.
+    pub name: &'a str,
+    /// File size in bytes.
+    pub size: u64,
+    /// Extents in file order.
+    pub extents: &'a [BtrfsExtent],
+}
+
+/// A filesystem-tree leaf holding one record set per file.
+#[must_use]
+pub fn btrfs_fs_tree(bytenr: u64, generation: u64, records: &[BtrfsFile<'_>]) -> Vec<u8> {
+    btrfs_fs_tree_compressed(bytenr, generation, records, 0)
+}
+
+/// As [`btrfs_fs_tree`], with every extent marked compressed by `compression`.
+#[must_use]
+pub fn btrfs_fs_tree_compressed(
+    bytenr: u64,
+    generation: u64,
+    records: &[BtrfsFile<'_>],
+    compression: u8,
+) -> Vec<u8> {
+    let mut items: Vec<(u64, u8, u64, Vec<u8>)> = Vec::new();
+    for &BtrfsFile {
+        inode,
+        name,
+        size,
+        extents,
+    } in records
+    {
+        // btrfs_inode_item: size at 16, mode at 52, mtime at 136, otime at 148.
+        let mut item = vec![0_u8; 160];
+        item[16..24].copy_from_slice(&size.to_le_bytes());
+        item[52..56].copy_from_slice(&0x0000_81A4_u32.to_le_bytes()); // S_IFREG | 0644
+        item[136..144].copy_from_slice(&1_700_000_500_u64.to_le_bytes());
+        item[148..156].copy_from_slice(&1_700_000_000_u64.to_le_bytes());
+        items.push((inode, 1, 0, item));
+
+        // btrfs_inode_ref: index, name_len, then the name.
+        let mut reference = vec![0_u8; 10];
+        reference[8..10].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        reference.extend_from_slice(name.as_bytes());
+        items.push((inode, 12, 256, reference));
+
+        for &(file_offset, logical, bytes) in extents {
+            let mut extent = btrfs_extent_item(logical, bytes);
+            extent[16] = compression;
+            items.push((inode, 108, file_offset, extent));
+        }
+    }
+    btrfs_leaf(bytenr, generation, 5, &items)
+}
+
+/// A regular `btrfs_file_extent_item` covering `bytes` at `logical`.
+#[must_use]
+pub fn btrfs_extent_item(logical: u64, bytes: u64) -> Vec<u8> {
+    let mut item = vec![0_u8; 53];
+    item[8..16].copy_from_slice(&bytes.to_le_bytes()); // ram_bytes
+    item[20] = 1; // regular, not inline
+    item[21..29].copy_from_slice(&logical.to_le_bytes());
+    item[29..37].copy_from_slice(&bytes.to_le_bytes());
+    item[45..53].copy_from_slice(&bytes.to_le_bytes());
+    item
+}
+
+/// A filesystem tree whose interior node points back at its own block — the
+/// crafted cycle a bounded walker must terminate on.
+#[must_use]
+pub fn btrfs_cyclic_tree(bytenr: u64) -> Vec<u8> {
+    let mut block = vec![0_u8; BTRFS_NODE];
+    btrfs_header(&mut block, bytenr, 9, 5, 1, 1);
+    // One key pointer, aimed at this very block.
+    let at = 101 + 17;
+    block[at..at + 8].copy_from_slice(&bytenr.to_le_bytes());
+    btrfs_seal(block)
+}
+
+/// A leaf holding `items`, each `(key objectid, key type, key offset, payload)`.
+#[must_use]
+fn btrfs_leaf(
+    bytenr: u64,
+    generation: u64,
+    owner: u64,
+    items: &[(u64, u8, u64, Vec<u8>)],
+) -> Vec<u8> {
+    /// Bytes of a `btrfs_header`, and of one `btrfs_item`. Source: the structs.
+    const HEADER: usize = 101;
+    const ITEM: usize = 25;
+
+    let mut block = vec![0_u8; BTRFS_NODE];
+    btrfs_header(&mut block, bytenr, generation, owner, 0, items.len() as u32);
+    // Item descriptors grow forward from the header; their payloads grow
+    // backwards from the end of the block.
+    let mut payload_at = BTRFS_NODE - HEADER;
+    for (index, (objectid, key_type, key_offset, data)) in items.iter().enumerate() {
+        let at = HEADER + index * ITEM;
+        block[at..at + 8].copy_from_slice(&objectid.to_le_bytes());
+        block[at + 8] = *key_type;
+        block[at + 9..at + 17].copy_from_slice(&key_offset.to_le_bytes());
+        payload_at -= data.len();
+        block[at + 17..at + 21].copy_from_slice(&(payload_at as u32).to_le_bytes());
+        block[at + 21..at + 25].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        block[HEADER + payload_at..HEADER + payload_at + data.len()].copy_from_slice(data);
+    }
+    btrfs_seal(block)
+}
+
+/// Writes a `btrfs_header` into the first 101 bytes of `block`.
+fn btrfs_header(block: &mut [u8], bytenr: u64, generation: u64, owner: u64, level: u8, items: u32) {
+    block[32..48].copy_from_slice(&BTRFS_FSID);
+    block[48..56].copy_from_slice(&bytenr.to_le_bytes());
+    block[80..88].copy_from_slice(&generation.to_le_bytes());
+    block[88..96].copy_from_slice(&owner.to_le_bytes());
+    block[96..100].copy_from_slice(&items.to_le_bytes());
+    block[100] = level;
+}
+
+/// Recomputes the CRC-32C of the tree block at `at` within `image`.
+///
+/// Editing a field of a checksummed block otherwise only ever tests the
+/// checksum; re-sealing is what makes the edit a *semantic* corruption the
+/// parser has to reject on its own terms.
+///
+/// # Panics
+///
+/// Panics if `at` does not leave a whole block in `image`.
+pub fn btrfs_reseal(image: &mut [u8], at: usize) {
+    let end = at + BTRFS_NODE;
+    assert!(
+        end <= image.len(),
+        "block at {at} runs {} bytes past the image",
+        end - image.len()
+    );
+    let checksum = crate::btrfs::crc32c(&image[at + 32..end]);
+    image[at..at + 4].copy_from_slice(&checksum.to_le_bytes());
+}
+
+/// Stamps a block's CRC-32C into its first four bytes.
+fn btrfs_seal(mut block: Vec<u8>) -> Vec<u8> {
+    let checksum = crate::btrfs::crc32c(&block[32..]);
+    block[0..4].copy_from_slice(&checksum.to_le_bytes());
+    block
+}

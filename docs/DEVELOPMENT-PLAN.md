@@ -80,7 +80,7 @@ crates/argos_core/     domain newtypes (Lba, ByteOffset, SectorSize, DeviceClass
                        port traits, canonical error structs shared across crates
 crates/argos_device/   BlockSource adapters: per-OS HAL — the ONLY crate allowed `unsafe`
 crates/argos_fs/       partition tables (MBR/GPT incl. backup GPT) + filesystem metadata
-                       recovery (NTFS, ext4, FAT/exFAT, APFS) + prior-filesystem residue scan
+                       recovery (NTFS, ext4, FAT/exFAT, APFS, btrfs) + prior-filesystem residue scan
 crates/argos_carve/    signature carving, block classification, fragment reassembly, format
                        validators — sans-IO over `impl Read + Seek`
 crates/argos_classify/ triage by deterministic image statistics + perceptual-hash dedup

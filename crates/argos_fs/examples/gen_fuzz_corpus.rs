@@ -6,9 +6,11 @@ use std::fs;
 use std::path::Path;
 
 use argos_fs::fixture::{
-    APFS_BLOCK, EXT4_BLOCK, FAT_CLUSTER, FilePlan, NTFS_CLUSTER, apfs_container, exfat_volume,
-    ext4_dir_block, ext4_volume, fat32_volume, gpt_image, ntfs_indx, ntfs_volume, truncated,
-    usn_journal, with_u16_le, with_u32_le, zero_filled,
+    APFS_BLOCK, BTRFS_DATA_AT, BTRFS_SECTOR, BTRFS_SUPERBLOCK_AT, EXT4_BLOCK, FAT_CLUSTER,
+    FilePlan, NTFS_CLUSTER, apfs_container, btrfs_cyclic_tree, btrfs_node_logical,
+    btrfs_node_offset, btrfs_reseal, btrfs_volume, exfat_volume, ext4_dir_block, ext4_volume,
+    fat32_volume, gpt_image, ntfs_indx, ntfs_volume, truncated, usn_journal, with_u16_le,
+    with_u32_le, zero_filled,
 };
 
 fn main() -> std::io::Result<()> {
@@ -69,9 +71,36 @@ fn main() -> std::io::Result<()> {
     fs::write(apfs_dir.join("container"), &apfs)?;
     fs::write(apfs_dir.join("truncated"), truncated(&apfs, apfs.len() / 3))?;
 
+    let btrfs_dir = base.join("btrfs_parse");
+    fs::create_dir_all(&btrfs_dir)?;
+    let btrfs_file = FilePlan::new("seed.jpg", BTRFS_DATA_AT, 2 * BTRFS_SECTOR);
+    let btrfs = btrfs_volume(1 << 20, &btrfs_file);
+    fs::write(btrfs_dir.join("volume"), &btrfs)?;
+    fs::write(
+        btrfs_dir.join("superblock"),
+        &btrfs[BTRFS_SUPERBLOCK_AT..BTRFS_SUPERBLOCK_AT + 4096],
+    )?;
+    fs::write(
+        btrfs_dir.join("truncated"),
+        truncated(&btrfs, btrfs.len() / 3),
+    )?;
+    // An item count claiming the u32 maximum, re-sealed so the count is what
+    // has to be rejected rather than the checksum.
+    let mut overflow = btrfs.clone();
+    let node = btrfs_node_offset(4);
+    overflow[node + 96..node + 100].copy_from_slice(&u32::MAX.to_le_bytes());
+    btrfs_reseal(&mut overflow, node);
+    fs::write(btrfs_dir.join("overflow"), &overflow)?;
+    // A tree whose interior node points back at its own block.
+    let mut cyclic = btrfs.clone();
+    let cycle = btrfs_cyclic_tree(btrfs_node_logical(4));
+    cyclic[node..node + cycle.len()].copy_from_slice(&cycle);
+    fs::write(btrfs_dir.join("cyclic"), &cyclic)?;
+
     let sweep_dir = base.join("residue_sweep");
     fs::create_dir_all(&sweep_dir)?;
     fs::write(sweep_dir.join("ext4"), &ext4)?;
+    fs::write(sweep_dir.join("btrfs"), &btrfs)?;
     fs::write(sweep_dir.join("zeros"), zero_filled(64 * 1024))?;
 
     println!("seed corpus written under {}", base.display());

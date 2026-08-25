@@ -3,9 +3,9 @@
 //! A quick re-format overwrites a small metadata region and nothing else, so
 //! the anchors of the *previous* filesystem survive elsewhere on the medium.
 //! This sweep tests every sector boundary for NTFS boot sectors and `FILE`
-//! records, ext superblocks, FAT/exFAT boot sectors and APFS container
-//! superblocks, and validates each hit by **internal consistency** — never by
-//! position. Overlapping candidates are all kept; later stages decide by
+//! records, ext superblocks, FAT/exFAT boot sectors, APFS container
+//! superblocks and btrfs superblocks, and validates each hit by **internal
+//! consistency** — never by position. Overlapping candidates are all kept; later stages decide by
 //! yield.
 
 use std::io::{Read, Seek};
@@ -13,6 +13,7 @@ use std::io::{Read, Seek};
 use argos_core::geometry::{ByteOffset, ByteRange};
 
 use crate::apfs::Apfs;
+use crate::btrfs;
 use crate::ext4::{Ext4, SUPERBLOCK_OFFSET};
 use crate::fat::Fat;
 use crate::ntfs::Ntfs;
@@ -300,6 +301,26 @@ pub fn volume_at(window: &[u8], at: u64, medium_len: u64) -> Option<Volume> {
             range: ByteRange::new(ByteOffset::new(at), container.min(remaining)),
             origin: Origin::Residual,
             allocation_bytes: apfs_block_bytes(window).unwrap_or(0),
+        });
+    }
+    // A btrfs superblock records which of its four fixed copies it is, so an
+    // anchor fixes the volume's start rather than merely suggesting it: a
+    // mirror 64 MiB in still names the volume it belongs to, even when the
+    // primary was what a later format overwrote. The magic test guards the
+    // checksum for the same reason it guards the APFS parse.
+    if window.len() >= 4096
+        && btrfs::has_superblock_magic(window)
+        && let Some(found) = btrfs::from_superblock(window, ByteOffset::new(at))
+    {
+        let start = found.volume_offset.get();
+        return Some(Volume {
+            kind: FsKind::Btrfs,
+            range: ByteRange::new(
+                found.volume_offset,
+                found.total_bytes.min(medium_len.saturating_sub(start)),
+            ),
+            origin: Origin::Residual,
+            allocation_bytes: found.sector_bytes,
         });
     }
     None

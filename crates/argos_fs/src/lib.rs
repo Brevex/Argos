@@ -9,8 +9,8 @@
 //! Modules follow the recovery pipeline: [`part`] reads the current partition
 //! tables, [`residue`] sweeps the surface for anchors of *previous* filesystems
 //! (what survives re-formatting), and the per-filesystem modules ([`ntfs`],
-//! [`ext4`], [`fat`], [`apfs`]) recover deleted files — names, timestamps and
-//! extents — from current or residual volumes.
+//! [`ext4`], [`fat`], [`apfs`], [`btrfs`]) recover deleted files — names,
+//! timestamps and extents — from current or residual volumes.
 //!
 //! What this cannot do: content overwritten by later writes is gone, `TRIM`med
 //! SSD blocks read as zeros, and a file whose metadata and content are both
@@ -30,6 +30,7 @@ use argos_core::Confidence;
 use argos_core::geometry::{ByteOffset, ByteRange};
 
 pub mod apfs;
+pub mod btrfs;
 pub mod ext4;
 pub mod fat;
 pub mod ntfs;
@@ -56,6 +57,8 @@ pub enum FsKind {
     ExFat,
     /// APFS container.
     Apfs,
+    /// btrfs.
+    Btrfs,
 }
 
 impl fmt::Display for FsKind {
@@ -66,6 +69,7 @@ impl fmt::Display for FsKind {
             Self::Fat32 => "fat32",
             Self::ExFat => "exfat",
             Self::Apfs => "apfs",
+            Self::Btrfs => "btrfs",
         };
         f.write_str(name)
     }

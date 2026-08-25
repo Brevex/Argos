@@ -53,6 +53,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "btrfs_parse"
+path = "fuzz_targets/btrfs_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "residue_sweep"
 path = "fuzz_targets/residue_sweep.rs"
 test = false

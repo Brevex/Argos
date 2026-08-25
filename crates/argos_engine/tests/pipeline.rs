@@ -217,6 +217,38 @@ fn a_deleted_file_recovered_from_ntfs_keeps_its_name_and_beats_carving() {
 }
 
 #[test]
+fn a_deleted_file_recovered_from_btrfs_keeps_its_name_and_beats_carving() {
+    let jpeg = argos_carve::fixture::Jpeg::new().build();
+    let file = argos_fs::fixture::FilePlan::new(
+        "holiday.jpg",
+        argos_fs::fixture::BTRFS_DATA_AT,
+        jpeg.len(),
+    )
+    .with_content(jpeg.clone());
+    let image = argos_fs::fixture::btrfs_volume(CHUNK * 12, &file);
+
+    let (artifacts, _) = scan(&image);
+
+    let recovered = artifacts
+        .iter()
+        .find(|artifact| artifact.recovered_name.is_some())
+        .expect("the deleted file must come back with its name");
+    assert_eq!(recovered.recovered_name.as_deref(), Some("holiday.jpg"));
+    assert_eq!(recovered.stage, Stage::Filesystem);
+    assert_eq!(recovered.confidence, Confidence::FsMetadata);
+    assert!(
+        recovered.source_object.is_some(),
+        "a finding must be traceable back to the filesystem object it came from"
+    );
+    assert_eq!(recovered.bytes, jpeg);
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "one file recovered twice is still one artifact"
+    );
+}
+
+#[test]
 fn a_truncated_png_is_recorded_as_a_break_and_never_written_as_a_header() {
     // PNG verifies per chunk, so a file whose tail is gone has a truncated
     // `IDAT` that cannot verify and a confirmed prefix that stops at the
