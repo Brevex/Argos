@@ -97,13 +97,13 @@ Stated so the backlog below is read against the right baseline. Each of these la
 | --- | --- | --- |
 | 2.1 | `argos acquire` copies a medium to a raw image, multi-pass, with progress | [acquire.rs](../crates/argos/src/acquire.rs) |
 | 2.2 | The manifest records what a run reached: `coverage`, `volumes` | [lib.rs](../crates/argos_report/src/lib.rs) |
-| 2.3 | Findings lost to damage are counted, not silently dropped | [merge.rs](../crates/argos_engine/src/merge.rs) |
+| 2.3 | Findings lost to damage are counted, not silently dropped | [finding.rs](../crates/argos_engine/src/finding.rs) |
 | 2.4 | Artifacts are ordered by named evidence (`Standing`), CLI and window | [rank.rs](../crates/argos_classify/src/rank.rs) |
 | 2.5 | NTFS anchors are confirmed against their `$MFT` before anything resolves against them | [ntfs.rs `locate`](../crates/argos_fs/src/ntfs.rs) |
 | 2.6 | PNG candidates declare their `IHDR` size, so a floor can act on them | [png.rs `header_dimensions`](../crates/argos_carve/src/png.rs) |
 | 2.7 | `$UsnJrnl:$J` is read; artifacts carry `deleted_unix` | [ntfs.rs `change_journal`](../crates/argos_fs/src/ntfs.rs) |
 | 2.8 | `--range` scans a neighbourhood instead of a disk | [main.rs](../crates/argos/src/main.rs) |
-| 2.9 | A finding that runs into damage keeps the part before it | [merge.rs `head_before_damage`](../crates/argos_engine/src/merge.rs) |
+| 2.9 | A finding that runs into damage keeps the part before it | [finding.rs `head_before_damage`](../crates/argos_engine/src/finding.rs#L457) |
 
 Measured guarantee that must survive every change below: `crates/argos_carve/tests/recovery_rate.rs`
 reports 87 % on two and three fragments, 25 % on four, and **0 fabricated on all six patterns**.
@@ -117,7 +117,7 @@ tell it worked, and what it risks.
 
 ### 3.1 The PNG oracle has no resume
 
-**Where.** [`reassemble.rs:571`](../crates/argos_carve/src/reassemble.rs#L571) — `Oracle::probe`
+**Where.** [`reassemble.rs:570`](../crates/argos_carve/src/reassemble.rs#L570) — `Oracle::probe`
 falls through to a full `probe(src, Format::Png, trial, scratch)` for every hypothesis, which runs
 `crate::validate` over the whole assembled path from its first byte.
 
@@ -159,7 +159,7 @@ looser one. This changes cost, never acceptance.
 
 ### 3.2 A PNG has no reportable partial prefix
 
-**Where.** [`pipeline.rs:1551`](../crates/argos_engine/src/pipeline.rs#L1551) — `worth_reporting`
+**Where.** [`reassembly.rs:491`](../crates/argos_engine/src/pipeline/reassembly.rs#L491) — `worth_reporting`
 returns `false` for `Format::Png`, deliberately and with the reason in its doc.
 
 **What is wrong.** Nothing yet — it is honest as it stands. PNG verifies per chunk: a CRC32
@@ -178,7 +178,7 @@ reporting. Once it exists:
 1. `png` reports `inflated` bytes and the raw size the `IHDR` implies (`Ihdr::raw_bytes`, already
    there), which gives a genuine fraction of the frame.
 2. `locate_break`'s PNG arm fills `Broken::decoded` and `Broken::required` from those instead of
-   the zeroes at [`reassemble.rs:325`](../crates/argos_carve/src/reassemble.rs#L325).
+   the zeroes at [`reassemble.rs:324`](../crates/argos_carve/src/reassemble.rs#L324).
 3. `worth_reporting` collapses back to one rule for both formats: a share of the frame.
 4. The extent runs to the last byte that inflated, not to the chunk boundary.
 
@@ -190,7 +190,7 @@ one of them can only ever be a recorded break.
 
 ### 3.3 Restart markers are computed and unused
 
-**Where.** [`reassemble.rs:1372`](../crates/argos_carve/src/reassemble.rs#L1372) — `restart_points`
+**Where.** [`reassemble.rs:1448`](../crates/argos_carve/src/reassemble.rs#L1448) — `restart_points`
 finds every `RSTn` re-entry point in a block. Its own doc, at line 1367, says the walk does not use
 them: candidates are offered block-aligned only, so an orphaned fragment is reachable only through
 its predecessor (Uzun & Sencar, 2015).
@@ -205,7 +205,7 @@ which is a fabrication risk this project should not take.
 
 1. `reassemble::Candidate` gains an optional entry offset: the byte after an `RSTn`, rather than the
    block's own start.
-2. `Region::load` ([`search.rs`](../crates/argos_engine/src/search.rs)) offers restart-aligned
+2. `Region::load` ([`region.rs`](../crates/argos_engine/src/pipeline/region.rs#L126)) offers restart-aligned
    candidates alongside block-aligned ones, for blocks whose profile already counts restarts
    (`BlockProfile::restarts`, measured and discarded today).
 3. `mcu::scan_resumed` accepts a splice that resets the DC predictor and realigns the restart
@@ -223,8 +223,8 @@ first.
 
 ### 3.4 The join cost stops discriminating at four fragments
 
-**Where.** [`reassemble.rs:87`](../crates/argos_carve/src/reassemble.rs#L87) `MAX_SEAM_RATIO`, and
-[`reassemble.rs:930`](../crates/argos_carve/src/reassemble.rs#L930) `MAX_BRANCHING_FRAGMENTS = 3`,
+**Where.** [`reassemble.rs:86`](../crates/argos_carve/src/reassemble.rs#L86) `MAX_SEAM_RATIO`, and
+[`reassemble.rs:1000`](../crates/argos_carve/src/reassemble.rs#L1000) `MAX_BRANCHING_FRAGMENTS = 3`,
 which exists because of it.
 
 **What is known.** Branching past three fragments produced an assembly of the right length,
@@ -310,7 +310,7 @@ the medium's read speed and not a core count.
 
 ### 3.8 A volume whose anchors are all gone is still unreachable
 
-**Where.** [`pipeline.rs`](../crates/argos_engine/src/pipeline.rs) `confirm_ntfs` — it corrects a
+**Where.** [`filesystem.rs`](../crates/argos_engine/src/pipeline/filesystem.rs#L201) `confirm_ntfs` — it corrects a
 backup boot sector to the volume it belongs to and drops coincidences, which covers the case where
 *an* anchor survived. It does not cover a volume whose primary and copy are both overwritten while
 its `$MFT` records survive.
@@ -330,7 +330,7 @@ near zero after §2.5, the anchors were there and this is unnecessary.
 
 ### 3.8b Cancelling discards what the run already established
 
-**Where.** `emit` in [`pipeline.rs`](../crates/argos_engine/src/pipeline.rs) breaks on
+**Where.** `emit` in [`output.rs`](../crates/argos_engine/src/pipeline/output.rs#L89) breaks on
 `control.is_cancelled()` at the top of its loop, and `report_findings` runs *after* `carve` — which
 contains the reassembly stage.
 
@@ -358,7 +358,7 @@ established; one cancelled during the report stage stops between two artifacts, 
 ### 3.8c Pause does nothing outside the sweep
 
 **Where.** `wait_while_paused` is consulted in exactly one place,
-[`pipeline.rs:537`](../crates/argos_engine/src/pipeline.rs#L537), inside the reader loop.
+[`pipeline.rs:674`](../crates/argos_engine/src/pipeline.rs#L674), inside the reader loop.
 
 **What is wrong.** The reassembly stage is where a scan of a large medium spends most of its wall
 clock, and the Pause button is inert for all of it — it reports paused and the stage carries on.
@@ -379,7 +379,7 @@ reports a state the engine is not in is worse than no control.
 | e | Only JPEG and PNG are carved. TIFF matters here specifically: three of the cameras in §1.4 are flatbed scanners, and scanner output is often TIFF | [lib.rs](../crates/argos_carve/src/lib.rs) |
 | i | The entropy decoder's remaining cost is 5.2 cycles per bit, spread thin: no single item above 3% survives in the hypothesis path. Further gain there is micro-optimisation, and the stage's shape has changed enough that where it would come from needs measuring again before anything is written | [defects/08](defects/08-the-entropy-decoder-read-one-bit-at-a-time.md) |
 | j | Reassembly still wants about 25 h over the 46,345-step queue, in an interval of 9.6 h to 49 h. The width is 18 regions nobody has timed, and no quantity available before the search predicts what one will cost — four proxies were tested and refuted, so a run is bounded by its budget rather than planned around | [defects/09](defects/09-the-counter-counted-steps-of-unequal-cost.md) |
-| k | The reassembly budget cannot interrupt an item, only stop the next one being taken: workers check `spent` before they take, and a candidate at the 262,144 ceiling over a dense region runs for as long as it runs. Measured on a 192 MiB fixture of whole photographs, a 120 s budget was still going at 1,125 s — **9x over, and not finished when the run was stopped**; the field's longest single item was 4,112 s, so a 2 h budget can become 3 h. The progress bar now correctly reads `120/120 seconds` throughout that, which is true and still not what a reader wants. Bounding it means checking the clock inside the hypothesis loop, which is the oracle's hot path and needs its own measurement and differential test | [pipeline.rs `in_parallel`](../crates/argos_engine/src/pipeline.rs) |
+| k | The reassembly budget cannot interrupt an item, only stop the next one being taken: workers check `spent` before they take, and a candidate at the 262,144 ceiling over a dense region runs for as long as it runs. Measured on a 192 MiB fixture of whole photographs, a 120 s budget was still going at 1,125 s — **9x over, and not finished when the run was stopped**; the field's longest single item was 4,112 s, so a 2 h budget can become 3 h. The progress bar now correctly reads `120/120 seconds` throughout that, which is true and still not what a reader wants. Bounding it means checking the clock inside the hypothesis loop, which is the oracle's hot path and needs its own measurement and differential test | [reassembly.rs `in_parallel`](../crates/argos_engine/src/pipeline/reassembly.rs#L187) |
 | h | Orphaned-fragment carving reaches the CLI as `graft` (C51) and **not the scan pipeline**, which is deliberate — a graft is pixels in a container this tool built, and a scan's artifacts are files the medium held. What is open is whether the sweep should also run inside a scan, which needs the writing stage to carry a synthetic header without weakening the digest it computes from the stream it hands the sink. Was: [reference.rs](../crates/argos_carve/src/reference.rs) lends a surviving sibling's header to a headerless fragment and [reassemble.rs `restart_points`](../crates/argos_carve/src/reassemble.rs) says where such a fragment may be entered, both tested end to end — but no pipeline stage offers an orphan to them and no CLI flag names a reference. What is missing is the wiring and the reporting: a graft is pixels in a container this tool built, never a recovered file, so it needs the weakest tier and a provenance field naming the reference (`A-CONFIDENCE-HONEST`) | [reference.rs](../crates/argos_carve/src/reference.rs) |
 | g | Recall against a published corpus is **measured by nothing yet**: [corpus_recall.rs](../crates/argos_engine/tests/corpus_recall.rs) reads image/answer pairs from `ARGOS_CORPUS_DIR` and reports per-case recall, and its own instrument is self-tested, but no corpus has been supplied. The DFRWS 2006/2007 carving challenges and NIST `CFReDS` FC-01..FC-05 are what it is for; until one is measured, no recall figure in this file has an external reference | [corpus_recall.rs](../crates/argos_engine/tests/corpus_recall.rs) |
 | f | Thumbnail matching as a second acceptance path for a reassembly — a candidate whose decoded image matches a known EXIF thumbnail is confirmed regardless of its seams. Sequenced behind a completed search, which tells whether it is needed | [reassemble.rs `score`](../crates/argos_carve/src/reassemble.rs) |

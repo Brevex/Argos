@@ -8,7 +8,7 @@
 //! not responding. The engine is not slow when that happens; it is loud.
 //!
 //! So the same protection the console renderer has always had
-//! ([`crate::progress`] redraws at most ten times a second) is applied to the
+//! ([`crate::console`] redraws at most ten times a second) is applied to the
 //! wire. Two properties make it lossless:
 //!
 //! - Progress and stored-artifact counts are **cumulative**, so dropping an
