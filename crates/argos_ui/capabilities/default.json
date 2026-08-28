@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The five commands the window may call, the engine event channel, the window controls it draws itself, and a folder picker. No shell, no network, no filesystem access. The one path the window can read is the session's previews/ subdirectory, granted at runtime once the engine names it: those are derived thumbnails, and the recovered artifacts themselves stay unreachable from the web view. The static scope is empty on purpose, so nothing is readable before a scan grants it.",
+  "description": "The commands the window may call, the engine event channel, the window controls it draws itself — including the two a close goes through, since a run under way is confirmed before the window goes — and a folder picker. No shell, no network, no filesystem access, and no path on disk the web view can read: everything a run recovers goes to the destination folder, and the window never reads it back.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -11,6 +11,7 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "dialog:allow-open"
   ]
 }

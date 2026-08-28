@@ -23,10 +23,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 argos_ipc = { path = "../argos_ipc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `protocol-asset` is what lets the web view read the session's previews/
-# directory, and nothing else: the static scope is empty and one directory is
-# granted at runtime once the engine names it (see `commands::grant_previews`).
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = [] }
 # A folder picker and nothing else. It grants the web view no filesystem
 # access: the user chooses a directory, and the path travels as a string that
 # the *engine* then validates and refuses if it would contain the source.

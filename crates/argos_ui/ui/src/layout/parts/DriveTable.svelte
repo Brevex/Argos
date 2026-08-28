@@ -122,8 +122,8 @@
     margin-left: auto;
   }
 
-  /* Both are the ordinary button — the same object as Browse and as everything
-     in the results view. There is one of these in this interface, not four. */
+  /* Both are the ordinary button — the same object as Browse and as the two in
+     a dialog. There is one of these in this interface, not four. */
   .refresh,
   .config {
     position: relative;

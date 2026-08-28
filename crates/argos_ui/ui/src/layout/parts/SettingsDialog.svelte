@@ -12,8 +12,8 @@
    * would invite it to be read as one.
    *
    * These are preferences — what the *next* scan is asked for. Anything that
-   * runs now and produces files (acquiring a disk, exporting artifacts,
-   * searching a session again) belongs beside the thing it acts on, not here.
+   * runs now and produces files, such as acquiring a disk, belongs beside the
+   * thing it acts on rather than here.
    *
    * Nothing in this file judges a recovery. A switch chooses what to ask the
    * engine for; what a stage does and what it finds are the engine's, and it
@@ -28,6 +28,7 @@
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { loadTheme, themeIds } from '../../themes';
   import type { ThemeModule } from '../../themes/contract';
+  import Dialog from './Dialog.svelte';
   import NumberField from './NumberField.svelte';
 
   /**
@@ -98,384 +99,225 @@
   const locked = $derived(session.running);
 </script>
 
-<svelte:window onkeydown={(event) => event.key === 'Escape' && onClose()} />
-
-<div
-  class="scrim"
-  role="presentation"
-  onclick={(event) => event.target === event.currentTarget && onClose()}
->
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="Settings">
-    <!--
-      A window of the same system, not a card that happens to float: the frame,
-      the title strip and the way out are the ones the main window uses, drawn
-      from the same tokens and with the theme's own close glyph. A panel with
-      its own idea of a border and its own X would be a second visual language
-      inside one application.
-    -->
-    <header>
-      <h2>Settings</h2>
-      <div class="group">
-        <button class="window close" onclick={onClose} aria-label="Close">
-          <svg viewBox="0 0 12 12" aria-hidden="true">{@html inForce.icon('close')}</svg>
+<Dialog title="Settings" {onClose}>
+  <div class="body">
+    <nav aria-label="Settings sections">
+      {#each SECTIONS as entry (entry.id)}
+        <button
+          class:current={open === entry.id}
+          aria-current={open === entry.id}
+          onclick={() => (open = entry.id)}
+        >
+          {entry.name}
         </button>
-      </div>
-    </header>
+      {/each}
+    </nav>
 
-    <div class="body">
-      <nav aria-label="Settings sections">
-        {#each SECTIONS as entry (entry.id)}
-          <button
-            class:current={open === entry.id}
-            aria-current={open === entry.id}
-            onclick={() => (open = entry.id)}
-          >
-            {entry.name}
-          </button>
-        {/each}
-      </nav>
-
-      <div class="panel">
-        {#if open === 'recovery'}
-          <div class="lead">
-            <p>What the scan looks for. Each one takes time; turning it off saves that time.</p>
-            {#if settings.customized}
-              <button class="reset" onclick={() => settings.reset()} disabled={locked}>
-                Restore defaults
-              </button>
-            {/if}
-          </div>
-
-          {#if locked}
-            <!-- Said rather than hidden: a control that silently did nothing is
-                 worse than one that explains when it will take effect. -->
-            <p class="note">A scan is running. Changes apply to the next one.</p>
+    <div class="panel">
+      {#if open === 'recovery'}
+        <div class="lead">
+          <p>What the scan looks for. Each one takes time; turning it off saves that time.</p>
+          {#if settings.customized}
+            <button class="reset" onclick={() => settings.reset()} disabled={locked}>
+              Restore defaults
+            </button>
           {/if}
+        </div>
 
-          <ul>
-            {#each STAGES as stage (stage.key)}
-              <li>
-                <label class:off={!settings[stage.key]}>
-                  <input
-                    type="checkbox"
-                    checked={settings[stage.key]}
-                    disabled={locked}
-                    onchange={(event) => settings.setStage(stage.key, event.currentTarget.checked)}
-                  />
-                  <span class="text">
-                    <span class="name">{stage.name}</span>
-                    <span class="about">{stage.about}</span>
-                  </span>
-                </label>
-
-                <!-- Only while the stage it bounds is on: a limit on something
-                     that will not run is a control with nothing to do. -->
-                {#if stage.key === 'reassembly' && settings.reassembly}
-                  <div class="nested">
-                    <label class="inline">
-                      <span class="name">Give up after</span>
-                      <NumberField
-                        value={settings.reassemblyBudget}
-                        placeholder="120"
-                        disabled={locked}
-                        label="Give up reassembling after, in minutes"
-                        onChange={(value) => settings.setNumber('reassemblyBudget', value)}
-                      />
-                      <span class="unit">minutes</span>
-                    </label>
-                    <p class="about">
-                      This is the one stage that stops at a ceiling rather than at the end. Empty
-                      keeps the two-hour limit; 0 searches every candidate however long it takes.
-                    </p>
-                  </div>
-                {/if}
-              </li>
-            {/each}
-
-            <li>
-              <label class:off={!settings.triage}>
-                <input
-                  type="checkbox"
-                  checked={settings.triage}
-                  disabled={locked}
-                  onchange={(event) => settings.setFlag('triage', event.currentTarget.checked)}
-                />
-                <span class="text">
-                  <span class="name">Labelling</span>
-                  <span class="about">
-                    Marks each image a photograph or an app asset. Never changes what is recovered.
-                  </span>
-                </span>
-              </label>
-            </li>
-
-            <li>
-              <div class="field">
-                <span class="name">Fragments with no header</span>
-                <p class="about">
-                  A fragment whose beginning is gone cannot be decoded on its own. Name a
-                  photograph from the same camera and its tables are lent to those fragments.
-                </p>
-                <p class="about">
-                  What comes out is <em>pixels, not files</em> — it lands in a
-                  <code>grafted</code> folder, apart from what was recovered, and never in the
-                  manifest.
-                </p>
-                <div class="picker">
-                  <button class="choose" disabled={locked} onclick={chooseReference}>
-                    {settings.reference ? 'Change photograph' : 'Choose a photograph'}
-                  </button>
-                  {#if settings.reference}
-                    <button class="clear" disabled={locked} onclick={() => settings.setReference(null)}>
-                      Off
-                    </button>
-                  {/if}
-                </div>
-                {#if settings.reference}
-                  <p class="chosen" title={settings.reference}>{settings.reference}</p>
-                {:else}
-                  <p class="chosen off">Off. Nothing extra is searched for.</p>
-                {/if}
-              </div>
-            </li>
-          </ul>
-        {:else if open === 'output'}
-          <div class="lead">
-            <p>What reaches the folder. Nothing here changes what the scan finds.</p>
-          </div>
-
-          {#if locked}
-            <p class="note">A scan is running. Changes apply to the next one.</p>
-          {/if}
-
-          <ul>
-            <li>
-              <label class:off={!settings.previews}>
-                <input
-                  type="checkbox"
-                  checked={settings.previews}
-                  disabled={locked}
-                  onchange={(event) => settings.setFlag('previews', event.currentTarget.checked)}
-                />
-                <span class="text">
-                  <span class="name">Thumbnails</span>
-                  <span class="about">
-                    Renders the small pictures the results gallery shows. Without them the gallery
-                    has nothing to draw.
-                  </span>
-                </span>
-              </label>
-            </li>
-
-            <li>
-              <div class="field">
-                <label class="inline">
-                  <span class="name">Keep pictures at least</span>
-                  <NumberField
-                    value={settings.minLongSide}
-                    placeholder="300"
-                    disabled={locked}
-                    label="Keep pictures at least, in pixels on the long side"
-                    onChange={(value) => settings.setNumber('minLongSide', value)}
-                  />
-                  <span class="unit">px on the long side</span>
-                </label>
-                <p class="about">
-                  A used disk holds far more icons and cache entries than photographs, and they are
-                  small. Anything under this is still examined, hashed and recorded — it just does
-                  not fill the folder. 0 writes everything.
-                </p>
-              </div>
-            </li>
-
-            <li>
-              <div class="field">
-                <label class="inline">
-                  <span class="name">Use</span>
-                  <NumberField
-                    value={settings.jobs}
-                    placeholder="auto"
-                    min={1}
-                    disabled={locked}
-                    label="Worker threads to use"
-                    onChange={(value) => settings.setNumber('jobs', value)}
-                  />
-                  <span class="unit">worker threads</span>
-                </label>
-                <p class="about">
-                  Left empty, the scan uses what the machine has. Fewer leaves the machine usable
-                  for something else while it runs.
-                </p>
-              </div>
-            </li>
-          </ul>
-        {:else}
-          <div class="lead">
-            <p>How the window looks. Changing this mid-scan interrupts nothing.</p>
-          </div>
-
-          <ul class="themes">
-            {#each choices as choice (choice.id)}
-              <li>
-                <button
-                  class="theme"
-                  class:current={choice.id === active}
-                  aria-pressed={choice.id === active}
-                  onclick={() => onChoose(choice.id)}
-                >
-                  <span class="swatch" style:background={choice.tokens['--accent']}></span>
-                  <span class="name">{choice.name}</span>
-                  {#if choice.id === active}
-                    <svg class="tick" viewBox="0 0 14 14" aria-hidden="true">
-                      {@html inForce.icon('tick')}
-                    </svg>
-                  {/if}
-                </button>
-              </li>
-            {/each}
-          </ul>
+        {#if locked}
+          <!-- Said rather than hidden: a control that silently did nothing is
+               worse than one that explains when it will take effect. -->
+          <p class="note">A scan is running. Changes apply to the next one.</p>
         {/if}
-      </div>
+
+        <ul>
+          {#each STAGES as stage (stage.key)}
+            <li>
+              <label class:off={!settings[stage.key]}>
+                <input
+                  type="checkbox"
+                  checked={settings[stage.key]}
+                  disabled={locked}
+                  onchange={(event) => settings.setStage(stage.key, event.currentTarget.checked)}
+                />
+                <span class="text">
+                  <span class="name">{stage.name}</span>
+                  <span class="about">{stage.about}</span>
+                </span>
+              </label>
+
+              <!-- Only while the stage it bounds is on: a limit on something
+                   that will not run is a control with nothing to do. -->
+              {#if stage.key === 'reassembly' && settings.reassembly}
+                <div class="nested">
+                  <label class="inline">
+                    <span class="name">Give up after</span>
+                    <NumberField
+                      value={settings.reassemblyBudget}
+                      placeholder="120"
+                      disabled={locked}
+                      label="Give up reassembling after, in minutes"
+                      onChange={(value) => settings.setNumber('reassemblyBudget', value)}
+                    />
+                    <span class="unit">minutes</span>
+                  </label>
+                  <p class="about">
+                    This is the one stage that stops at a ceiling rather than at the end. Empty
+                    keeps the two-hour limit; 0 searches every candidate however long it takes.
+                  </p>
+                </div>
+              {/if}
+            </li>
+          {/each}
+
+          <li>
+            <label class:off={!settings.triage}>
+              <input
+                type="checkbox"
+                checked={settings.triage}
+                disabled={locked}
+                onchange={(event) => settings.setFlag('triage', event.currentTarget.checked)}
+              />
+              <span class="text">
+                <span class="name">Labelling</span>
+                <span class="about">
+                  Marks each image a photograph or an app asset. Never changes what is recovered.
+                </span>
+              </span>
+            </label>
+          </li>
+
+          <li>
+            <div class="field">
+              <span class="name">Fragments with no header</span>
+              <p class="about">
+                A fragment whose beginning is gone cannot be decoded on its own. Name a
+                photograph from the same camera and its tables are lent to those fragments.
+              </p>
+              <p class="about">
+                What comes out is <em>pixels, not files</em> — it lands in a
+                <code>grafted</code> folder, apart from what was recovered, and never in the
+                manifest.
+              </p>
+              <div class="picker">
+                <button class="choose" disabled={locked} onclick={chooseReference}>
+                  {settings.reference ? 'Change photograph' : 'Choose a photograph'}
+                </button>
+                {#if settings.reference}
+                  <button class="clear" disabled={locked} onclick={() => settings.setReference(null)}>
+                    Off
+                  </button>
+                {/if}
+              </div>
+              {#if settings.reference}
+                <p class="chosen" title={settings.reference}>{settings.reference}</p>
+              {:else}
+                <p class="chosen off">Off. Nothing extra is searched for.</p>
+              {/if}
+            </div>
+          </li>
+        </ul>
+      {:else if open === 'output'}
+        <div class="lead">
+          <p>What reaches the folder. Nothing here changes what the scan finds.</p>
+        </div>
+
+        {#if locked}
+          <p class="note">A scan is running. Changes apply to the next one.</p>
+        {/if}
+
+        <ul>
+          <li>
+            <label class:off={!settings.previews}>
+              <input
+                type="checkbox"
+                checked={settings.previews}
+                disabled={locked}
+                onchange={(event) => settings.setFlag('previews', event.currentTarget.checked)}
+              />
+              <span class="text">
+                <span class="name">Thumbnails</span>
+                <span class="about">
+                  Writes a small picture of each recovered image into a previews folder beside
+                  them, for looking through the results without opening every file.
+                </span>
+              </span>
+            </label>
+          </li>
+
+          <li>
+            <div class="field">
+              <label class="inline">
+                <span class="name">Keep pictures at least</span>
+                <NumberField
+                  value={settings.minLongSide}
+                  placeholder="300"
+                  disabled={locked}
+                  label="Keep pictures at least, in pixels on the long side"
+                  onChange={(value) => settings.setNumber('minLongSide', value)}
+                />
+                <span class="unit">px on the long side</span>
+              </label>
+              <p class="about">
+                A used disk holds far more icons and cache entries than photographs, and they are
+                small. Anything under this is still examined, hashed and recorded — it just does
+                not fill the folder. 0 writes everything.
+              </p>
+            </div>
+          </li>
+
+          <li>
+            <div class="field">
+              <label class="inline">
+                <span class="name">Use</span>
+                <NumberField
+                  value={settings.jobs}
+                  placeholder="auto"
+                  min={1}
+                  disabled={locked}
+                  label="Worker threads to use"
+                  onChange={(value) => settings.setNumber('jobs', value)}
+                />
+                <span class="unit">worker threads</span>
+              </label>
+              <p class="about">
+                Left empty, the scan uses what the machine has. Fewer leaves the machine usable
+                for something else while it runs.
+              </p>
+            </div>
+          </li>
+        </ul>
+      {:else}
+        <div class="lead">
+          <p>How the window looks. Changing this mid-scan interrupts nothing.</p>
+        </div>
+
+        <ul class="themes">
+          {#each choices as choice (choice.id)}
+            <li>
+              <button
+                class="theme"
+                class:current={choice.id === active}
+                aria-pressed={choice.id === active}
+                onclick={() => onChoose(choice.id)}
+              >
+                <span class="swatch" style:background={choice.tokens['--accent']}></span>
+                <span class="name">{choice.name}</span>
+                {#if choice.id === active}
+                  <svg class="tick" viewBox="0 0 14 14" aria-hidden="true">
+                    {@html inForce.icon('tick')}
+                  </svg>
+                {/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
   </div>
-</div>
+</Dialog>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 50;
-    display: grid;
-    place-items: center;
-    background: var(--scrim);
-    backdrop-filter: blur(2px);
-    -webkit-backdrop-filter: blur(2px);
-  }
-
-  /* Sized against the window rather than in fixed measures: the window can be
-     small, and a panel that outgrew it would be a panel with no way out. */
-  /*
-   * A window, built the way the main one is: the frame is the whole element,
-   * the title sits on it, and the panel is inset into it by the width of the
-   * band. A theme whose windows have no band gives the inset no width, and the
-   * panel then covers everything but the title — which is the same panel it
-   * was before.
-   *
-   * Sized against the window rather than in fixed measures: the window can be
-   * small, and a panel that outgrew it would be a panel with no way out.
-   */
-  .dialog {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    width: min(44rem, calc(100vw - 3rem));
-    max-height: calc(100vh - 3rem);
-    background: var(--dialog-strip);
-    backdrop-filter: var(--dialog-blur);
-    -webkit-backdrop-filter: var(--dialog-blur);
-    border: 1px solid var(--window-edge);
-    border-radius: var(--window-radius);
-    box-shadow: var(--window-shadow);
-    padding: 0;
-    overflow: hidden;
-  }
-
-  /* The same bright line inside the dark edge that the main window has. */
-  .dialog::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    z-index: 3;
-    pointer-events: none;
-    border-radius: inherit;
-    box-shadow: inset 0 0 0 1px var(--window-border);
-  }
-
-  /*
-   * The title strip, and the one piece of glass in this application that is
-   * real.
-   *
-   * The window's own frame lies over the desktop, which no filter in a web
-   * view can reach; this lies over the window, which *is* the page — so the
-   * blur behind it blurs something, and on a theme whose windows are framed in
-   * glass this is that glass, measured on the same profile as the frame. On a
-   * theme whose window is one unbroken surface it is the panel's own fill and
-   * the panel's own filter, and there is no strip to see.
-   */
-  header {
-    display: flex;
-    align-items: center;
-    flex: none;
-    height: var(--dialog-strip-height);
-    padding: 0 var(--winbtn-offset-right) 0 1.25rem;
-  }
-
-  h2 {
-    margin: 0;
-    font-size: var(--type-md);
-    font-weight: 600;
-    color: var(--titlebar-text);
-    text-shadow: var(--titlebar-text-shadow, var(--text-glow));
-  }
-
-  /* The same strip the window buttons sit in, holding the one button a panel
-     needs. */
-  .group {
-    display: flex;
-    align-items: stretch;
-    gap: var(--winbtn-gap);
-    margin-left: auto;
-    /* The group hangs from the band's top edge on a theme whose windows do,
-       and sits on the title's own line on one whose windows do not. */
-    align-self: var(--winbtn-align);
-    margin-top: var(--winbtn-offset-top);
-    background: var(--winbtn-group);
-    border: 1px solid var(--winbtn-group-border);
-    border-top: 0;
-    border-radius: var(--winbtn-group-radius);
-    box-shadow: var(--winbtn-group-shadow);
-    overflow: hidden;
-  }
-
-  .window {
-    display: grid;
-    place-items: center;
-    width: var(--winbtn-close-width);
-    height: var(--winbtn-height);
-    padding: 0;
-    background: var(--winbtn-close);
-    border: 1px solid;
-    border-color: var(--winbtn-border);
-    border-radius: var(--winbtn-radius);
-    color: var(--winbtn-close-text);
-    cursor: pointer;
-  }
-
-  /* The glyph is the theme's drawing, and it says for itself whether it is a
-     line or a filled shape with an outline — the caption glyphs of a bevelled
-     desktop are the second, and forcing `fill: none` here made them the
-     first. All this decides is how big it is and what colour it inherits. */
-  .window svg {
-    width: var(--winbtn-glyph);
-    height: var(--winbtn-glyph);
-    stroke-width: var(--winbtn-stroke);
-  }
-
-  .window.close:hover {
-    background: var(--winbtn-close-hover);
-    color: var(--winbtn-close-hover-text);
-  }
-
-  .window.close:active {
-    background: var(--winbtn-close-active);
-    color: var(--winbtn-close-hover-text);
-  }
-
-  .window:focus-visible {
-    outline: var(--focus-outline);
-    outline-offset: -2px;
-  }
-
   /* The panel, inside the frame — the dialog's client area, edged the way the
      main window's client area is edged. */
   .body {

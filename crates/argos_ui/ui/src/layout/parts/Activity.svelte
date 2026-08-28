@@ -24,15 +24,6 @@
   import { session } from '../../lib/session.svelte';
   import Ring from './Ring.svelte';
 
-  /**
-   * Whether the results of a finished run are on screen below this block.
-   *
-   * When they are, the arcs stand down: they are both at their end, the line
-   * above says in words how the run ended, and the room they take is the room
-   * the pictures need.
-   */
-  let { results = false }: { results?: boolean } = $props();
-
   const status = $derived.by(() => {
     switch (session.phase) {
       case 'connecting':
@@ -88,7 +79,7 @@
         return `${examined}. ${count(session.omitted)} system assets were recorded in the manifest and not written`;
       }
       case 'cancelled':
-        return 'Stopped early — what had been recovered was written, the rest was not examined';
+        return 'Recovery cancelled — what had been recovered is in the destination folder';
       case 'failed':
         return session.job === 'acquire' ? 'The copy failed' : 'The scan failed';
       default:
@@ -115,7 +106,7 @@
   });
 </script>
 
-<section class:compact={results}>
+<section>
   <p
     class="status"
     class:live={session.phase === 'scanning'}
@@ -124,16 +115,14 @@
     {status}
   </p>
 
-  {#if !results}
-    <div class="rings" data-state={state}>
-      {#if session.job === 'acquire'}
-        <Ring label="Copy" fraction={session.scanned} />
-      {:else}
-        <Ring label="Scan" fraction={session.scanned} />
-        <Ring label="Recovery" fraction={session.recovered} />
-      {/if}
-    </div>
-  {/if}
+  <div class="rings" data-state={state}>
+    {#if session.job === 'acquire'}
+      <Ring label="Copy" fraction={session.scanned} />
+    {:else}
+      <Ring label="Scan" fraction={session.scanned} />
+      <Ring label="Recovery" fraction={session.recovered} />
+    {/if}
+  </div>
 
   <dl class="stats">
     {#if session.job === 'acquire'}
@@ -207,14 +196,6 @@
        paints over what is above it. Clipping is the difference between a tight
        window and a broken one. */
     overflow: hidden;
-  }
-
-  /* Once there are results below, this block stops claiming the slack: the
-     figures are final, and every pixel it is not using is a row of pictures
-     the person can actually see. */
-  .compact {
-    flex: 0 1 auto;
-    justify-content: flex-start;
   }
 
   .status {

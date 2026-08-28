@@ -72,40 +72,12 @@ pub enum Call {
     ScanCancel,
     /// Read back what a session directory holds.
     ///
-    /// The whole record set. A scan of a used disk records hundreds of
-    /// thousands of artifacts, so a client that wants to *show* them asks for
-    /// [`Call::ScanGallery`] instead and lets the engine do the ordering.
+    /// The whole record set, which on a used disk is hundreds of thousands of
+    /// artifacts.
     #[serde(rename = "scan.results")]
     ScanResults {
         /// Session directory a scan wrote.
         session: String,
-    },
-    /// Read back one page of a session, strongest evidence first.
-    ///
-    /// The ordering is the engine's, not the client's: which artifact looks
-    /// most like a photograph is a recovery question, and a window that
-    /// answered it would be doing recovery work in a presentation layer
-    /// (`A-SHELL-NO-DOMAIN`). The page is what makes a results view possible
-    /// at all — the measured session holds 348,361 records, which is far more
-    /// JSON than a window can be handed at once.
-    #[serde(rename = "scan.gallery")]
-    ScanGallery {
-        /// Session directory a scan wrote.
-        session: String,
-        /// Artifacts to skip, for paging.
-        #[serde(default)]
-        offset: u32,
-        /// Artifacts to return, capped by the engine.
-        limit: u32,
-        /// Weakest standing to include, by its canonical name. Absent shows
-        /// every artifact the session recorded.
-        #[serde(default)]
-        standing: Option<String>,
-        /// Whether to include artifacts the run recorded but did not write.
-        /// They have no file and no preview, so a gallery hides them by
-        /// default — the manifest still lists them.
-        #[serde(default)]
-        include_unwritten: bool,
     },
     /// Copy a medium into a raw image, so the scan can read a file instead of
     /// the disk.
@@ -119,26 +91,6 @@ pub enum Call {
         source: String,
         /// Path of the raw image to create. Must not already exist.
         to: String,
-    },
-    /// Copy artifacts out of a session directory, verifying each hash.
-    #[serde(rename = "export.copy")]
-    ExportCopy {
-        /// Session directory to export from.
-        session: String,
-        /// Directory to copy into.
-        to: String,
-        /// Artifact hashes to export; everything the other criteria admit when
-        /// empty.
-        #[serde(default)]
-        hashes: Vec<String>,
-        /// Weakest standing to export, by its canonical name. Absent exports
-        /// whatever the other criteria admit.
-        ///
-        /// The same vocabulary [`Call::ScanGallery`] filters by, so a client
-        /// can export exactly the set it is showing rather than asking the
-        /// person to describe it a second time.
-        #[serde(default)]
-        standing: Option<String>,
     },
 }
 
@@ -207,12 +159,8 @@ pub enum Reply {
     Started(dto::ScanStarted),
     /// Answer to `scan.results`.
     Results(Box<dto::Results>),
-    /// Answer to `scan.gallery`.
-    Page(Box<dto::Gallery>),
     /// Answer to `acquire.start`.
     Acquiring(dto::AcquireStarted),
-    /// Answer to `export.copy`.
-    Exported(dto::Exported),
     /// Answer to a call that produces nothing but success.
     Done(Done),
 }

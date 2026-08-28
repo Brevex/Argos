@@ -276,29 +276,11 @@ pub fn started(reply: Reply) -> Option<dto::ScanStarted> {
     }
 }
 
-/// Narrows a reply to one page of a gallery.
-#[must_use]
-pub fn page(reply: Reply) -> Option<dto::Gallery> {
-    match reply {
-        Reply::Page(page) => Some(*page),
-        _ => None,
-    }
-}
-
 /// Narrows a reply to a started acquisition.
 #[must_use]
 pub fn acquiring(reply: Reply) -> Option<dto::AcquireStarted> {
     match reply {
         Reply::Acquiring(started) => Some(started),
-        _ => None,
-    }
-}
-
-/// Narrows a reply to what an export produced.
-#[must_use]
-pub fn exported(reply: Reply) -> Option<dto::Exported> {
-    match reply {
-        Reply::Exported(exported) => Some(exported),
         _ => None,
     }
 }

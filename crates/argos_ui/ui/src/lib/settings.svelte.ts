@@ -35,8 +35,9 @@ class Settings {
   /**
    * Render a thumbnail of every artifact that decodes.
    *
-   * On by default because the results gallery draws these, and they are the
-   * only part of a session this window is ever granted a path to.
+   * On by default: a session holds thousands of files, and a folder of small
+   * pictures beside them is how a person finds the one they came for without
+   * opening each in turn.
    */
   previews = $state(true);
 
@@ -161,9 +162,6 @@ class Settings {
       // Minutes on screen, seconds on the wire.
       reassemblyBudgetSeconds:
         this.reassemblyBudget === null ? null : this.reassemblyBudget * 60,
-      // A fresh scan resumes nothing. The results view sets this when it asks
-      // for a session's fragmentation points to be searched again.
-      resumeFrom: null,
       reference: this.reference,
     };
   }

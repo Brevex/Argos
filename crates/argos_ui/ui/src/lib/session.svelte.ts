@@ -227,10 +227,23 @@ class Session {
 
   /** Resets everything a new run replaces. */
   begin(source: string, job: 'scan' | 'acquire' = 'scan'): void {
+    this.clear();
     this.job = job;
-    this.acquired = null;
     this.phase = 'scanning';
     this.source = source;
+    this.startedAt = Date.now();
+    this.now = this.startedAt;
+  }
+
+  /**
+   * Puts every figure back where it was before any run.
+   *
+   * The arcs, the counts, the clock: the state a freshly opened window is in.
+   * Both a run starting and a run cancelled go through here, so there is one
+   * definition of "nothing has happened yet" rather than two that drift.
+   */
+  private clear(): void {
+    this.acquired = null;
     this.stage = '';
     this.work = { done: 0, total: 0 };
     this.workUnit = '';
@@ -242,8 +255,8 @@ class Session {
     this.problem = '';
     this.stopping = false;
     this.paused = false;
-    this.startedAt = Date.now();
-    this.now = this.startedAt;
+    this.startedAt = 0;
+    this.now = 0;
   }
 
   /** Folds one engine notification into the mirror. */
@@ -338,6 +351,17 @@ class Session {
    * window — at the exact moment the scan succeeds.
    */
   private finish(summary: Summary): void {
+    // A run the operator stopped has no account to leave on screen. Its
+    // figures describe a search that was abandoned part-way, and reading them
+    // as the result of anything would misstate what the medium holds
+    // (`A-CONFIDENCE-HONEST`) — what it did write is in the destination folder
+    // and its manifest. So the block goes back to how the window opened, and
+    // one line says the recovery was cancelled.
+    if (summary.state === 'cancelled') {
+      this.clear();
+      this.phase = 'cancelled';
+      return;
+    }
     // Stop the clock here rather than at the next tick, so the elapsed time
     // shown afterwards is the run's, not the run's plus part of a poll.
     this.now = Date.now();
@@ -347,11 +371,7 @@ class Session {
     this.artifacts = summary.artifacts;
     this.stored = summary.bytes;
     this.omitted = summary.omitted;
-    this.phase = summary.state === 'failed'
-      ? 'failed'
-      : summary.state === 'cancelled'
-        ? 'cancelled'
-        : 'done';
+    this.phase = summary.state === 'failed' ? 'failed' : 'done';
   }
 }
 

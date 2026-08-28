@@ -177,50 +177,8 @@ impl Engine {
             Call::ScanResults { session } => Manifest::read(&session)
                 .map(|manifest| Reply::Results(Box::new(translate::results(&manifest))))
                 .map_err(|err| (ErrorCode::InvalidParams, err.to_string())),
-            Call::ScanGallery {
-                session,
-                offset,
-                limit,
-                standing,
-                include_unwritten,
-            } => {
-                let floor = Self::parse_standing(standing.as_deref())?;
-                Manifest::read(&session)
-                    .map(|manifest| {
-                        Reply::Page(Box::new(translate::gallery(
-                            &manifest,
-                            offset,
-                            limit,
-                            floor,
-                            include_unwritten,
-                        )))
-                    })
-                    .map_err(|err| (ErrorCode::InvalidParams, err.to_string()))
-            }
             Call::AcquireStart { source, to } => {
                 self.acquire_start(&source, &to).map(Reply::Acquiring)
-            }
-            Call::ExportCopy {
-                session,
-                to,
-                hashes,
-                standing,
-            } => {
-                let standing = Self::parse_standing(standing.as_deref())?;
-                crate::results::run(
-                    session.as_ref(),
-                    to.as_ref(),
-                    // The remaining criteria — a pixel floor, a camera, a date
-                    // range — stay on the command line: they are queries a
-                    // person writes, and no client asks for them yet.
-                    &crate::results::Filter {
-                        hashes,
-                        standing,
-                        ..crate::results::Filter::default()
-                    },
-                )
-                .map(|exported| Reply::Exported(translate::exported(&exported)))
-                .map_err(|err| (ErrorCode::InvalidParams, format!("{err:#}")))
             }
         }
     }
@@ -316,81 +274,6 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Turns `options` into the ones a resumed search runs under.
-    ///
-    /// The sweep and the filesystem pass are what those points cost to find,
-    /// and skipping them is the whole point; triage is off for the same reason
-    /// `argos reassemble` leaves it off. Everything else the client asked for —
-    /// the budget above all — is kept, because trying a longer one is why a
-    /// search is run again.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the session cannot be read, or when it records no
-    /// fragmentation points: there would be nothing to search, and running a
-    /// scan that found nothing would look like an answer about the medium.
-    fn resume_options(
-        options: &scan::Options,
-        session: &str,
-    ) -> Result<scan::Options, (ErrorCode, String)> {
-        let manifest = Manifest::read(session).map_err(|err| {
-            (
-                ErrorCode::InvalidParams,
-                format!("cannot read the session to resume from: {err}"),
-            )
-        })?;
-        let broken = scan::fragmentation_points(&manifest);
-        if broken.is_empty() {
-            return Err((
-                ErrorCode::InvalidParams,
-                "that session records no fragmentation points; it was written by a scan that \
-                 found none, or by a version of this tool that did not record them"
-                    .to_owned(),
-            ));
-        }
-        Ok(scan::Options {
-            reference: None,
-            jobs: options.jobs,
-            stages: argos_engine::Stages {
-                filesystem: false,
-                carving: true,
-                reassembly: true,
-            },
-            triage: false,
-            min_long_side: options.min_long_side,
-            reassembly_budget: options.reassembly_budget,
-            previews: options.previews,
-            // The points carry their own offsets; a range would only cut them.
-            range: None,
-            resume_from: Some(broken),
-        })
-    }
-
-    /// One standing name from the wire, or `None` when the client sent none.
-    ///
-    /// One parser for both the gallery and the export, so the set a client is
-    /// shown and the set it exports cannot be admitted on different terms.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the name is not one the engine knows, naming the ones it does
-    /// — a client one version ahead must be told, not silently given everything.
-    fn parse_standing(
-        standing: Option<&str>,
-    ) -> Result<Option<argos_classify::rank::Standing>, (ErrorCode, String)> {
-        standing
-            .map(str::parse::<argos_classify::rank::Standing>)
-            .transpose()
-            .map_err(|_unknown| {
-                (
-                    ErrorCode::InvalidParams,
-                    "not a standing: expected one of cache-neighbour, unremarkable, \
-                     photograph-sized, dated, camera-named"
-                        .to_owned(),
-                )
-            })
-    }
-
     /// Agrees on the wire format, or refuses to speak.
     fn handshake(&self, schema: u32) -> Result<Reply, (ErrorCode, String)> {
         if schema != SCHEMA_VERSION {
@@ -426,10 +309,7 @@ impl Engine {
 
         let source = PathBuf::from(&request.source);
         let out = PathBuf::from(&request.out);
-        let mut options = translate::options(request);
-        if let Some(session) = request.resume_from.as_deref() {
-            options = Self::resume_options(&options, session)?;
-        }
+        let options = translate::options(request);
         let (started_tx, started_rx) = mpsc::sync_channel::<Result<String, String>>(1);
         let failed_tx = started_tx.clone();
 
@@ -498,7 +378,6 @@ impl Engine {
             Ok(Ok(source)) => Ok(dto::ScanStarted {
                 source,
                 out: request.out.clone(),
-                preview_dir: argos_report::PREVIEW_DIR.to_owned(),
             }),
             Ok(Err(message)) => Err((ErrorCode::ScanFailed, message)),
             // The worker thread died without saying anything, which means it

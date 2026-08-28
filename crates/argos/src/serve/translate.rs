@@ -47,51 +47,6 @@ pub fn inventory() -> dto::Inventory {
     }
 }
 
-/// Artifacts one gallery page may carry.
-///
-/// A page is materialized as JSON and parsed on whatever thread draws the
-/// window, so it is bounded here rather than trusted from the client: a
-/// request for the whole session would be the megabytes of JSON the paging
-/// exists to avoid (`M-DOCUMENTED-MAGIC`, A-BOUNDED-ALLOC).
-const MAX_PAGE: u32 = 500;
-
-/// One page of a session's artifacts, strongest evidence first.
-///
-/// The ordering lives here and not in the client: which artifact most looks
-/// like a photograph is a recovery question, and a window that answered it
-/// would hold recovery logic (`A-SHELL-NO-DOMAIN`). Ties go to the larger
-/// picture, then to the longer file, so the order is total and two calls over
-/// one session agree.
-///
-/// Artifacts the run recorded but did not write are excluded unless asked for:
-/// they have no file and no preview, so a gallery cannot show them. They stay
-/// in the manifest, and `recorded` counts them, so nothing is hidden.
-pub fn gallery(
-    manifest: &Manifest,
-    offset: u32,
-    limit: u32,
-    standing: Option<argos_classify::rank::Standing>,
-    include_unwritten: bool,
-) -> dto::Gallery {
-    let chosen = crate::results::ordered(manifest, standing, include_unwritten);
-
-    let total = u32::try_from(chosen.len()).unwrap_or(u32::MAX);
-    let from = usize::try_from(offset)
-        .unwrap_or(usize::MAX)
-        .min(chosen.len());
-    let take = usize::try_from(limit.min(MAX_PAGE)).unwrap_or(0);
-    dto::Gallery {
-        artifacts: chosen[from..]
-            .iter()
-            .take(take)
-            .map(|record| artifact(record))
-            .collect(),
-        total,
-        recorded: u32::try_from(manifest.artifacts.len()).unwrap_or(u32::MAX),
-        preview_dir: argos_report::PREVIEW_DIR.to_owned(),
-    }
-}
-
 /// One artifact record as a client sees it.
 fn artifact(record: &argos_report::ArtifactRecord) -> dto::Artifact {
     dto::Artifact {
@@ -198,16 +153,6 @@ fn extent(record: &argos_report::ExtentRecord) -> dto::Extent {
     dto::Extent {
         offset: record.offset,
         length: record.length,
-    }
-}
-
-/// What an export produced.
-pub fn exported(exported: &crate::results::Exported) -> dto::Exported {
-    dto::Exported {
-        copied: exported.copied.len() as u64,
-        previews: exported.previews,
-        tampered: exported.tampered.clone(),
-        missing: exported.missing.clone(),
     }
 }
 

@@ -55,66 +55,16 @@ pub async fn devices(shell: State<'_, Shell>) -> Result<dto::Inventory, String> 
 
 /// Starts a scan.
 ///
-/// The window is granted one path and only one: the session's `previews/`
-/// subdirectory, which holds derived thumbnails and no recovered bytes. That
-/// is what a results view needs to draw and the least that will do it — the
-/// artifacts themselves stay unreachable from the web view, and the grant is
-/// made after the engine names the directory rather than being configured
-/// ahead of time.
-///
-/// Everything else is unchanged: no shell, no filesystem, no network.
+/// Nothing is granted with it: no shell, no filesystem, no network. The web
+/// view never reads the session it starts — everything a run recovers lands in
+/// the destination folder, and the manifest beside it is the record.
 #[tauri::command]
 pub async fn scan_start(
-    app: AppHandle,
     shell: State<'_, Shell>,
     request: dto::ScanRequest,
 ) -> Result<dto::ScanStarted, String> {
-    let started: dto::ScanStarted = shell
-        .call(Call::ScanStart(Box::new(request)), engine::started)
-        .await?;
-    grant_previews(&app, &started.preview_dir);
-    Ok(started)
-}
-
-/// Lets the web view read the thumbnails under `dir`, and nothing else.
-///
-/// A failure here costs the gallery its pictures and nothing more — the scan
-/// is already running and every artifact is recorded regardless — so it is
-/// reported to the window rather than failing the call.
-fn grant_previews(app: &AppHandle, dir: &str) {
-    use tauri::Manager as _;
-    if dir.is_empty() {
-        return;
-    }
-    // Not recursive: the previews directory is flat, and a recursive grant
-    // would reach anything a later version put beneath it.
-    let _ = app.asset_protocol_scope().allow_directory(dir, false);
-}
-
-/// One page of a finished session's artifacts, strongest evidence first.
-///
-/// The order and the filter are the engine's. This passes a page request
-/// through and hands back what came of it; nothing here reads a standing,
-/// counts an artifact or decides what a photograph is (`A-SHELL-NO-DOMAIN`).
-#[tauri::command]
-pub async fn scan_gallery(
-    shell: State<'_, Shell>,
-    session: String,
-    offset: u32,
-    limit: u32,
-    standing: Option<String>,
-) -> Result<dto::Gallery, String> {
     shell
-        .call(
-            Call::ScanGallery {
-                session,
-                offset,
-                limit,
-                standing,
-                include_unwritten: false,
-            },
-            engine::page,
-        )
+        .call(Call::ScanStart(Box::new(request)), engine::started)
         .await
 }
 
@@ -160,36 +110,6 @@ pub async fn acquire_start(
 ) -> Result<dto::AcquireStarted, String> {
     shell
         .call(Call::AcquireStart { source, to }, engine::acquiring)
-        .await
-}
-
-/// Copies a session's artifacts out, verifying each hash on the way.
-///
-/// `standing` is the same filter the gallery is showing, passed straight
-/// through: the set a person is looking at is the set they mean to export, and
-/// asking them to describe it a second time is how the two come to disagree.
-/// Nothing here reads it — the engine decides what each name admits
-/// (`A-SHELL-NO-DOMAIN`).
-///
-/// An artifact whose stored bytes no longer reproduce the digest the scan
-/// recorded is reported and not copied.
-#[tauri::command]
-pub async fn export_copy(
-    shell: State<'_, Shell>,
-    session: String,
-    to: String,
-    standing: Option<String>,
-) -> Result<dto::Exported, String> {
-    shell
-        .call(
-            Call::ExportCopy {
-                session,
-                to,
-                hashes: Vec::new(),
-                standing,
-            },
-            engine::exported,
-        )
         .await
 }
 

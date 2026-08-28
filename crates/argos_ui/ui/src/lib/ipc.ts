@@ -16,8 +16,6 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Acquired,
   AcquireStarted,
-  Exported,
-  Gallery,
   Inventory,
   ScanRequest,
   ScanStarted,
@@ -103,37 +101,7 @@ export function scanResume(): Promise<void> {
   return invoke('scan_resume');
 }
 
-/**
- * One page of a finished session's artifacts, strongest evidence first.
- *
- * The order and the filter are the engine's. `standing` is passed through as
- * the name the engine gave it; this file does not know what the names mean and
- * must not — which artifact looks like a photograph is a recovery question
- * (`A-SHELL-NO-DOMAIN`).
- */
-export function scanGallery(
-  session: string,
-  offset: number,
-  limit: number,
-  standing: string | null,
-): Promise<Gallery> {
-  return invoke('scan_gallery', { session, offset, limit, standing });
-}
 
-/**
- * Copies a session's artifacts into `to`, verifying every hash on the way.
- *
- * `standing` is the filter the gallery is showing, passed through as the name
- * the engine gave it. An artifact whose bytes no longer reproduce the digest
- * the scan recorded comes back in `tampered` and is not copied.
- */
-export function exportCopy(
-  session: string,
-  to: string,
-  standing: string | null,
-): Promise<Exported> {
-  return invoke('export_copy', { session, to, standing });
-}
 
 /**
  * Copies a medium into a raw image at `to`.

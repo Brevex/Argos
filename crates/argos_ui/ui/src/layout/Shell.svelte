@@ -12,7 +12,7 @@
    * nothing and loses nothing, including mid-scan.
    */
   import { onMount } from 'svelte';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
 
   import type { Device } from '../lib/dto';
   import * as ipc from '../lib/ipc';
@@ -24,7 +24,7 @@
   import DriveTable from './parts/DriveTable.svelte';
   import Destination from './parts/Destination.svelte';
   import Activity from './parts/Activity.svelte';
-  import Gallery from './parts/Gallery.svelte';
+  import QuitDialog from './parts/QuitDialog.svelte';
   import SettingsDialog from './parts/SettingsDialog.svelte';
 
   /** How often the elapsed clock advances while a scan runs. */
@@ -37,6 +37,13 @@
   let refreshing = $state(false);
   let settingsOpen = $state(false);
   /**
+   * Whether the window is asking whether to abandon a run.
+   *
+   * Only ever while one is under way. A window with nothing running closes on
+   * the first press, because there is nothing to lose by closing it.
+   */
+  let quitAsking = $state(false);
+  /**
    * Which job the button runs.
    *
    * Two, and only two, because they are the two things this tool does to a
@@ -47,20 +54,6 @@
   let job = $state<'scan' | 'acquire'>('scan');
   /** Where each job writes, kept apart so switching does not lose either. */
   let imagePath = $state('');
-  /** Session directory of the run that finished, and its previews folder. */
-  let finished = $state<{ session: string; previewDir: string } | null>(null);
-  /** The same, for the run in progress: promoted once the engine says done. */
-  let pending: { session: string; previewDir: string } | null = null;
-
-  /**
-   * Whether there are results to show.
-   *
-   * A run that recovered nothing — stopped early, or pointed at a surface with
-   * nothing left on it — has an empty gallery to offer, and an empty gallery is
-   * four filters and two buttons saying nothing. The figures and the line above
-   * them already say what happened.
-   */
-  const showing = $derived(finished !== null && session.artifacts > 0);
 
   const target = $derived(job === 'acquire' ? imagePath : destination);
   const ready = $derived(source !== '' && target !== '' && !busy);
@@ -141,17 +134,11 @@
         // time, so the person choosing to read a failing disk exactly once is
         // not then made to read it again by the same button.
         const copy = await ipc.acquireStart(source, imagePath);
-        finished = null;
         session.begin(copy.source, 'acquire');
         return;
       }
       const started = await ipc.scanStart(settings.request(source, destination));
-      finished = null;
       session.begin(started.source);
-      // Kept from the moment the engine names them: the results view needs the
-      // session directory and its previews folder, and asking for them again
-      // after the run would be a second source for one fact.
-      pending = { session: started.out, previewDir: started.previewDir };
     } catch (err) {
       session.problem = String(err);
       session.phase = 'failed';
@@ -184,6 +171,17 @@
    * the machine back without losing the hours. Which way it goes is read from
    * the engine's own state, never from a flag this window keeps.
    */
+  /**
+   * Closes for real, having been told to.
+   *
+   * `destroy` rather than `close`: a close is a request, and this window
+   * answers requests with the very dialog that produced this call.
+   */
+  function quit(): void {
+    quitAsking = false;
+    void getCurrentWindow().destroy();
+  }
+
   async function suspend(): Promise<void> {
     busy = true;
     try {
@@ -194,53 +192,6 @@
       busy = false;
     }
   }
-
-  /**
-   * Searches the finished session's fragmentation points again.
-   *
-   * The sweep and the validation pass are what those points cost to find, and
-   * the manifest kept them — so this reads the medium for the extents it
-   * reports and nothing else. Worth doing with a longer budget, which is why
-   * the setting for it is in the panel.
-   */
-  async function searchAgain(): Promise<void> {
-    if (finished === null) return;
-    const start = await ipc.invokerHome().catch(() => '');
-    const out = await open({
-      directory: true,
-      multiple: false,
-      title: 'Write the newly reassembled images into',
-      defaultPath: start === '' ? undefined : start,
-    });
-    if (typeof out !== 'string') return;
-
-    busy = true;
-    session.problem = '';
-    session.phase = 'connecting';
-    try {
-      const request = { ...settings.request(source, out), resumeFrom: finished.session };
-      const started = await ipc.scanStart(request);
-      finished = null;
-      session.begin(started.source);
-      pending = { session: started.out, previewDir: started.previewDir };
-    } catch (err) {
-      session.problem = String(err);
-      session.phase = 'failed';
-    } finally {
-      busy = false;
-    }
-  }
-
-  // A run that ends — finished or stopped early — has a session directory
-  // worth showing. Both write a manifest, so both have results to read.
-  $effect(() => {
-    const ended =
-      session.phase === 'done' || session.phase === 'cancelled' || session.phase === 'failed';
-    if (ended && pending !== null) {
-      finished = pending;
-      pending = null;
-    }
-  });
 
   onMount(() => {
     void remembered().then(apply);
@@ -254,12 +205,29 @@
     });
     void connect();
 
+    // Every way out arrives here: the caption's X, the window menu, Alt+F4.
+    // A recovery is hours of reading a disk that may not survive being read
+    // again, and one stray press must not be able to end it.
+    let unclose: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested((event) => {
+        // Left unprevented, the close goes through as it always has: nothing
+        // is running, so there is nothing to lose by letting the window go.
+        if (!session.running) return;
+        event.preventDefault();
+        quitAsking = true;
+      })
+      .then((off) => {
+        unclose = off;
+      });
+
     const tick = setInterval(() => {
       if (session.phase === 'scanning') session.now = Date.now();
     }, TICK_MS);
 
     return () => {
       unlisten?.();
+      unclose?.();
       clearInterval(tick);
     };
   });
@@ -316,15 +284,7 @@
       />
     </div>
 
-    <Activity results={showing} />
-
-    {#if showing && finished !== null}
-      <Gallery
-        session={finished.session}
-        previewDir={finished.previewDir}
-        onSearchAgain={source === '' ? undefined : () => void searchAgain()}
-      />
-    {/if}
+    <Activity />
 
     <div class="controls">
       <!--
@@ -346,6 +306,10 @@
     </div>
   </main>
 </div>
+
+{#if quitAsking}
+  <QuitDialog job={session.job} onStay={() => (quitAsking = false)} onQuit={quit} />
+{/if}
 
 {#if settingsOpen}
   <SettingsDialog

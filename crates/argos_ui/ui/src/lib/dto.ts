@@ -231,28 +231,6 @@ mounts: Array<string>,
 writableMount: boolean, };
 
 /**
- * What an export produced.
- */
-export type Exported = { 
-/**
- * Artifacts copied and verified.
- */
-copied: number, 
-/**
- * Preview files copied alongside them.
- */
-previews: number, 
-/**
- * Artifacts whose stored bytes no longer reproduce the manifest's
- * digest, and were therefore not copied.
- */
-tampered: Array<string>, 
-/**
- * Artifacts recorded in the manifest whose file is missing.
- */
-missing: Array<string>, };
-
-/**
  * A byte range, absolute in the medium.
  */
 export type Extent = { 
@@ -264,28 +242,6 @@ offset: number,
  * Range length in bytes.
  */
 length: number, };
-
-/**
- * One page of a session's artifacts, strongest evidence first.
- */
-export type Gallery = { 
-/**
- * Artifacts on this page, already ordered by the engine.
- */
-artifacts: Array<Artifact>, 
-/**
- * Artifacts the filter admits across the whole session, so a client
- * can page without asking twice.
- */
-total: number, 
-/**
- * Artifacts the session recorded in all, whatever the filter.
- */
-recorded: number, 
-/**
- * Subdirectory holding previews, relative to the session.
- */
-previewDir: string, };
 
 /**
  * What the engine answers a handshake with.
@@ -443,19 +399,7 @@ reference: string | null,
  * held nothing more. A client that cannot set this cannot ask for the
  * longer search that ceiling exists to bound.
  */
-reassemblyBudgetSeconds: number | null, 
-/**
- * Session directory whose fragmentation points to search again,
- * instead of sweeping the medium for them.
- *
- * A scan of a large disk spends its hours on the sweep and the
- * validation pass, and both establish the same fragmentation points
- * every time — the manifest records them. Trying a longer budget from
- * those costs minutes rather than another overnight run. The medium is
- * still read: every extent reported is fetched back and hashed exactly
- * as a scan's is.
- */
-resumeFrom: string | null, };
+reassemblyBudgetSeconds: number | null, };
 
 /**
  * What a started scan tells its client before it produces anything.
@@ -468,12 +412,7 @@ source: string,
 /**
  * Directory the session is being written into.
  */
-out: string, 
-/**
- * Subdirectory of `out` holding previews. A viewer is given access to
- * this and nothing else of the session.
- */
-previewDir: string, };
+out: string, };
 
 /**
  * A shadow copy this machine holds.

@@ -151,17 +151,6 @@ dto! {
         #[serde(default)]
         #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
         pub reassembly_budget_seconds: Option<u64>,
-        /// Session directory whose fragmentation points to search again,
-        /// instead of sweeping the medium for them.
-        ///
-        /// A scan of a large disk spends its hours on the sweep and the
-        /// validation pass, and both establish the same fragmentation points
-        /// every time — the manifest records them. Trying a longer budget from
-        /// those costs minutes rather than another overnight run. The medium is
-        /// still read: every extent reported is fetched back and hashed exactly
-        /// as a scan's is.
-        #[serde(default)]
-        pub resume_from: Option<String>,
     }
 }
 
@@ -179,7 +168,6 @@ impl Default for ScanRequest {
             min_long_side: None,
             previews: false,
             reassembly_budget_seconds: None,
-            resume_from: None,
             reference: None,
         }
     }
@@ -192,9 +180,6 @@ dto! {
         pub source: String,
         /// Directory the session is being written into.
         pub out: String,
-        /// Subdirectory of `out` holding previews. A viewer is given access to
-        /// this and nothing else of the session.
-        pub preview_dir: String,
     }
 }
 
@@ -391,23 +376,6 @@ dto! {
 }
 
 dto! {
-    /// One page of a session's artifacts, strongest evidence first.
-    pub struct Gallery {
-        /// Artifacts on this page, already ordered by the engine.
-        pub artifacts: Vec<Artifact>,
-        /// Artifacts the filter admits across the whole session, so a client
-        /// can page without asking twice.
-        #[cfg_attr(feature = "bindings", ts(type = "number"))]
-        pub total: u32,
-        /// Artifacts the session recorded in all, whatever the filter.
-        #[cfg_attr(feature = "bindings", ts(type = "number"))]
-        pub recorded: u32,
-        /// Subdirectory holding previews, relative to the session.
-        pub preview_dir: String,
-    }
-}
-
-dto! {
     /// The account of a finished run, in the figures a display shows.
     ///
     /// Deliberately not [`Results`]. A run over a system disk recovers tens of
@@ -451,23 +419,6 @@ dto! {
         pub session: String,
         /// How triage ran, when the session says.
         pub triage: Option<Triage>,
-    }
-}
-
-dto! {
-    /// What an export produced.
-    pub struct Exported {
-        /// Artifacts copied and verified.
-        #[cfg_attr(feature = "bindings", ts(type = "number"))]
-        pub copied: u64,
-        /// Preview files copied alongside them.
-        #[cfg_attr(feature = "bindings", ts(type = "number"))]
-        pub previews: u64,
-        /// Artifacts whose stored bytes no longer reproduce the manifest's
-        /// digest, and were therefore not copied.
-        pub tampered: Vec<String>,
-        /// Artifacts recorded in the manifest whose file is missing.
-        pub missing: Vec<String>,
     }
 }
 

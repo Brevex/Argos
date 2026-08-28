@@ -267,7 +267,6 @@ fn a_scan_over_the_wire_recovers_exactly_what_the_command_line_does() {
         }),
     );
     assert!(started["result"]["source"].is_string(), "{started}");
-    assert_eq!(started["result"]["previewDir"], "previews");
 
     let (methods, summary) = engine.drain_until_finished();
     assert!(
@@ -475,123 +474,11 @@ fn acquiring_onto_a_path_that_already_exists_is_refused_by_the_call() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the compiled binary")]
-fn resuming_a_session_that_located_no_fragmentation_points_is_refused() {
-    // Running the scan anyway would sweep nothing, find nothing and report
-    // nothing — which reads as an answer about the medium rather than as a
-    // request that could not be honoured.
+fn results_read_a_session_the_scan_already_wrote() {
     let dir = tempfile::tempdir().expect("temp dir");
     let image = dir.path().join("fixture.img");
     fixture(&image);
     let session = dir.path().join("session");
-
-    let mut engine = Engine::spawn();
-    engine.handshake();
-    engine.call(
-        "scan.start",
-        &serde_json::json!({
-            "source": image, "out": session,
-            "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "minLongSide": 0, "previews": false,
-        }),
-    );
-    engine.drain_until_finished();
-
-    let again = dir.path().join("again");
-    let refused = engine.call(
-        "scan.start",
-        &serde_json::json!({
-            "source": image, "out": again,
-            "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "minLongSide": 0, "previews": false,
-            "resumeFrom": session,
-        }),
-    );
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .is_some_and(|text| text.contains("no fragmentation points")),
-        "a session with nothing to search must say so: {refused}"
-    );
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns the compiled binary")]
-fn an_export_copies_the_set_the_gallery_filter_admits_and_no_more() {
-    // The window exports what it is showing rather than a list of hashes, so
-    // the two have to agree about what a standing admits. They agree by using
-    // one parser: a name the gallery accepts the export accepts, and a set the
-    // gallery shows is the set that lands in the folder.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let image = dir.path().join("fixture.img");
-    fixture(&image);
-    let session = dir.path().join("session");
-
-    let mut engine = Engine::spawn();
-    engine.handshake();
-    engine.call(
-        "scan.start",
-        &serde_json::json!({
-            "source": image, "out": session,
-            "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "minLongSide": 0, "previews": false,
-        }),
-    );
-    engine.drain_until_finished();
-
-    // What the gallery would show under the narrowest filter, and what the
-    // export produces under the same one: the same count, by construction.
-    let page = engine.call(
-        "scan.gallery",
-        &serde_json::json!({
-            "session": session, "offset": 0, "limit": 100, "standing": "camera-named",
-        }),
-    );
-    let shown = page["result"]["total"].as_u64().expect("a total");
-
-    let narrow = dir.path().join("narrow");
-    let copied = engine.call(
-        "export.copy",
-        &serde_json::json!({ "session": session, "to": narrow, "standing": "camera-named" }),
-    );
-    assert_eq!(
-        copied["result"]["copied"], shown,
-        "the export must copy exactly what the same filter shows: {copied}"
-    );
-
-    // And without a filter it copies more, so the filter is doing something
-    // rather than being ignored.
-    let all = dir.path().join("all");
-    let everything = engine.call(
-        "export.copy",
-        &serde_json::json!({ "session": session, "to": all }),
-    );
-    assert!(
-        everything["result"]["copied"].as_u64().expect("a count") > shown,
-        "an unfiltered export must copy more than the narrowest filter: {everything}"
-    );
-
-    // A name this engine does not know is refused rather than silently
-    // widening the set — a client one version ahead has to be told.
-    let refused = engine.call(
-        "export.copy",
-        &serde_json::json!({ "session": session, "to": all, "standing": "photogenic" }),
-    );
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .is_some_and(|text| text.contains("not a standing")),
-        "an unknown standing must be refused: {refused}"
-    );
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns the compiled binary")]
-fn results_and_export_read_a_session_the_scan_already_wrote() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let image = dir.path().join("fixture.img");
-    fixture(&image);
-    let session = dir.path().join("session");
-    let exported = dir.path().join("exported");
 
     let mut engine = Engine::spawn();
     engine.handshake();
@@ -610,96 +497,11 @@ fn results_and_export_read_a_session_the_scan_already_wrote() {
         .as_array()
         .expect("artifacts");
     assert_eq!(artifacts.len(), 2);
-    let wanted = artifacts[0]["sha256"].as_str().expect("a hash").to_owned();
-
-    let copied = engine.call(
-        "export.copy",
-        &serde_json::json!({ "session": session, "to": exported, "hashes": [wanted] }),
-    );
-    assert_eq!(copied["result"]["copied"], 1, "{copied}");
     assert!(
-        copied["result"]["tampered"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
+        artifacts[0]["sha256"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty())
     );
-    assert!(exported.join("000000.jpg").is_file());
-    assert!(!exported.join("000001.png").exists());
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns the compiled binary")]
-fn the_gallery_pages_a_session_and_orders_it_without_the_client_deciding() {
-    // What makes a results view possible at all: the engine orders and pages,
-    // so a window never receives — or ranks — hundreds of thousands of records.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let image = dir.path().join("fixture.img");
-    fixture(&image);
-    let session = dir.path().join("session");
-
-    let mut engine = Engine::spawn();
-    engine.handshake();
-    engine.call(
-        "scan.start",
-        &serde_json::json!({
-            "source": image, "out": session,
-            "filesystem": true, "carving": true, "reassembly": true,
-            "triage": false, "minLongSide": 0, "previews": true,
-        }),
-    );
-    engine.drain_until_finished();
-
-    let first = engine.call(
-        "scan.gallery",
-        &serde_json::json!({ "session": session, "offset": 0, "limit": 1, "standing": null }),
-    );
-    let page = &first["result"];
-    assert_eq!(
-        page["artifacts"].as_array().map(Vec::len),
-        Some(1),
-        "the limit must bound the page: {first}"
-    );
-    assert_eq!(page["total"], 2, "and the total must count past it");
-    assert_eq!(page["recorded"], 2);
-    assert_eq!(page["previewDir"], "previews");
-    // Every artifact carries the sort key the engine derived, so a client can
-    // show it without deriving anything (`A-SHELL-NO-DOMAIN`).
-    assert!(
-        page["artifacts"][0]["standing"].is_string(),
-        "a page must carry the standing: {first}"
-    );
-
-    let second = engine.call(
-        "scan.gallery",
-        &serde_json::json!({ "session": session, "offset": 1, "limit": 10, "standing": null }),
-    );
-    assert_eq!(
-        second["result"]["artifacts"].as_array().map(Vec::len),
-        Some(1)
-    );
-    assert_ne!(
-        first["result"]["artifacts"][0]["sha256"], second["result"]["artifacts"][0]["sha256"],
-        "paging must advance rather than repeat"
-    );
-
-    // A filter narrows without the client knowing what the names mean, and a
-    // name the engine does not have is refused at the edge rather than guessed.
-    let narrowed = engine.call(
-        "scan.gallery",
-        &serde_json::json!({
-            "session": session, "offset": 0, "limit": 10, "standing": "camera-named",
-        }),
-    );
-    assert!(
-        narrowed["result"]["total"].as_u64().is_some_and(|n| n <= 2),
-        "{narrowed}"
-    );
-    let refused = engine.call(
-        "scan.gallery",
-        &serde_json::json!({
-            "session": session, "offset": 0, "limit": 10, "standing": "photograph",
-        }),
-    );
-    assert!(refused["error"].is_object(), "{refused}");
 }
 
 #[test]
