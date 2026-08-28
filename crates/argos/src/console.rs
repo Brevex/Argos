@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use argos_core::progress::{ProgressSink, RunState, ScanEvent, Unit};
+use argos_core::ports::{ProgressSink, RunState, ScanEvent, Unit};
 use argos_engine::{ScanReport, ScanSession};
 use argos_report::Manifest;
 
@@ -86,7 +86,7 @@ impl Notice for Console {
     }
 }
 
-impl crate::acquire::Notice for Console {
+impl crate::medium::AcquireNotice for Console {
     fn progress(&self, progress: argos_device::acquire::Progress) {
         use argos_device::acquire::Progress::{Refined, Swept};
         match progress {
@@ -157,7 +157,7 @@ pub fn devices() {
         }
     }
 
-    let shadows = argos_device::shadow::list();
+    let shadows = argos_device::inventory::shadow_copies();
     if !shadows.is_empty() {
         println!();
         println!(
@@ -222,7 +222,7 @@ pub fn summarize(report: &ScanReport) {
             .triage
             .iter()
             .filter_map(|outcome| outcome.score)
-            .filter(|score| score.label == argos_core::classify::TriageLabel::Photograph)
+            .filter(|score| score.label == argos_core::ports::TriageLabel::Photograph)
             .count();
         let near_duplicates = report
             .triage
@@ -269,6 +269,29 @@ pub fn summarize(report: &ScanReport) {
              their extents were not resolved",
             report.unattributed_residue
         );
+    }
+    // What the regions held, against what came back from them. A recovery
+    // count with no denominator cannot say whether a thin result is a thin
+    // medium or a stage that failed on it (A-CONFIDENCE-HONEST).
+    let census = report.orphan_census;
+    if census.seen > 0 {
+        println!(
+            "records   {} orphaned metadata records read, {} intact; of those {} still \
+             flagged in use and not reported",
+            census.seen, census.valid, census.in_use
+        );
+        println!(
+            "          {} carry their content inside the record, {} carry a run list \
+             ({} name an image file)",
+            census.resident, census.non_resident, census.image_named
+        );
+        if report.metadata_unconfirmed > 0 {
+            println!(
+                "          {} claims pointed at bytes that are not the file they name; \
+                 nothing was reported for them",
+                report.metadata_unconfirmed
+            );
+        }
     }
     if !report.lost_files.is_empty() {
         let named = report
@@ -337,6 +360,49 @@ pub fn summarize(report: &ScanReport) {
     }
 }
 
+/// Prints the volume anchors a run located, by family and then by anchor.
+///
+/// A residue sweep of a re-formatted disk can report thousands, and which
+/// families were found is the fact a reader needs; the individual offsets are
+/// all in the manifest, so only the first few are listed.
+fn volumes(manifest: &Manifest) {
+    if manifest.volumes.is_empty() {
+        return;
+    }
+    let residual = manifest
+        .volumes
+        .iter()
+        .filter(|volume| volume.origin == "residual")
+        .count();
+    println!(
+        "volumes   {} located ({residual} left by earlier formats)",
+        manifest.volumes.len()
+    );
+    let mut families: Vec<(&str, usize)> = Vec::new();
+    for volume in &manifest.volumes {
+        match families.iter_mut().find(|(kind, _)| *kind == volume.kind) {
+            Some((_, count)) => *count += 1,
+            None => families.push((&volume.kind, 1)),
+        }
+    }
+    families.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    for (kind, count) in families {
+        println!("          {count} {kind}");
+    }
+    for volume in manifest.volumes.iter().take(LISTED_BY_DEFAULT) {
+        println!(
+            "          {:<6} {:<8} at {}, {} bytes, {} per allocation unit",
+            volume.kind, volume.origin, volume.offset, volume.length, volume.allocation_bytes
+        );
+    }
+    if manifest.volumes.len() > LISTED_BY_DEFAULT {
+        println!(
+            "          … and {} more anchors, all in the manifest",
+            manifest.volumes.len() - LISTED_BY_DEFAULT
+        );
+    }
+}
+
 /// Prints what a run reached and what it stopped short of.
 ///
 /// These are the figures that separate a medium that held nothing more from a
@@ -352,43 +418,7 @@ fn coverage(manifest: &Manifest) {
         return;
     };
     println!("swept     {} bytes", coverage.bytes_swept);
-    if !manifest.volumes.is_empty() {
-        let residual = manifest
-            .volumes
-            .iter()
-            .filter(|volume| volume.origin == "residual")
-            .count();
-        println!(
-            "volumes   {} located ({residual} left by earlier formats)",
-            manifest.volumes.len()
-        );
-        // Counted by family first. A residue sweep of a re-formatted disk can
-        // report thousands of anchors, and which families were found is the
-        // fact that matters; the individual offsets are in the manifest.
-        let mut families: Vec<(&str, usize)> = Vec::new();
-        for volume in &manifest.volumes {
-            match families.iter_mut().find(|(kind, _)| *kind == volume.kind) {
-                Some((_, count)) => *count += 1,
-                None => families.push((&volume.kind, 1)),
-            }
-        }
-        families.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-        for (kind, count) in families {
-            println!("          {count} {kind}");
-        }
-        for volume in manifest.volumes.iter().take(LISTED_BY_DEFAULT) {
-            println!(
-                "          {:<6} {:<8} at {}, {} bytes, {} per allocation unit",
-                volume.kind, volume.origin, volume.offset, volume.length, volume.allocation_bytes
-            );
-        }
-        if manifest.volumes.len() > LISTED_BY_DEFAULT {
-            println!(
-                "          … and {} more anchors, all in the manifest",
-                manifest.volumes.len() - LISTED_BY_DEFAULT
-            );
-        }
-    }
+    volumes(manifest);
     // Each of these is a place a recovery could have been and was not, and each
     // says which of the reasons it was.
     for (count, text) in [
@@ -400,6 +430,25 @@ fn coverage(manifest: &Manifest) {
             coverage.unattributed_residue,
             "orphaned metadata regions could not be tied to a volume, so their extents were \
              never resolved",
+        ),
+        (
+            coverage.attributed_residue,
+            "orphaned metadata regions were tied to a confirmed volume and resolved against \
+             its geometry",
+        ),
+        (
+            coverage.residue_census.non_resident,
+            "orphaned records carry a run list — the map of a deleted file's fragments, in \
+             the lost volume's own units",
+        ),
+        (
+            coverage.residue_census.in_use,
+            "orphaned records are still flagged in use, so the scan did not report them",
+        ),
+        (
+            coverage.metadata_unconfirmed,
+            "metadata claims pointed at bytes that are not the file they name, and nothing \
+             was reported for them",
         ),
         (
             coverage.omitted_assets,

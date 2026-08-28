@@ -5,7 +5,7 @@
 
 use std::io::Cursor;
 
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

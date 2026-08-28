@@ -6,10 +6,8 @@
 use std::io::Read;
 use std::sync::Mutex;
 
-use argos_core::artifact::{Artifact, ArtifactSink, Digest};
-use argos_core::geometry::{ByteOffset, ByteRange};
-use argos_core::progress::{ProgressSink, ScanEvent};
-use argos_core::{Confidence, Format, Stage, Timestamps};
+use argos_core::ports::{Artifact, ArtifactSink, Digest, ProgressSink, ScanEvent};
+use argos_core::{ByteOffset, ByteRange, Confidence, Format, Stage, Timestamps};
 
 /// One artifact as a [`Collector`] received it: provenance plus the bytes.
 #[derive(Clone, PartialEq, Eq)]
@@ -35,7 +33,7 @@ pub struct Collected {
     /// Parent candidate, for embedded thumbnails.
     pub parent: Option<ByteOffset>,
     /// What the picture records about itself and its camera.
-    pub capture: argos_core::artifact::Capture,
+    pub capture: argos_core::ports::Capture,
     /// The bytes the sink was handed.
     pub bytes: Vec<u8>,
 }

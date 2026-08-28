@@ -20,5 +20,5 @@ fuzz_target!(|data: &[u8]| {
         profile.entropy,
         data.len()
     );
-    let _ = argos_carve::reassemble::restart_points(data, argos_core::geometry::ByteOffset::new(0));
+    let _ = argos_carve::reassemble::restart_points(data, argos_core::ByteOffset::new(0));
 });

@@ -191,15 +191,37 @@
     }
   ],
   "coverage": {
+    "attributed_residue": 0,
     "bytes_swept": 8388608,
     "dropped_unreadable": 0,
     "duplicates": 0,
     "journal_deletions": 0,
+    "metadata_unconfirmed": 0,
     "omitted_assets": 0,
     "partial_prefixes": 1,
     "reassembled": 0,
     "reassembly_attempted": 1,
     "reassembly_skipped_small": 0,
+    "residue_census": {
+      "distinct_instants": 0,
+      "image_named": 0,
+      "in_use": 0,
+      "largest_minute": 0,
+      "non_resident": 0,
+      "resident": 0,
+      "runs": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "seen": 0,
+      "valid": 0
+    },
     "unattributed_residue": 0,
     "unrecoverable": 0
   },

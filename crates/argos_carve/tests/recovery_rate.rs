@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use argos_carve::fixture::{Fragmented, fragmented, photo_jpeg, photo_jpeg_rgb};
 use argos_carve::reassemble::{self, Candidate, Limits};
 use argos_carve::{Format, Scratch};
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 
 /// Fragment grid the fixtures and the search share.
 const BLOCK: usize = argos_carve::classify::BLOCK_BYTES;

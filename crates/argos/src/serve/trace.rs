@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use argos_core::Stage;
-use argos_core::progress::{ScanEvent, Unit};
+use argos_core::ports::{ScanEvent, Unit};
 
 /// Environment variable that turns the trace on.
 const ARGOS_TRACE: &str = "ARGOS_TRACE";

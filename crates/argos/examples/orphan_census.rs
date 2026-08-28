@@ -30,8 +30,7 @@ use std::io::{Read, Seek, SeekFrom, Write as _};
 
 use argos_carve::classify::{self, BlockClass};
 use argos_carve::{Candidate, Detector};
-use argos_core::Format;
-use argos_core::geometry::ByteOffset;
+use argos_core::{ByteOffset, Format};
 use argos_device::{BlockReader, Device};
 
 /// Bytes examined per sample, unless `--window` says otherwise.

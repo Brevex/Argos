@@ -8,7 +8,7 @@
 use argos_carve::fixture::{photo_jpeg, photo_jpeg_rgb, photo_jpeg_with_restarts};
 use argos_carve::reassemble::restart_points;
 use argos_carve::reference::{Fault, Reference};
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 
 /// Restart interval the fixtures use: often enough that a fragment of a small
 /// photograph contains several re-entry points.

@@ -23,7 +23,7 @@ pub const BLOCK_BYTES: usize = 4096;
 
 /// Shortest block worth classifying. Below this the byte histogram is too
 /// sparse for entropy to mean anything.
-pub const MIN_BLOCK_BYTES: usize = 256;
+pub(crate) const MIN_BLOCK_BYTES: usize = 256;
 
 /// Entropy at or above which a block is treated as compressed or encrypted.
 ///
@@ -131,7 +131,7 @@ impl Default for BlockProfile {
 
 /// Classifies one block.
 ///
-/// A block shorter than [`MIN_BLOCK_BYTES`] is reported as
+/// A block shorter than `MIN_BLOCK_BYTES` is reported as
 /// [`BlockClass::LowEntropy`] with a zero score: there is not enough of it to
 /// measure, and claiming otherwise would put noise into a reassembly graph.
 #[must_use]

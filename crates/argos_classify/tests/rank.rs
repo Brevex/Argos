@@ -6,7 +6,7 @@
 //! few hundred camera frames among them.
 
 use argos_classify::rank::{Evidence, Standing, standing};
-use argos_core::artifact::Capture;
+use argos_core::ports::Capture;
 
 fn camera(taken: &str) -> Capture {
     Capture {

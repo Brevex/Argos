@@ -4,7 +4,7 @@
 use std::io::Cursor;
 
 use argos_core::fixture::MemDisk;
-use argos_core::geometry::{Lba, SectorRange, SectorSize};
+use argos_core::{Lba, SectorRange, SectorSize};
 use argos_device::acquire;
 
 const SECTOR: SectorSize = SectorSize::new(512);

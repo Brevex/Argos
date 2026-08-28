@@ -11,7 +11,7 @@
 //! decisions are tested everywhere rather than only on the OS that produced
 //! them.
 
-use argos_core::source::DeviceClass;
+use argos_core::ports::DeviceClass;
 
 /// Class of a medium from Linux's sysfs `queue/rotational` flag.
 ///
@@ -122,7 +122,7 @@ impl std::fmt::Display for TrimState {
 
 #[cfg(test)]
 mod tests {
-    use argos_core::source::DeviceClass;
+    use argos_core::ports::DeviceClass;
 
     use super::{
         TrimState, expects_deleted_content, from_rotational, from_seek_penalty, from_solid_state,

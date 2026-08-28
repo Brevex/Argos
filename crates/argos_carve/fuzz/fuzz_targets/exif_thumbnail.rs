@@ -5,5 +5,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = argos_carve::exif::thumbnail(data);
+    let _ = argos_carve::jpeg::exif::thumbnail(data);
 });

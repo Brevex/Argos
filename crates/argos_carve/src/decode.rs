@@ -18,7 +18,7 @@
 //! the structural validator verifies every one.
 
 use argos_core::Format;
-use argos_core::classify::PixelImage;
+use argos_core::ports::PixelImage;
 use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;

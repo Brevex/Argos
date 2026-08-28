@@ -8,7 +8,6 @@
 //! Printing lives in [`console`]; this module defines the commands and
 //! dispatches them.
 
-mod acquire;
 mod console;
 mod medium;
 mod results;
@@ -380,7 +379,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
 fn run_acquire(source: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let controls = console::spawn_stop_control(std::sync::Arc::clone(&stop));
-    let outcome = acquire::run(source, to, &console::Console, &|| {
+    let outcome = medium::acquire_image(source, to, &console::Console, &|| {
         stop.load(std::sync::atomic::Ordering::Acquire)
     });
     controls.stop();

@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use argos_core::progress::ScanEvent;
+use argos_core::ports::ScanEvent;
 use argos_ipc::dto;
 use argos_ipc::wire::Notification;
 
@@ -258,9 +258,8 @@ impl Pacer {
 
 #[cfg(test)]
 mod tests {
-    use argos_core::Stage;
-    use argos_core::geometry::{ByteOffset, ByteRange};
-    use argos_core::progress::Unit;
+    use argos_core::ports::Unit;
+    use argos_core::{ByteOffset, ByteRange, Stage};
 
     use super::{Outgoing, Pending};
 

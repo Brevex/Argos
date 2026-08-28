@@ -12,7 +12,7 @@
 
 use argos_classify::fixture::{Slice, sample};
 use argos_classify::{Triage, rules};
-use argos_core::classify::PixelImage;
+use argos_core::ports::PixelImage;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 

@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use argos_core::progress::{ProgressSink, ScanEvent};
+use argos_core::ports::{ProgressSink, ScanEvent};
 use argos_ipc::wire::{Call, Done, ErrorCode, Notification, Reply, Request, Response};
 use argos_ipc::{SCHEMA_VERSION, dto, wire};
 use argos_report::Manifest;
@@ -273,7 +273,7 @@ impl Engine {
                 image,
                 sized: Mutex::new(Some(sized_tx)),
             };
-            let outcome = crate::acquire::run(&source, &to, &notice, &|| {
+            let outcome = crate::medium::acquire_image(&source, &to, &notice, &|| {
                 stop.load(std::sync::atomic::Ordering::Acquire)
             });
             *acquiring
@@ -593,7 +593,7 @@ struct Acquisition {
     sized: Mutex<Option<mpsc::SyncSender<Result<u64, String>>>>,
 }
 
-impl crate::acquire::Notice for Acquisition {
+impl crate::medium::AcquireNotice for Acquisition {
     fn progress(&self, progress: argos_device::acquire::Progress) {
         use argos_device::acquire::Progress;
         let (pass, done, total) = match progress {

@@ -126,10 +126,56 @@ pub struct CoverageRecord {
     /// that survived a re-format and could not be read for want of the volume
     /// geometry they are counted against. They are counted, never guessed at.
     pub unattributed_residue: u64,
+    /// Residual `FILE`-record regions a confirmed volume did cover, whose run
+    /// lists were resolved against a real geometry.
+    #[serde(default)]
+    pub attributed_residue: u64,
+    /// Metadata claims the medium refused to confirm: the first extent held no
+    /// recognisable signature, so nothing was reported for them.
+    #[serde(default)]
+    pub metadata_unconfirmed: u64,
+    /// What the passes over orphaned metadata records counted — the
+    /// denominator the recovery counts are read against.
+    #[serde(default)]
+    pub residue_census: ResidueCensusRecord,
     /// Ceilings the run reached, named. Each means it looked at less than it
     /// set out to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ceilings: Vec<String>,
+}
+
+/// What a run's passes over orphaned metadata records found, counted.
+///
+/// A recovery count on its own cannot be read: three files back from a region
+/// holding four records is a different medium from three back from a region
+/// holding forty thousand. These are the figures that make the first number
+/// mean something, and none of them is a claim that any byte was recovered.
+///
+/// Counts only — no name, no offset, nothing that identifies a file.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResidueCensusRecord {
+    /// Record-sized positions carrying the `FILE` signature.
+    pub seen: u64,
+    /// Of those, records whose fixups verified and whose attributes walked.
+    pub valid: u64,
+    /// Valid records still flagged in use, which the scan does not report.
+    pub in_use: u64,
+    /// Deleted records whose content was inside the record itself.
+    pub resident: u64,
+    /// Deleted records carrying a run list that maps at least one run.
+    pub non_resident: u64,
+    /// Deleted records naming a file with an image extension.
+    pub image_named: u64,
+    /// Runs per run list over `non_resident`, bucketed as 1, 2, 3, 4, 5–8,
+    /// 9–16, 17–64, 65 or more.
+    pub runs: Vec<u64>,
+    /// Distinct creation instants among the records that could not be placed.
+    pub distinct_instants: u64,
+    /// Most records sharing one 60-second window, among the same records.
+    ///
+    /// A batch of files written — or removed — in one action shows up here and
+    /// nowhere else in this block.
+    pub largest_minute: u64,
 }
 
 /// One filesystem volume a run located.
@@ -180,8 +226,8 @@ pub struct FragmentRecord {
 ///
 /// Deliberately without an extents field: there is no honest value for one.
 /// What is here is what a `FILE` record states about itself, none of which
-/// needs the volume's geometry — plus the run list in the volume's own units,
-/// which is what lets a later run test a candidate geometry against it.
+/// needs the volume's geometry — plus the run list whole, in the volume's own
+/// units, which is what lets a later run test a candidate geometry against it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LostFileRecord {
     /// Name the record carries, when one survived.
@@ -197,6 +243,12 @@ pub struct LostFileRecord {
     /// Last modification time, as Unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_unix: Option<i64>,
+    /// The number the record states for itself.
+    ///
+    /// A run of consecutive numbers fixes the stride between records on the
+    /// medium, and with it where record 0 would have been.
+    #[serde(default)]
+    pub record_number: u64,
     /// First logical cluster of the content, in the lost volume's units.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_cluster: Option<u64>,
@@ -204,6 +256,24 @@ pub struct LostFileRecord {
     ///
     /// With `size`, this is a test of any candidate cluster size: the right
     /// one is the one whose clusters account for the size stated.
+    pub clusters: u64,
+    /// The run list whole, in file order and in the lost volume's own units.
+    ///
+    /// `first_cluster` and `clusters` are its first entry and its total; this
+    /// is every fragment. A candidate geometry gets one trial per run here
+    /// where those two give it one per file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunRecord>,
+}
+
+/// One entry of a lost file's run list, in the lost volume's cluster units.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRecord {
+    /// First logical cluster of the run; absent for a sparse run, which covers
+    /// file offsets but maps no medium bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcn: Option<u64>,
+    /// Clusters the run covers.
     pub clusters: u64,
 }
 

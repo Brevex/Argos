@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use argos_carve::reassemble::{self, Broken, Limits};
 use argos_carve::{Format, Scratch};
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 
 /// Fragment grid the search steps on, and the medium's allocation unit.
 const BLOCK: usize = argos_carve::classify::BLOCK_BYTES;

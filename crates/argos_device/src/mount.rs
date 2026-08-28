@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::MountPoint;
+use crate::inventory::MountPoint;
 
 /// Parses Linux' `/proc/self/mountinfo`.
 ///

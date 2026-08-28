@@ -3,16 +3,28 @@
 //! Every test asserts on the bytes the sink received, not on counts alone: a
 //! pipeline that reports the right number of artifacts with the wrong content
 //! is worse than one that reports nothing.
+//!
+//! The last suite here is about what merging costs on the shape of medium
+//! that makes it expensive. The findings a real disk produces are not
+//! independent: a carve that swallowed a region of the surface is one weakly
+//! evidenced finding spanning thousands of files the filesystem also named,
+//! and because its evidence is *weaker* than theirs it can cover none of
+//! them. Every one of them is kept, which is correct — and what makes the
+//! naive shape of that stage quadratic in findings that all survive. It is a
+//! silent stage between the sweep and the first recovered image, so nothing
+//! on screen moves while it runs, and a test that only checked the result
+//! would have passed throughout.
 
 use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
-use argos_core::progress::{Discard, ProgressSink, RunState, ScanEvent, Unit};
-use argos_core::{Confidence, Format, Stage};
+use argos_core::ports::{Discard, ProgressSink, RunState, ScanEvent, Unit};
+use argos_core::{ByteOffset, ByteRange, Confidence, Format, Stage, Timestamps};
 use argos_engine::fixture::{Collected, Collector, Events};
-use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession, Stages};
+use argos_engine::{Finding, Medium, ScanConfig, ScanReport, ScanSession, Stages};
 
 /// Chunk size used throughout: the configured minimum, so a few hundred
 /// kilobytes of fixture still exercises multi-chunk reading and the overlap.
@@ -420,6 +432,79 @@ fn a_deleted_file_whose_volume_is_gone_is_still_named_and_dated() {
     assert_eq!(
         named.record_at, record_at as u64,
         "where the record lay is where the lost $MFT lay"
+    );
+    assert!(
+        !named.runs.is_empty(),
+        "the map of the file's fragments survives with the record that carried it"
+    );
+
+    // The census is what makes the count above readable: a run that placed
+    // nothing here has to say how much there was to place, or a re-formatted
+    // disk and an empty one report the same way (A-CONFIDENCE-HONEST).
+    let census = report.orphan_census;
+    assert!(
+        census.seen >= census.valid && census.valid > 0,
+        "the records the sweep found were read, not merely counted: {census:?}"
+    );
+    assert!(
+        census.non_resident > 0,
+        "the deleted record carries a run list, and the census must say so: {census:?}"
+    );
+    assert_eq!(
+        census.runs.iter().sum::<u64>(),
+        census.non_resident,
+        "every record with a map falls in exactly one bucket"
+    );
+}
+
+#[test]
+fn a_metadata_claim_the_medium_contradicts_is_counted_rather_than_reported() {
+    // A run list that survived a re-format can point at clusters since reused.
+    // The double confirmation drops the claim, which is right — but a drop
+    // that leaves no trace makes "the bytes were overwritten" and "this run
+    // never looked" the same silence.
+    let jpeg = argos_carve::fixture::Jpeg::new()
+        .with_entropy_bytes(4096)
+        .build();
+    let file =
+        argos_fs::fixture::FilePlan::new("gone.jpg", 128 * 1024, jpeg.len()).with_content(jpeg);
+    let mft_at = 32 * 1024;
+    let intact = argos_fs::fixture::ntfs_volume(CHUNK * 6, mft_at, &file);
+
+    // Control: with the clusters still holding the file, the claim confirms.
+    let (_, before) = scan(&intact);
+    assert_eq!(
+        before.metadata_unconfirmed, 0,
+        "a claim the medium confirms is not counted as contradicted"
+    );
+
+    // One variable changes: the clusters the record still claims now hold
+    // something else, exactly as reuse after a delete leaves them.
+    let mut reused = intact;
+    let at = file.offset();
+    reused[at..at + file.content.len()].fill(0x5A);
+
+    let (_, after) = scan(&reused);
+    // Twice, and that is the pipeline being described accurately rather than
+    // a miscount: a located volume's own `$MFT` is also a region of `FILE`
+    // records the sweep finds, so the record is resolved once by the `$MFT`
+    // walk and once by the orphan scan over the region containing it. When
+    // both confirm, `consolidate` merges the two findings and the duplication
+    // is invisible; when neither does, the counter is what makes it visible.
+    assert!(
+        after.attributed_residue > 0,
+        "the `$MFT` sits in a region the located volume covers"
+    );
+    assert_eq!(
+        after.metadata_unconfirmed, 2,
+        "one claim per path that resolved it, and neither path reported one"
+    );
+    assert!(
+        !after
+            .lost_files
+            .iter()
+            .any(|lost| lost.name.as_deref() == Some("gone.jpg")),
+        "a counted claim is not also reported as a recovery"
     );
 }
 
@@ -1282,7 +1367,7 @@ fn restricting_the_range_restricts_what_is_found() {
         .workers(NonZeroUsize::new(2).expect("two workers"))
         .chunk_bytes(CHUNK)
         .min_long_side(0)
-        .range(argos_core::geometry::ByteOffset::new(CHUNK as u64)..)
+        .range(argos_core::ByteOffset::new(CHUNK as u64)..)
         .stages(Stages {
             filesystem: false,
             carving: true,
@@ -1380,7 +1465,7 @@ fn filesystem_metadata_whose_bytes_do_not_validate_drops_to_the_partial_tier() {
 
 #[test]
 fn a_name_is_never_reported_against_a_different_filesystem_object() {
-    use argos_core::geometry::{ByteOffset, ByteRange};
+    use argos_core::{ByteOffset, ByteRange};
     use argos_engine::Finding;
 
     // Two findings over identical extents: one named, one not, from different
@@ -1552,4 +1637,82 @@ fn a_recovery_whose_own_record_lost_its_name_is_named_by_the_index_slack() {
         "a name surviving only in index slack must reach the artifact"
     );
     assert_eq!(recovered.bytes, jpeg, "and it names the right bytes");
+}
+
+/// Findings in the pathological arrangement, for `count` inner files.
+fn spanning_carve_over_named_files(count: u64) -> Vec<Finding> {
+    let finding = |start: u64, len: u64, confidence: Confidence| Finding {
+        format: Format::Jpeg,
+        stage: Stage::Carve,
+        confidence,
+        extents: Box::from([ByteRange::new(ByteOffset::new(start), len)]),
+        declared_size: None,
+        timestamps: Timestamps::default(),
+        deleted: None,
+        name: None,
+        source_object: None,
+        parent: None,
+    };
+
+    let mut findings = vec![finding(0, count * 4096 + 4096, Confidence::ContiguousCarve)];
+    for index in 0..count {
+        findings.push(finding(index * 4096 + 16, 512, Confidence::FsMetadata));
+    }
+    findings
+}
+
+#[test]
+fn merging_stays_affordable_when_one_weak_finding_spans_thousands() {
+    let count = 16_000_u64;
+    let findings = spanning_carve_over_named_files(count);
+
+    let at = Instant::now();
+    let merged = argos_engine::merge_for_test(findings);
+    let took = at.elapsed();
+
+    // Nothing may be lost: the span is weaker evidence than what lies inside
+    // it, so it covers none of them and everything is reported.
+    assert_eq!(
+        merged.len() as u64,
+        count + 1,
+        "a container that cannot cover what it spans must not remove it"
+    );
+
+    // The ceiling is deliberately loose — this measures roughly 11 ms here, and
+    // the arrangement above took 11 *seconds* before the search was ordered by
+    // reach. Two seconds is far enough above the real cost to survive a slow
+    // machine and far enough below the quadratic cost to fail if it returns.
+    assert!(
+        took.as_secs_f64() < 2.0,
+        "merging {count} findings took {took:?}; the coverage search is scanning \
+         everything kept so far again"
+    );
+}
+
+#[test]
+fn merging_scales_with_the_findings_rather_than_their_square() {
+    // Doubling the input must roughly double the work. Quadratic growth
+    // quadruples it, which is the difference between a stage that takes a
+    // moment on a real disk and one that takes an hour.
+    let time = |count: u64| {
+        let findings = spanning_carve_over_named_files(count);
+        let at = Instant::now();
+        let merged = argos_engine::merge_for_test(findings);
+        assert_eq!(merged.len() as u64, count + 1);
+        at.elapsed().as_secs_f64()
+    };
+
+    // Warm the allocator so the first measurement is not the slow one.
+    let _ = time(2_000);
+    let small = time(4_000).max(f64::MIN_POSITIVE);
+    let large = time(16_000);
+
+    // Four times the input. Linear predicts 4x, quadratic predicts 16x; a
+    // ceiling of 8 separates them with room for measurement noise.
+    let growth = large / small;
+    assert!(
+        growth < 8.0,
+        "four times the findings cost {growth:.1} times the work, which is the \
+         shape of a quadratic search, not a linear one"
+    );
 }

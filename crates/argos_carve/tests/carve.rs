@@ -9,8 +9,7 @@ use argos_carve::fixture::{
     zero_filled,
 };
 use argos_carve::{Carver, Finding, Format, Scratch, Verdict, jpeg};
-use argos_core::Confidence;
-use argos_core::geometry::ByteOffset;
+use argos_core::{ByteOffset, Confidence};
 
 /// Recovers the byte range a finding claims, from the source itself.
 fn extract(disk: &[u8], finding: &Finding) -> Vec<u8> {
@@ -248,7 +247,7 @@ fn cyclic_exif_ifd_chain_terminates_without_a_thumbnail() {
     // The walker sees the TIFF bytes after the "Exif\0\0" prefix; a chain
     // whose IFD0 next-pointer cycles back to IFD0 must terminate with no
     // thumbnail, because IFD0 carries no thumbnail tags.
-    assert_eq!(argos_carve::exif::thumbnail(&payload[6..]), None);
+    assert_eq!(argos_carve::jpeg::exif::thumbnail(&payload[6..]), None);
 }
 
 // --- what a recovered image says about itself ------------------------------
@@ -314,9 +313,9 @@ fn a_description_whose_offsets_point_outside_it_yields_nothing() {
         argos_carve::fixture::exif_capture("Make", "Model", "2009:01:01 00:00:00", (4, 4));
     let overflowing = argos_carve::fixture::with_u32_be(&payload, 6 + 4, u32::MAX);
 
-    assert!(argos_carve::exif::metadata(&overflowing[6..]).is_empty());
+    assert!(argos_carve::jpeg::exif::metadata(&overflowing[6..]).is_empty());
     for at in 0..payload.len() {
-        let _ = argos_carve::exif::metadata(&payload[..at]);
+        let _ = argos_carve::jpeg::exif::metadata(&payload[..at]);
     }
 }
 
@@ -332,7 +331,7 @@ fn a_cyclic_ifd_chain_terminates_without_a_description() {
     let at = 6 + 8 + 2 + 24 + 8;
     cyclic[at..at + 4].copy_from_slice(&8_u32.to_le_bytes());
 
-    let found = argos_carve::exif::metadata(&cyclic[6..]);
+    let found = argos_carve::jpeg::exif::metadata(&cyclic[6..]);
 
     // It terminates; whatever it read is bounded and no loop occurred.
     assert!(found.taken.is_none(), "a cycle cannot reach the Exif IFD");

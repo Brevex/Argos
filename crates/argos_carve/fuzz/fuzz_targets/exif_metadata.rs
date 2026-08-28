@@ -10,5 +10,5 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let _ = argos_carve::metadata(data);
-    let _ = argos_carve::exif::metadata(data);
+    let _ = argos_carve::jpeg::exif::metadata(data);
 });

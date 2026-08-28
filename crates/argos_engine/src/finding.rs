@@ -4,11 +4,8 @@ use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fmt;
 
-use argos_core::artifact::Digest;
-use argos_core::classify::ModelIdentity;
-use argos_core::geometry::{ByteOffset, ByteRange};
-use argos_core::progress::RunState;
-use argos_core::{Confidence, Format, Stage, Timestamps};
+use argos_core::ports::{Digest, ModelIdentity, RunState};
+use argos_core::{ByteOffset, ByteRange, Confidence, Format, Stage, Timestamps};
 use argos_fs::Volume;
 
 use crate::annotate::TriageOutcome;
@@ -85,7 +82,7 @@ impl Finding {
     /// Whether every extent lies inside `other`'s span — the test for a
     /// candidate that is really a piece of something already recovered.
     #[must_use]
-    pub fn is_covered_by(&self, other: &Self) -> bool {
+    pub(crate) fn is_covered_by(&self, other: &Self) -> bool {
         let Some((low, high)) = other.span() else {
             return false;
         };
@@ -99,7 +96,7 @@ impl Finding {
     /// Whether any extent overlaps `range` — the test for a finding whose
     /// bytes lie in a region the medium could not read.
     #[must_use]
-    pub fn intersects(&self, range: ByteRange) -> bool {
+    pub(crate) fn intersects(&self, range: ByteRange) -> bool {
         let range_end = range.end_saturating().get();
         self.extents.iter().any(|extent| {
             let end = extent.end_saturating().get();
@@ -173,7 +170,7 @@ impl Ceilings {
 /// What a completed — or cancelled — scan found.
 ///
 /// Everything here is countable evidence about the run itself; recovered
-/// content leaves through the [`ArtifactSink`](argos_core::artifact::ArtifactSink).
+/// content leaves through the [`ArtifactSink`](argos_core::ports::ArtifactSink).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScanReport {
     /// How the run ended.
@@ -240,6 +237,24 @@ pub struct ScanReport {
     /// volume, so their extents could not be resolved. They are counted, not
     /// guessed at.
     pub unattributed_residue: u64,
+    /// Residual `FILE`-record regions a confirmed NTFS volume did cover, whose
+    /// run lists were therefore resolved against a real geometry.
+    ///
+    /// The denominator [`ScanReport::unattributed_residue`] never had: without
+    /// it, a run that resolved every region it found and a run that found
+    /// almost none report the same way.
+    pub attributed_residue: u64,
+    /// What the passes over orphaned `FILE` records counted, attributed
+    /// regions and unattributed alike.
+    pub orphan_census: argos_fs::ntfs::Census,
+    /// Filesystem-metadata claims dropped because the first extent carried no
+    /// recognisable signature.
+    ///
+    /// The metadata said a file was here; the bytes here are not that file.
+    /// Counting them is what separates "the clusters were reused" from "the
+    /// geometry these were resolved against is wrong" — two conclusions the
+    /// same silence used to serve (`A-CONFIDENCE-HONEST`).
+    pub metadata_unconfirmed: u64,
     /// Files an orphaned `FILE` record still names, whose content this run
     /// could not place.
     ///
@@ -250,9 +265,9 @@ pub struct ScanReport {
     /// geometry at all — so a run that discards them reports a medium as
     /// emptier than the medium says it is (`A-CONFIDENCE-HONEST`).
     ///
-    /// Each also carries its run list in the volume's own units, which is what
-    /// makes a candidate geometry testable afterwards: the right cluster size
-    /// is the one whose clusters account for the size the record states.
+    /// Each carries its run list whole, in the volume's own units, which is
+    /// what makes a candidate geometry testable afterwards: the right cluster
+    /// size is the one whose runs resolve to the file the record names.
     pub lost_files: Vec<argos_fs::ntfs::LostFile>,
     /// One triage annotation per persisted artifact, in emit order. Empty when
     /// triage did not run. Annotations only: nothing here can remove an
@@ -275,7 +290,7 @@ pub struct ScanReport {
     /// thousands of artifacts and a few hundred photographs, and this is what
     /// lets a reader put the photographs first. Every written artifact has one
     /// and nothing is removed by it (A-TRIAGE-NOT-VERDICT).
-    pub standings: Vec<(argos_core::artifact::Digest, argos_classify::rank::Standing)>,
+    pub standings: Vec<(argos_core::ports::Digest, argos_classify::rank::Standing)>,
     /// Artifacts found among same-sized neighbours, with how many there were.
     ///
     /// The signature of a thumbnail cache, which a used medium holds far more
@@ -588,7 +603,7 @@ pub(crate) fn runs(entries: &[Entry]) -> Vec<CacheRun> {
 #[cfg(test)]
 mod tests {
     use super::{Entry, MIN_RUN, runs};
-    use argos_core::artifact::Digest;
+    use argos_core::ports::Digest;
 
     fn entry(offset: u64, pixels: Option<(u32, u32)>, tag: u64) -> Entry {
         Entry {

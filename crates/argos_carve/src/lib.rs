@@ -24,13 +24,11 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
 
-use argos_core::Confidence;
-use argos_core::geometry::ByteOffset;
+use argos_core::{ByteOffset, Confidence};
 use memchr::memmem::Finder;
 
 pub mod classify;
 pub mod decode;
-pub mod exif;
 pub mod jpeg;
 pub mod mcu;
 pub mod png;
@@ -206,8 +204,8 @@ pub fn validate_thumbnail<R: Read + Seek>(
 /// medium: every recovery goes through it the same way, whether it was carved
 /// whole, reassembled, or reported as the part of itself that decoded.
 #[must_use]
-pub fn metadata(bytes: &[u8]) -> argos_core::artifact::Capture {
-    let empty = argos_core::artifact::Capture::default;
+pub fn metadata(bytes: &[u8]) -> argos_core::ports::Capture {
+    let empty = argos_core::ports::Capture::default;
     let Some(rest) = bytes.strip_prefix(&[0xFF, jpeg::MARKER_SOI]) else {
         return empty();
     };
@@ -231,7 +229,7 @@ pub fn metadata(bytes: &[u8]) -> argos_core::artifact::Capture {
         if code == jpeg::MARKER_APP1
             && let Some(tiff) = payload.strip_prefix(jpeg::EXIF_HEADER.as_slice())
         {
-            let found = exif::metadata(tiff);
+            let found = jpeg::exif::metadata(tiff);
             if !found.is_empty() {
                 return found;
             }

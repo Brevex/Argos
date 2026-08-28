@@ -12,7 +12,7 @@
 
 use std::fmt;
 
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 
 /// Start of image.
 const MARKER_SOI: u8 = 0xD8;
@@ -37,7 +37,7 @@ const STANDALONE: std::ops::RangeInclusive<u8> = 0xD0..=0xD9;
 /// with an embedded thumbnail rarely passes 64 KiB. The bound is what stops a
 /// crafted file from being read into memory in full before it is rejected
 /// (`A-BOUNDED-ALLOC`), and is independent of any length the file states.
-pub const MAX_HEADER_BYTES: usize = 1 << 20;
+pub(crate) const MAX_HEADER_BYTES: usize = 1 << 20;
 
 /// Why a candidate cannot serve as a reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +54,7 @@ pub enum Fault {
     NotSequential,
     /// A segment's length field runs past the end of the candidate.
     Truncated,
-    /// The header alone exceeds [`MAX_HEADER_BYTES`].
+    /// The header alone exceeds `MAX_HEADER_BYTES`.
     HeaderTooLarge,
 }
 
@@ -112,7 +112,7 @@ impl Reference {
     ///
     /// [`ReferenceError`] when the candidate is not a JPEG, is progressive or
     /// arithmetic-coded, declares a segment past its own end, or carries a
-    /// header beyond [`MAX_HEADER_BYTES`]. Every one of these is a statement
+    /// header beyond `MAX_HEADER_BYTES`. Every one of these is a statement
     /// about the file the examiner chose, not about the medium.
     pub fn read(candidate: &[u8]) -> Result<Self, ReferenceError> {
         let fail = |fault, at: usize| ReferenceError {

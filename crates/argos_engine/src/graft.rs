@@ -26,8 +26,7 @@ use argos_carve::reference::Reference;
 // caller must be able to name it without depending on `argos_carve` — which
 // the binary deliberately does not (`M-FOREIGN-REEXPORTS`).
 pub use argos_carve::reference::{Fault, Reference as JpegReference, ReferenceError};
-use argos_core::Confidence;
-use argos_core::geometry::ByteOffset;
+use argos_core::{ByteOffset, Confidence};
 
 /// Bytes read from the medium at a time.
 const READ_BYTES: usize = 4 * 1024 * 1024;

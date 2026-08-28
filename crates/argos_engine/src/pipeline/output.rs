@@ -18,14 +18,14 @@ use super::*;
 /// media its rules call 4128x3096 camera frames ambiguous and 258x258 cache
 /// entries photographs. A label that unreliable must not choose what reaches
 /// the output directory (`A-TRIAGE-NOT-VERDICT`).
-pub(crate) struct Measure {
+pub struct Measure {
     /// Scratch for reading an artifact back, reused across findings.
     buf: Vec<u8>,
 }
 
 /// What reading an artifact back established about the picture.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Measured {
+pub struct Measured {
     /// Pixel dimensions, or `None` when the artifact does not decode.
     ///
     /// `None` is not a verdict: an artifact whose picture cannot be measured
@@ -33,7 +33,7 @@ pub(crate) struct Measured {
     /// bytes are worthless.
     pub pixels: Option<(u32, u32)>,
     /// What the picture records about itself and its camera.
-    pub capture: argos_core::artifact::Capture,
+    pub capture: argos_core::ports::Capture,
 }
 
 impl Measure {

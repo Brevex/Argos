@@ -8,7 +8,7 @@ use std::ops::{Bound, RangeBounds};
 use std::thread;
 use std::time::Duration;
 
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange};
 
 /// Bytes carried between consecutive chunks so a structure straddling the
 /// boundary is still found whole: the larger of what the two detectors need.

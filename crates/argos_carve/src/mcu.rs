@@ -33,7 +33,7 @@
 
 use std::io::{Read, Seek};
 
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 
 use crate::Bytes;
 use crate::{CarveError, Scratch};

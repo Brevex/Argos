@@ -7,7 +7,7 @@
 
 use argos_classify::fixture::{Slice, sample};
 use argos_classify::{NEAR_DUPLICATE_DISTANCE, hamming, perceptual_hash};
-use argos_core::classify::PixelImage;
+use argos_core::ports::PixelImage;
 
 /// The hash of an image the suite expects to be hashable.
 fn hash_of(image: &PixelImage) -> u64 {

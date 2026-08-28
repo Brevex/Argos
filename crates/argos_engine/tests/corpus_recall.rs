@@ -49,8 +49,7 @@ use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use argos_core::artifact::Digest;
-use argos_core::progress::Discard;
+use argos_core::ports::{Digest, Discard};
 use argos_engine::fixture::Collector;
 use argos_engine::{Medium, ScanConfig, ScanSession};
 

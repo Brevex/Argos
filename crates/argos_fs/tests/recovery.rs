@@ -6,17 +6,16 @@
 
 use std::io::Cursor;
 
-use argos_core::Confidence;
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange, Confidence};
 use argos_fs::fixture::{
     APFS_BLOCK, BTRFS_DATA_AT, BTRFS_NODE, BTRFS_SECTOR, BTRFS_SUPERBLOCK_AT, EXT4_BLOCK,
     FAT_CLUSTER, FilePlan, Image, NTFS_CLUSTER, SECTOR, apfs_container, apfs_cyclic_tree,
     btrfs_cyclic_tree, btrfs_node_logical, btrfs_node_offset, btrfs_reseal, btrfs_volume,
     btrfs_volume_compressed, btrfs_volume_striped_data, exfat_boot_sector, exfat_volume,
-    ext4_dir_block, ext4_inode_with_extents, ext4_volume, fat32_volume, gpt_image, mbr,
-    ntfs_boot_sector, ntfs_indx, ntfs_record, ntfs_record_resident, ntfs_usn_record, ntfs_volume,
-    resident_payload_offset, run_list, truncated, usn_journal, with_u16_le, with_u32_le,
-    zero_filled,
+    ext4_backup_superblock, ext4_dir_block, ext4_inode_with_extents, ext4_superblock, ext4_volume,
+    fat32_volume, gpt_image, mbr, ntfs_boot_sector, ntfs_indx, ntfs_record, ntfs_record_resident,
+    ntfs_usn_record, ntfs_volume, resident_payload_offset, run_list, truncated, usn_journal,
+    with_u16_le, with_u32_le, zero_filled,
 };
 use argos_fs::{FsKind, Origin, apfs, btrfs, ext4, fat, ntfs, part, residue};
 
@@ -354,6 +353,7 @@ fn ntfs_orphan_scan_finds_records_outside_any_mft() {
         ByteRange::new(ByteOffset::new(orphan_at as u64), 1024 * 16),
         ByteOffset::new(0),
         NTFS_CLUSTER as u64,
+        &mut ntfs::Census::default(),
     )
     .expect("in-memory read");
 
@@ -380,6 +380,7 @@ fn an_orphaned_record_names_and_dates_its_file_without_any_volume() {
     let found = ntfs::orphan_records(
         &mut Cursor::new(&image),
         ByteRange::new(ByteOffset::new(orphan_at as u64), 1024 * 16),
+        &mut ntfs::Census::default(),
     )
     .expect("in-memory read");
 
@@ -399,11 +400,11 @@ fn an_orphaned_record_names_and_dates_its_file_without_any_volume() {
     // The run list in the volume's own units, which is what makes a candidate
     // geometry testable: these clusters at this cluster size are that size.
     assert!(
-        lost.first_lcn.is_some(),
+        lost.first_lcn().is_some(),
         "the run list gave a first cluster"
     );
     assert_eq!(
-        lost.clusters * NTFS_CLUSTER as u64,
+        lost.clusters() * NTFS_CLUSTER as u64,
         40960,
         "the runs account for exactly the stated size at the true cluster size"
     );
@@ -425,6 +426,7 @@ fn a_record_truncated_at_any_boundary_is_never_misread() {
             ByteRange::new(ByteOffset::new(0), 1024),
             ByteOffset::new(0),
             NTFS_CLUSTER as u64,
+            &mut ntfs::Census::default(),
         )
         .expect("in-memory read");
         // Either the record is rejected, or it parses — but a parsed record
@@ -453,6 +455,7 @@ fn an_overflowed_attribute_length_is_rejected() {
         ByteRange::new(ByteOffset::new(0), 1024),
         ByteOffset::new(0),
         NTFS_CLUSTER as u64,
+        &mut ntfs::Census::default(),
     )
     .expect("in-memory read");
     assert!(
@@ -573,6 +576,76 @@ fn ext4_recovers_a_fragmented_file_in_extent_order() {
 }
 
 #[test]
+fn a_superblock_with_no_filesystem_behind_it_locates_nothing() {
+    // The ext magic is sixteen bits, so a terabyte of arbitrary content holds
+    // it constantly. Consistency is not existence: what settles an anchor is
+    // whether the root directory it implies is really there.
+    let sb = ext4_superblock(256);
+    let stray = Image::new(256 * EXT4_BLOCK)
+        .with(EXT4_BLOCK, &sb)
+        .into_bytes();
+
+    assert!(
+        ext4::Ext4::from_superblock(&sb, ByteOffset::new(0)).is_some(),
+        "the superblock is self-consistent, which is exactly why consistency \
+         cannot be the whole test"
+    );
+    assert_eq!(
+        ext4::Ext4::locate(&mut Cursor::new(&stray), ByteOffset::new(0)).expect("in-memory read"),
+        None,
+        "no root directory is behind this anchor, so it names no filesystem"
+    );
+
+    // The same anchor, with a filesystem behind it, does locate.
+    let file = FilePlan::new("kept.jpg", 64 * EXT4_BLOCK, 4096);
+    let real = ext4_volume(256 * EXT4_BLOCK, &file);
+    assert!(
+        ext4::Ext4::locate(&mut Cursor::new(&real), ByteOffset::new(0))
+            .expect("in-memory read")
+            .is_some(),
+        "a real filesystem is confirmed by the same test that rejects the stray"
+    );
+}
+
+#[test]
+fn a_superblock_whose_counts_disagree_is_not_an_anchor() {
+    // Each of these is a relation `mke2fs` always satisfies, and arbitrary
+    // bytes satisfy only by accident. Losing any one of them is what let a
+    // sweep report 15,157 ext4 "volumes" on a disk that had at most a few.
+    for (at, wrong, what) in [
+        (
+            0_usize,
+            99_u32,
+            "an inode count that is not the per-group count times the groups",
+        ),
+        (
+            20,
+            0,
+            "a first data block that contradicts the 1 KiB block size",
+        ),
+        (
+            32,
+            1 << 20,
+            "more blocks per group than the block bitmap has bits",
+        ),
+        (
+            40,
+            1 << 20,
+            "more inodes per group than the inode bitmap has bits",
+        ),
+        (4, 0, "no blocks at all"),
+    ] {
+        let mut sb = ext4_superblock(256);
+        sb[at..at + 4].copy_from_slice(&wrong.to_le_bytes());
+        assert_eq!(
+            ext4::Ext4::from_superblock(&sb, ByteOffset::new(0)),
+            None,
+            "a superblock with {what} is not a superblock"
+        );
+    }
+}
+
+#[test]
 fn ext4_falls_back_to_a_backup_superblock() {
     let file = FilePlan::new("deleted.jpg", 64 * EXT4_BLOCK, EXT4_BLOCK);
     let mut image = ext4_volume(256 * EXT4_BLOCK, &file);
@@ -588,6 +661,34 @@ fn ext4_falls_back_to_a_backup_superblock() {
         .expect("in-memory read")
         .expect("a backup superblock must be found");
     assert_eq!(fs.block_bytes, EXT4_BLOCK as u64);
+}
+
+#[test]
+fn a_backup_superblock_locates_the_volume_it_belongs_to_rather_than_past_it() {
+    // The case the confirmation exists for and the case it could have broken:
+    // the primary superblock is gone, so the only anchor left is a backup at
+    // the start of some group. Read as a primary it puts the volume — and
+    // every block resolved against it — a whole number of groups too far.
+    let file = FilePlan::new("deleted.jpg", 64 * EXT4_BLOCK, EXT4_BLOCK);
+    let mut image = ext4_volume(256 * EXT4_BLOCK, &file);
+    image.resize(8200 * EXT4_BLOCK, 0);
+    let primary = image[EXT4_BLOCK..2 * EXT4_BLOCK].to_vec();
+    let backup_at = 8193 * EXT4_BLOCK;
+    image[backup_at..backup_at + EXT4_BLOCK].copy_from_slice(&ext4_backup_superblock(&primary, 1));
+    image[EXT4_BLOCK..2 * EXT4_BLOCK].fill(0);
+
+    // The sweep's anchor: a superblock's own position, less the 1024 bytes a
+    // primary sits at. For a backup that start is wrong by a whole group.
+    let anchor = ByteOffset::new((backup_at - 1024) as u64);
+    let located = ext4::Ext4::locate(&mut Cursor::new(&image), anchor)
+        .expect("in-memory read")
+        .expect("a backup names the volume it belongs to");
+    assert_eq!(
+        located.volume_offset,
+        ByteOffset::new(0),
+        "the backup must resolve to the volume's real start, not to its own"
+    );
+    assert_eq!(located.block_bytes, EXT4_BLOCK as u64);
 }
 
 #[test]
@@ -1171,6 +1272,7 @@ fn a_resident_data_extent_points_at_the_payload_in_the_record() {
         ByteRange::new(ByteOffset::new(record_at as u64), 1024),
         ByteOffset::new(0),
         NTFS_CLUSTER as u64,
+        &mut ntfs::Census::default(),
     )
     .expect("in-memory read");
 
@@ -1208,11 +1310,144 @@ fn orphan_extents_are_resolved_against_the_volume_they_belong_to() {
         ByteRange::new(ByteOffset::new(record_at as u64), 1024),
         ByteOffset::new(VOLUME_AT as u64),
         NTFS_CLUSTER as u64,
+        &mut ntfs::Census::default(),
     )
     .expect("in-memory read");
 
     assert_eq!(found.len(), 1);
     assert_recovers_the_planted_bytes(&image, &file, &found[0].extents);
+}
+
+#[test]
+fn an_orphaned_record_keeps_every_fragment_of_its_run_list() {
+    // The run list is the one thing about a record that cannot be re-derived
+    // once the record is gone. Keeping only its first cluster would leave a
+    // candidate geometry one trial per file where the map offers one per
+    // fragment — and would silently lose every fragment after the first.
+    let runs = run_list(&[(4, 2), (64, 3), (9, 1)]);
+    let record = ntfs_record(
+        false,
+        Some("split.jpg"),
+        0,
+        Some(&runs),
+        6 * NTFS_CLUSTER as u64,
+    );
+    let image = Image::new(64 * 1024).with(0, &record).into_bytes();
+
+    let found = ntfs::orphan_records(
+        &mut Cursor::new(&image),
+        ByteRange::new(ByteOffset::new(0), 1024),
+        &mut ntfs::Census::default(),
+    )
+    .expect("in-memory read");
+
+    let [lost] = found.as_slice() else {
+        panic!("expected exactly one orphaned record, got {}", found.len());
+    };
+    let stated: Vec<(Option<u64>, u64)> = lost
+        .runs
+        .iter()
+        .map(|run| (run.lcn, run.clusters))
+        .collect();
+    assert_eq!(
+        stated,
+        vec![(Some(4), 2), (Some(64), 3), (Some(9), 1)],
+        "every run the record states must survive, in file order"
+    );
+    // The two figures the map used to be collapsed into still agree with it,
+    // so nothing that read them reads something else now.
+    assert_eq!(lost.first_lcn(), Some(4));
+    assert_eq!(lost.clusters(), 6);
+    assert_eq!(
+        lost.clusters() * NTFS_CLUSTER as u64,
+        lost.size,
+        "the runs account for exactly the stated size at the true cluster size"
+    );
+}
+
+#[test]
+fn the_census_counts_the_records_the_scan_does_not_report() {
+    // A recovery count with no denominator cannot tell a thin medium from a
+    // stage that failed on it. What the region held has to be counted even
+    // when — especially when — none of it is reported.
+    let deleted = ntfs_record(
+        false,
+        Some("holiday.jpg"),
+        0,
+        Some(&run_list(&[(4, 1), (9, 1)])),
+        2 * NTFS_CLUSTER as u64,
+    );
+    let live = ntfs_record(true, Some("live.jpg"), 0, Some(&run_list(&[(20, 1)])), 4096);
+    let ledger = ntfs_record(
+        false,
+        Some("notes.txt"),
+        0,
+        Some(&run_list(&[(30, 1)])),
+        4096,
+    );
+    let image = Image::new(64 * 1024)
+        .with(0, &deleted)
+        .with(1024, &live)
+        .with(2048, &ledger)
+        .into_bytes();
+
+    let mut census = ntfs::Census::default();
+    let found = ntfs::orphan_records(
+        &mut Cursor::new(&image),
+        ByteRange::new(ByteOffset::new(0), 3 * 1024),
+        &mut census,
+    )
+    .expect("in-memory read");
+
+    assert_eq!(found.len(), 2, "only the records marked free are reported");
+    assert_eq!(
+        census.seen, 3,
+        "every `FILE` signature in the region is seen"
+    );
+    assert_eq!(census.valid, 3, "all three records parse");
+    assert_eq!(
+        census.in_use, 1,
+        "the record the scan declines to report is what this exists to count"
+    );
+    assert_eq!(census.non_resident, 2, "both deleted records carry a map");
+    assert_eq!(census.resident, 0);
+    assert_eq!(
+        census.image_named, 1,
+        "only one of the deleted records names an image"
+    );
+    assert_eq!(
+        (census.runs[0], census.runs[1]),
+        (1, 1),
+        "the one-run list and the two-run list land in their own buckets"
+    );
+    assert_eq!(
+        census.runs.iter().sum::<u64>(),
+        census.non_resident,
+        "every record with a map is in exactly one bucket"
+    );
+}
+
+#[test]
+fn a_census_of_two_regions_is_the_sum_of_them() {
+    let record = ntfs_record(false, Some("one.jpg"), 0, Some(&run_list(&[(4, 1)])), 4096);
+    let image = Image::new(64 * 1024).with(0, &record).into_bytes();
+    let region = ByteRange::new(ByteOffset::new(0), 1024);
+
+    let mut apart = ntfs::Census::default();
+    let mut second = ntfs::Census::default();
+    ntfs::orphan_records(&mut Cursor::new(&image), region, &mut apart).expect("in-memory read");
+    ntfs::orphan_records(&mut Cursor::new(&image), region, &mut second).expect("in-memory read");
+    apart.merge(second);
+
+    let mut together = ntfs::Census::default();
+    ntfs::orphan_records(&mut Cursor::new(&image), region, &mut together).expect("in-memory read");
+    ntfs::orphan_records(&mut Cursor::new(&image), region, &mut together).expect("in-memory read");
+
+    assert_eq!(
+        apart, together,
+        "merging two passes must equal accumulating both into one"
+    );
+    assert_eq!(apart.seen, 2);
 }
 
 #[test]
@@ -1227,6 +1462,7 @@ fn the_orphan_scan_ignores_records_still_in_use() {
         ByteRange::new(ByteOffset::new(0), 1024),
         ByteOffset::new(0),
         NTFS_CLUSTER as u64,
+        &mut ntfs::Census::default(),
     )
     .expect("in-memory read");
     assert!(found.is_empty(), "an in-use record is not a deleted file");

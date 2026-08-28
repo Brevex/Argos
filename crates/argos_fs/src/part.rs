@@ -8,7 +8,7 @@
 
 use std::io::{Read, Seek};
 
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange};
 
 use crate::{FsError, FsKind};
 use crate::{read_at, u16_le, u32_le, u64_le};

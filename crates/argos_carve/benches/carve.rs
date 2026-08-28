@@ -13,7 +13,7 @@ use argos_carve::fixture::{self, Disk, photo_jpeg};
 use argos_carve::mcu;
 use argos_carve::reassemble;
 use argos_carve::{Detector, Format, Scratch};
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 /// Surface a whole-medium pass is measured over.

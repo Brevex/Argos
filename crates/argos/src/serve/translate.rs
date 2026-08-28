@@ -10,7 +10,7 @@
 //! be a second implementation of something the engine already decided
 //! (`A-SHELL-NO-DOMAIN`).
 
-use argos_core::progress::ScanEvent;
+use argos_core::ports::ScanEvent;
 use argos_ipc::dto;
 use argos_report::Manifest;
 
@@ -37,7 +37,7 @@ pub fn inventory() -> dto::Inventory {
                 writable_mount: device.has_writable_mount(),
             })
             .collect(),
-        shadow_copies: argos_device::shadow::list()
+        shadow_copies: argos_device::inventory::shadow_copies()
             .iter()
             .map(|shadow| dto::ShadowCopy {
                 path: shadow.path.display().to_string(),

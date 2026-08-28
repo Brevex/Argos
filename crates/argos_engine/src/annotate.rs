@@ -24,9 +24,9 @@ use std::io::{Read, Seek};
 use argos_carve::decode;
 use argos_classify::{NEAR_DUPLICATE_DISTANCE, hamming, perceptual_hash};
 use argos_core::Stage;
-use argos_core::artifact::{ArtifactSink, Digest};
-use argos_core::classify::{Classifier, PixelImage, TriageScore};
-use argos_core::progress::{ProgressSink, ScanEvent, Unit};
+use argos_core::ports::{
+    ArtifactSink, Classifier, Digest, PixelImage, ProgressSink, ScanEvent, TriageScore, Unit,
+};
 use sha2::{Digest as _, Sha256};
 
 use crate::finding::{Finding, ScanReport};
@@ -75,7 +75,7 @@ const BATCH_MAX_IMAGES: usize = 4;
 const BATCH_MAX_PIXELS: u64 = 32 * 1024 * 1024;
 
 /// One artifact already persisted by the report stage.
-pub(crate) struct Emitted {
+pub struct Emitted {
     /// Index into the findings the report stage emitted from.
     pub finding: usize,
     /// Content hash the sink recorded.
@@ -92,7 +92,7 @@ pub(crate) struct Emitted {
 ///
 /// Both annotations are optional and independent; the pass decodes nothing at
 /// all when neither is wanted.
-pub(crate) struct Work<'a, S, C> {
+pub struct Work<'a, S, C> {
     /// The sink that stored the artifacts, and that renders previews.
     pub sink: &'a mut S,
     /// The classifier, when triage was requested.
@@ -114,7 +114,7 @@ impl<S, C> Work<'_, S, C> {
 /// previewed or scored is counted and left unannotated. A classifier hard
 /// failure stops scoring but keeps every annotation produced so far, and a
 /// preview that cannot be written costs a thumbnail, never an artifact.
-pub(crate) fn run<V, S, C, P>(
+pub fn run<V, S, C, P>(
     control: &Control,
     view: &mut V,
     findings: &[Finding],

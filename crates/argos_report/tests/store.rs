@@ -1,8 +1,7 @@
 use std::io::Cursor;
 
-use argos_core::artifact::{Artifact, ArtifactSink, Digest};
-use argos_core::geometry::{ByteOffset, ByteRange};
-use argos_core::{Confidence, Format, Stage};
+use argos_core::ports::{Artifact, ArtifactSink, Digest};
+use argos_core::{ByteOffset, ByteRange, Confidence, Format, Stage};
 use argos_report::{ExtentRecord, Store, Summary};
 
 /// SHA-256 of the ASCII bytes `abc` — the FIPS 180-2 known-answer vector.
@@ -22,8 +21,8 @@ fn digest(hex: &str) -> Digest {
 
 /// Nothing recorded about the camera: these tests are about the store, and a
 /// borrowed default keeps every one of them from naming a field it ignores.
-static NO_CAPTURE: std::sync::LazyLock<argos_core::artifact::Capture> =
-    std::sync::LazyLock::new(argos_core::artifact::Capture::default);
+static NO_CAPTURE: std::sync::LazyLock<argos_core::ports::Capture> =
+    std::sync::LazyLock::new(argos_core::ports::Capture::default);
 
 fn artifact<'a>(extents: &'a [ByteRange], length: u64, sha256: &str) -> Artifact<'a> {
     Artifact {

@@ -27,7 +27,7 @@ pub(super) fn recover_filesystems<V: Read + Seek, P: ProgressSink + ?Sized>(
     // The geometry is kept, not just the corrected range: when the primary
     // boot sector is what a later format overwrote, re-deriving it from the
     // volume's start would read the very sector that is gone.
-    let geometries = confirm_ntfs(view, &mut sweep.volumes, medium_len);
+    let geometries = confirm_volumes(view, &mut sweep.volumes, medium_len);
 
     let current: Vec<ByteRange> = argos_fs::part::scan(view, medium_len)
         .map(|tables| {
@@ -61,7 +61,13 @@ pub(super) fn recover_filesystems<V: Read + Seek, P: ProgressSink + ?Sized>(
             .iter()
             .find(|geometry| geometry.volume_offset == volume.range.start)
             .copied();
-        found.extend(recover_volume(view, *volume, geometry, &mut scratch));
+        found.extend(recover_volume(
+            view,
+            *volume,
+            geometry,
+            &mut scratch,
+            &mut report.metadata_unconfirmed,
+        ));
         counter.step();
     }
 
@@ -94,23 +100,30 @@ pub(super) fn recover_filesystems<V: Read + Seek, P: ProgressSink + ?Sized>(
             // depend on where the volume began. Reading them costs one pass
             // over records already located, and skipping it is what made a
             // re-formatted disk look like a disk that never held anything.
-            if let Ok(lost) = argos_fs::ntfs::orphan_records(view, *region) {
+            let mut census = argos_fs::ntfs::Census::default();
+            if let Ok(lost) = argos_fs::ntfs::orphan_records(view, *region, &mut census) {
                 report.lost_files.extend(lost);
             }
+            report.orphan_census.merge(census);
             continue;
         };
+        report.attributed_residue += 1;
+        let mut census = argos_fs::ntfs::Census::default();
         if let Ok(files) = argos_fs::ntfs::orphan_scan(
             view,
             *region,
             geometry.volume_offset,
             geometry.cluster_bytes,
+            &mut census,
         ) {
-            found.extend(
-                files
-                    .into_iter()
-                    .filter_map(|file| finding_from(view, file, &mut scratch)),
-            );
+            for file in files {
+                match finding_from(view, file, &mut scratch) {
+                    Some(finding) => found.push(finding),
+                    None => report.metadata_unconfirmed += 1,
+                }
+            }
         }
+        report.orphan_census.merge(census);
     }
 
     name_from_index_slack(
@@ -172,7 +185,8 @@ fn name_from_change_journal<V: Read + Seek>(
     }
 }
 
-/// Confirms every NTFS anchor against the volume it claims, in place.
+/// Confirms every anchor that can be confirmed against the volume it claims,
+/// in place.
 ///
 /// The residue sweep reports a volume for any sector that parses as an NTFS
 /// boot sector, and three different things do:
@@ -193,12 +207,19 @@ fn name_from_change_journal<V: Read + Seek>(
 ///
 /// Corrected anchors collapse: the two ends of one volume name one volume.
 ///
-/// Returns the geometry of each confirmed volume, which is what the stages
-/// below resolve against. Handing back the geometry rather than re-deriving it
-/// from the volume's start is the point: the case this exists for is a primary
-/// boot sector a later format overwrote, and reading it again would read the
-/// sector that is gone.
-fn confirm_ntfs<V: Read + Seek>(
+/// The same reasoning applies to an ext superblock, which is a sixteen-bit
+/// magic and some numbers: [`argos_fs::ext4::locate`] confirms one by reading
+/// the root directory the anchor implies, and an anchor with no filesystem
+/// behind it is dropped rather than opened and journal-walked. On a terabyte
+/// that is the difference between minutes and hours, and between a volume list
+/// a person can read and one they cannot.
+///
+/// Returns the geometry of each confirmed NTFS volume, which is what the
+/// stages below resolve against. Handing back the geometry rather than
+/// re-deriving it from the volume's start is the point: the case this exists
+/// for is a primary boot sector a later format overwrote, and reading it again
+/// would read the sector that is gone.
+fn confirm_volumes<V: Read + Seek>(
     view: &mut V,
     volumes: &mut Vec<Volume>,
     medium_len: u64,
@@ -206,9 +227,22 @@ fn confirm_ntfs<V: Read + Seek>(
     let mut confirmed: Vec<Volume> = Vec::with_capacity(volumes.len());
     let mut geometries: Vec<argos_fs::ntfs::Ntfs> = Vec::new();
     for volume in volumes.drain(..) {
-        if volume.kind != FsKind::Ntfs {
-            confirmed.push(volume);
-            continue;
+        match volume.kind {
+            FsKind::Ntfs => {}
+            FsKind::Ext4 => {
+                // Unreadable counts as unconfirmed here too.
+                if matches!(
+                    argos_fs::ext4::Ext4::locate(view, volume.range.start),
+                    Ok(Some(_))
+                ) {
+                    confirmed.push(volume);
+                }
+                continue;
+            }
+            _ => {
+                confirmed.push(volume);
+                continue;
+            }
         }
         // Unreadable counts as unconfirmed: a geometry that cannot be checked
         // is one nothing may be resolved against.
@@ -313,11 +347,16 @@ fn name_from_index_slack<V: Read + Seek>(
 /// carried in rather than read again: the volume this stage most needs to
 /// recover from is one whose first sector a later format overwrote, and that
 /// is exactly the sector re-deriving it would read.
+///
+/// `unconfirmed` accumulates the claims the medium refused to confirm, so a
+/// volume whose metadata points at reused clusters is distinguishable from a
+/// volume whose metadata is gone.
 fn recover_volume<V: Read + Seek>(
     view: &mut V,
     volume: Volume,
     ntfs: Option<argos_fs::ntfs::Ntfs>,
     scratch: &mut Scratch,
+    unconfirmed: &mut u64,
 ) -> Vec<Finding> {
     let at = volume.range.start;
     let files = match volume.kind {
@@ -354,11 +393,14 @@ fn recover_volume<V: Read + Seek>(
         // covers its surface; claiming a recovery here would not be honest.
         _ => None,
     };
-    files
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|file| finding_from(view, file, scratch))
-        .collect()
+    let mut found = Vec::new();
+    for file in files.unwrap_or_default() {
+        match finding_from(view, file, scratch) {
+            Some(finding) => found.push(finding),
+            None => *unconfirmed = unconfirmed.saturating_add(1),
+        }
+    }
+    found
 }
 
 /// Turns a filesystem's claim about a deleted file into a finding — but only

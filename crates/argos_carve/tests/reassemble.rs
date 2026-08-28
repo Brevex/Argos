@@ -8,13 +8,13 @@ use argos_carve::classify::{BlockClass, classify};
 use argos_carve::fixture::{Disk, Fragmented, Jpeg, fragmented, photo_jpeg};
 use argos_carve::reassemble::{self, Broken, Candidate, Limits};
 use argos_carve::{Format, Scratch};
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange};
 
 /// Block size the fixtures fragment on: the reassembly search grid.
 const BLOCK: usize = argos_carve::classify::BLOCK_BYTES;
 
 /// Reads an extent out of a fixture disk.
-fn extent_bytes(disk: &[u8], extent: argos_core::geometry::ByteRange) -> &[u8] {
+fn extent_bytes(disk: &[u8], extent: argos_core::ByteRange) -> &[u8] {
     let start = usize::try_from(extent.start.get()).expect("fixture offsets fit usize");
     let len = usize::try_from(extent.len).expect("fixture lengths fit usize");
     &disk[start..start + len]

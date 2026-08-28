@@ -31,14 +31,12 @@ mod carving;
 mod filesystem;
 mod output;
 mod reassembly;
-mod region;
 
 use argos_carve::{Candidate, Detector, Scratch, Verdict};
-use argos_core::artifact::{Artifact, ArtifactSink, Digest};
-use argos_core::classify::Classifier;
-use argos_core::geometry::{ByteOffset, ByteRange};
-use argos_core::progress::{ProgressSink, ScanEvent, Unit};
-use argos_core::{Confidence, Format, Stage};
+use argos_core::ports::{
+    Artifact, ArtifactSink, Classifier, Digest, ProgressSink, ScanEvent, Unit,
+};
+use argos_core::{ByteOffset, ByteRange, Confidence, Format, Stage};
 use argos_fs::{DeletedFile, FsKind, Volume, residue};
 use carving::carve;
 use filesystem::recover_filesystems;
@@ -132,7 +130,7 @@ impl Bound {
 ///
 /// Shared by the workers of a parallel stage, so the count is one number for
 /// the stage rather than one per thread.
-pub(crate) struct Counter<'a, P: ?Sized> {
+pub struct Counter<'a, P: ?Sized> {
     progress: &'a P,
     stage: Stage,
     /// What progress is measured against.
@@ -247,7 +245,7 @@ impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
 }
 
 /// Runs every configured stage over `medium`.
-pub(crate) fn run<V, S, P, C>(
+pub fn run<V, S, P, C>(
     config: &ScanConfig,
     control: &Control,
     medium: Medium<V>,
@@ -340,7 +338,7 @@ where
 /// Nothing is assumed about the medium beyond those points: every extent this
 /// reports is read back and hashed exactly as a scan's is, so a session pointed
 /// at the wrong disk recovers nothing rather than something wrong.
-pub(crate) fn resume<V, S, P, C>(
+pub fn resume<V, S, P, C>(
     config: &ScanConfig,
     control: &Control,
     medium: Medium<V>,

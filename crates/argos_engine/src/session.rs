@@ -5,9 +5,7 @@ use std::io::{Read, Seek};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use argos_core::artifact::ArtifactSink;
-use argos_core::classify::{AcceptAll, Classifier};
-use argos_core::progress::{ProgressSink, RunState, ScanEvent};
+use argos_core::ports::{AcceptAll, ArtifactSink, Classifier, ProgressSink, RunState, ScanEvent};
 
 use crate::ScanError;
 use crate::config::{ConfigError, ScanConfig};
@@ -281,7 +279,7 @@ impl ScanSession {
 /// A plain atomic answers "should I stop?" without contention on the hot path;
 /// the mutex and condvar exist only so a *paused* run sleeps instead of
 /// spinning (`M-THROUGHPUT`).
-pub(crate) struct Control {
+pub struct Control {
     state: AtomicU8,
     /// How many times a stop has been asked for, so a stage can tell a request
     /// aimed at itself from one an earlier stage was already stopped by.

@@ -22,11 +22,11 @@
 //! recomputed from a session directory alone, with no re-reading of the medium
 //! and no version to pin against.
 //!
-//! [`Decision`]: argos_core::classify::Decision
+//! [`Decision`]: argos_core::ports::Decision
 
 use std::fmt;
 
-use argos_core::artifact::Capture;
+use argos_core::ports::Capture;
 
 /// Smallest long side, in pixels, that a frame of a photograph has.
 ///
@@ -35,7 +35,7 @@ use argos_core::artifact::Capture;
 /// a `Canon PowerShot` frame from 2007. Below it a frame may still be a
 /// photograph, and it is never hidden; it simply carries no evidence of being
 /// one from its size alone (`M-DOCUMENTED-MAGIC`).
-pub const PHOTOGRAPH_MIN_LONG_SIDE: u32 = 640;
+pub(crate) const PHOTOGRAPH_MIN_LONG_SIDE: u32 = 640;
 
 /// What is known about one recovered artifact, as far as ordering cares.
 ///
@@ -99,7 +99,7 @@ pub enum Standing {
     /// Nothing recorded about it suggests a photograph either way.
     #[default]
     Unremarkable,
-    /// Its frame is at least [`PHOTOGRAPH_MIN_LONG_SIDE`] on the long side.
+    /// Its frame is at least `PHOTOGRAPH_MIN_LONG_SIDE` on the long side.
     PhotographSized,
     /// It records when it was taken.
     Dated,

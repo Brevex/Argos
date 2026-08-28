@@ -4,7 +4,7 @@
 //! `--serve`, where stdout *is* the JSON-RPC protocol and a stray byte on it
 //! corrupts the stream. So nothing here prints. What a scan has to say about
 //! itself arrives through [`Notice`] and the
-//! [`ProgressSink`](argos_core::progress::ProgressSink); what it produced is
+//! [`ProgressSink`](argos_core::ports::ProgressSink); what it produced is
 //! the returned [`Finished`].
 //!
 //! Keeping one driver rather than two is what makes `A-CLI-FIRST` checkable:
@@ -32,8 +32,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use argos_core::geometry::ByteOffset;
-use argos_core::progress::{ProgressSink, ScanEvent};
+use argos_core::ByteOffset;
+use argos_core::ports::{ProgressSink, ScanEvent};
 use argos_engine::graft::JpegReference as Reference;
 use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession, Stages};
 use argos_report::Owner;
@@ -434,10 +434,72 @@ fn lost_files(report: &ScanReport) -> Vec<argos_report::LostFileRecord> {
             record_at: lost.record_at,
             created_unix: lost.timestamps.created.map(argos_report::unix_seconds),
             modified_unix: lost.timestamps.modified.map(argos_report::unix_seconds),
-            first_cluster: lost.first_lcn,
-            clusters: lost.clusters,
+            record_number: lost.record_number,
+            first_cluster: lost.first_lcn(),
+            clusters: lost.clusters(),
+            runs: lost
+                .runs
+                .iter()
+                .map(|run| argos_report::RunRecord {
+                    lcn: run.lcn,
+                    clusters: run.clusters,
+                })
+                .collect(),
         })
         .collect()
+}
+
+/// Seconds in the window a batch of records is grouped into.
+///
+/// Files written — or removed — in one action share a moment; a minute is wide
+/// enough to hold the action and narrow enough that ordinary use does not fill
+/// it (`docs/OPEN-WORK.md` §1.4 records batches of a hundred frames).
+const BATCH_WINDOW_SECS: i64 = 60;
+
+/// Turns the census the passes over orphaned records kept into a manifest
+/// record, adding the two figures only the collected records can give.
+///
+/// The instants come from the records the run could not place, which is the
+/// population the question is about: whether a heap of files stopped existing
+/// in one action. It is a count of records per window and never a timestamp of
+/// any one file.
+fn residue_census(report: &ScanReport) -> argos_report::ResidueCensusRecord {
+    let census = report.orphan_census;
+    let mut instants: Vec<i64> = report
+        .lost_files
+        .iter()
+        .filter_map(|lost| lost.timestamps.created)
+        .map(argos_report::unix_seconds)
+        .collect();
+    instants.sort_unstable();
+
+    let distinct = instants
+        .windows(2)
+        .filter(|pair| pair[0] != pair[1])
+        .count()
+        + usize::from(!instants.is_empty());
+    // The widest run of instants inside one window, by sliding the window's
+    // start over the sorted instants.
+    let mut largest = 0_usize;
+    let mut low = 0_usize;
+    for high in 0..instants.len() {
+        while instants[high].saturating_sub(instants[low]) >= BATCH_WINDOW_SECS {
+            low += 1;
+        }
+        largest = largest.max(high - low + 1);
+    }
+
+    argos_report::ResidueCensusRecord {
+        seen: census.seen,
+        valid: census.valid,
+        in_use: census.in_use,
+        resident: census.resident,
+        non_resident: census.non_resident,
+        image_named: census.image_named,
+        runs: census.runs.to_vec(),
+        distinct_instants: distinct as u64,
+        largest_minute: largest as u64,
+    }
 }
 
 /// Turns the engine's own account of the run into a manifest record.
@@ -461,6 +523,9 @@ fn coverage(report: &ScanReport) -> argos_report::CoverageRecord {
         reassembly_skipped_small: report.reassembly_skipped_small,
         journal_deletions: report.journal_deletions,
         unattributed_residue: report.unattributed_residue,
+        attributed_residue: report.attributed_residue,
+        metadata_unconfirmed: report.metadata_unconfirmed,
+        residue_census: residue_census(report),
         ceilings: report.ceilings.reached().map(str::to_owned).collect(),
     }
 }
@@ -603,8 +668,31 @@ impl ScanLog {
             report.volumes.len()
         ));
         self.line(&format!(
-            "residue        {} orphaned metadata regions could not be tied to a volume",
-            report.unattributed_residue
+            "residue        {} orphaned metadata regions could not be tied to a volume, \
+             {} were",
+            report.unattributed_residue, report.attributed_residue
+        ));
+        // The denominator: what those regions held, so the recovery count above
+        // can be read against something (A-CONFIDENCE-HONEST).
+        let census = report.orphan_census;
+        self.line(&format!(
+            "records        {} read, {} intact, {} in use, {} resident, {} with a run list, \
+             {} named an image",
+            census.seen,
+            census.valid,
+            census.in_use,
+            census.resident,
+            census.non_resident,
+            census.image_named
+        ));
+        self.line(&format!(
+            "runs           per run list, bucketed 1/2/3/4/5-8/9-16/17-64/65+: {:?}",
+            census.runs
+        ));
+        self.line(&format!(
+            "unconfirmed    {} metadata claims pointed at bytes that are not the file \
+             they name",
+            report.metadata_unconfirmed
         ));
         for name in report.ceilings.reached() {
             self.line(&format!(

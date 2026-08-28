@@ -21,7 +21,7 @@ mod recovery {
     use argos_carve::fixture::{Planted, SparseDisk, photo_jpeg, planted};
     use argos_carve::reassemble::{self, Broken, Candidate, Limits};
     use argos_carve::{Format, Scratch};
-    use argos_core::geometry::ByteOffset;
+    use argos_core::ByteOffset;
 
     /// Fragment grid the fixtures and the search share.
     const BLOCK: u64 = argos_carve::classify::BLOCK_BYTES as u64;
@@ -54,7 +54,7 @@ mod recovery {
     /// Decoy candidates carry it so they are offered to the walk exactly as the
     /// filler blocks of a real medium would be.
     fn filler_profile(disk: &SparseDisk, at: u64) -> argos_carve::classify::BlockProfile {
-        let block = argos_core::geometry::ByteRange::new(ByteOffset::new(at), BLOCK);
+        let block = argos_core::ByteRange::new(ByteOffset::new(at), BLOCK);
         classify(&disk.read_extents(&[block]))
     }
 
@@ -257,7 +257,7 @@ mod walk_cost {
     use argos_carve::fixture::{Fragmented, fragmented, photo_jpeg};
     use argos_carve::reassemble::{self, Broken, Candidate, Limits};
     use argos_carve::{Format, Scratch};
-    use argos_core::geometry::{ByteOffset, ByteRange};
+    use argos_core::{ByteOffset, ByteRange};
 
     /// Block size the fixtures fragment on: the reassembly search grid.
     const BLOCK: usize = argos_carve::classify::BLOCK_BYTES;

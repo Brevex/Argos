@@ -5,8 +5,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::geometry::{Lba, SectorSize};
-use crate::source::{BlockSource, DeviceClass, Geometry, ReadError};
+use crate::ports::{BlockSource, DeviceClass, Geometry, ReadError};
+use crate::{Lba, SectorSize};
 
 /// An in-memory medium: a byte buffer addressed as sectors, with selected sectors
 /// made unreadable to exercise damage handling.

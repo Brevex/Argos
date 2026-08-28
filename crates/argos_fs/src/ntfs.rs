@@ -16,8 +16,7 @@
 use std::io::{Read, Seek};
 use std::time::{Duration, SystemTime};
 
-use argos_core::Confidence;
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange, Confidence};
 
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
 use crate::{read_at, u16_le, u32_le, u64_le, utf16le_name};
@@ -541,6 +540,113 @@ pub fn is_plausible_record(raw: &[u8]) -> bool {
     fixups_verify(head).is_some()
 }
 
+/// File-name extensions the census counts as images.
+///
+/// Wider than what this tool carves, deliberately: the census measures what
+/// the medium still names, not what the pipeline can decode. A record naming a
+/// raw file this build cannot read is still evidence that a photograph was
+/// there.
+const IMAGE_EXTENSIONS: [&str; 13] = [
+    "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "heic", "cr2", "nef", "arw", "dng",
+];
+
+/// Buckets of [`Census::runs`]: 1, 2, 3, 4, 5–8, 9–16, 17–64, 65 or more runs.
+const RUN_BUCKETS: usize = 8;
+
+/// What a pass over orphaned `FILE` records found, counted.
+///
+/// A region of residue answers two different questions, and only one of them
+/// has ever been reported: how many files came back, and how many records were
+/// there to come back from. Without the second, a run that recovers little is
+/// indistinguishable from a medium that kept little, which is the difference
+/// between a defect and a fact about the disk (`A-CONFIDENCE-HONEST`).
+///
+/// Counts only. Nothing here holds a name, a byte of content or an offset that
+/// identifies a file (`A-NO-CONTENT-IN-LOGS`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Census {
+    /// Record-sized positions carrying the `FILE` signature.
+    pub seen: u64,
+    /// Of those, records whose fixups verified and whose attributes walked.
+    pub valid: u64,
+    /// Valid records whose in-use flag is still set.
+    ///
+    /// In a filesystem that no longer exists the flag says nothing about
+    /// whether the file survives, but the scan reports only records marked
+    /// free, so this is what that choice costs.
+    pub in_use: u64,
+    /// Deleted records whose `$DATA` was resident — content inside the record,
+    /// reachable with no volume geometry at all.
+    pub resident: u64,
+    /// Deleted records with a decodable run list that maps at least one run.
+    ///
+    /// This is the population a candidate geometry can be tested against, and
+    /// the denominator the recovery count has always been missing.
+    pub non_resident: u64,
+    /// Deleted records naming a file with an image extension.
+    pub image_named: u64,
+    /// Histogram of runs per run list over [`Census::non_resident`], bucketed
+    /// as 1, 2, 3, 4, 5–8, 9–16, 17–64, 65 or more.
+    pub runs: [u64; RUN_BUCKETS],
+}
+
+impl Census {
+    /// Adds `other`'s counts to these, so passes over separate regions sum.
+    pub fn merge(&mut self, other: Self) {
+        self.seen = self.seen.saturating_add(other.seen);
+        self.valid = self.valid.saturating_add(other.valid);
+        self.in_use = self.in_use.saturating_add(other.in_use);
+        self.resident = self.resident.saturating_add(other.resident);
+        self.non_resident = self.non_resident.saturating_add(other.non_resident);
+        self.image_named = self.image_named.saturating_add(other.image_named);
+        for (mine, theirs) in self.runs.iter_mut().zip(other.runs) {
+            *mine = mine.saturating_add(theirs);
+        }
+    }
+
+    /// Counts one record that parsed, before it is turned into a result.
+    fn observe(&mut self, record: &Record) {
+        self.valid = self.valid.saturating_add(1);
+        if !record.deleted {
+            self.in_use = self.in_use.saturating_add(1);
+            return;
+        }
+        match &record.data {
+            RecordData::Resident { .. } => self.resident = self.resident.saturating_add(1),
+            RecordData::Runs { runs, .. } if runs.iter().any(|run| run.lcn.is_some()) => {
+                self.non_resident = self.non_resident.saturating_add(1);
+                self.runs[run_bucket(runs.len())] =
+                    self.runs[run_bucket(runs.len())].saturating_add(1);
+            }
+            RecordData::None | RecordData::Runs { .. } => {}
+        }
+        if record.name.as_deref().is_some_and(has_image_extension) {
+            self.image_named = self.image_named.saturating_add(1);
+        }
+    }
+}
+
+/// Which bucket of [`Census::runs`] a run list of `runs` entries falls in.
+fn run_bucket(runs: usize) -> usize {
+    match runs {
+        0..=4 => runs.saturating_sub(1),
+        5..=8 => 4,
+        9..=16 => 5,
+        17..=64 => 6,
+        _ => 7,
+    }
+}
+
+/// Whether `name` ends in one of [`IMAGE_EXTENSIONS`], case-insensitively.
+fn has_image_extension(name: &str) -> bool {
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    IMAGE_EXTENSIONS
+        .iter()
+        .any(|known| extension.eq_ignore_ascii_case(known))
+}
+
 /// A deleted file an orphaned `FILE` record still describes, whose content
 /// this run could not place.
 ///
@@ -550,10 +656,12 @@ pub fn is_plausible_record(raw: &[u8]) -> bool {
 /// record, this is everything that survives: evidence the file existed, and
 /// never a claim about any bytes (`A-CONFIDENCE-HONEST`).
 ///
-/// `first_lcn` and `clusters` are the run list as the record states it, in the
-/// volume's own units. They are kept because they are what makes a candidate
-/// geometry testable — a cluster size is right when `clusters` times it
-/// accounts for `size`, and wrong when it does not.
+/// [`LostFile::runs`] is the run list exactly as the record states it, in the
+/// volume's own units. It is kept whole because it is what makes a candidate
+/// geometry testable: a cluster size is right when the runs resolve to bytes
+/// that are the file the record names, and wrong when they do not. Keeping
+/// only the first cluster would leave one trial per file where the run list
+/// offers one per fragment.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LostFile {
     /// File name, when one survived in the record.
@@ -565,22 +673,44 @@ pub struct LostFile {
     /// Absolute offset the record itself was read from — where the `$MFT` of
     /// the filesystem that owned this file lay.
     pub record_at: u64,
-    /// First logical cluster of the content, when the run list gave one.
-    pub first_lcn: Option<u64>,
-    /// Clusters the run list accounts for. Zero when the content was resident
-    /// in the record itself, or when no run list survived.
-    pub clusters: u64,
+    /// The number the record states for itself (`FILE` header, offset 44).
+    ///
+    /// A run of consecutive numbers fixes the stride between records on the
+    /// medium, and with it where record 0 would have been — the other half of
+    /// what a candidate geometry needs.
+    pub record_number: u64,
+    /// The content's run list, in file order. Empty when the content was
+    /// resident in the record itself, or when no run list survived.
+    pub runs: Box<[Run]>,
+}
+
+impl LostFile {
+    /// First logical cluster the run list maps, when it maps one.
+    #[must_use]
+    pub fn first_lcn(&self) -> Option<u64> {
+        self.runs.iter().find_map(|run| run.lcn)
+    }
+
+    /// Clusters the run list accounts for, sparse runs included.
+    #[must_use]
+    pub fn clusters(&self) -> u64 {
+        self.runs
+            .iter()
+            .fold(0_u64, |sum, run| sum.saturating_add(run.clusters))
+    }
 }
 
 impl std::fmt::Debug for LostFile {
+    /// Renders the run list as its length: a record may state thousands of
+    /// runs, and a panic message is no place for a kibibyte of them.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LostFile")
             .field("name", &self.name.as_ref().map(|_| "<redacted>"))
             .field("timestamps", &self.timestamps)
             .field("size", &self.size)
             .field("record_at", &self.record_at)
-            .field("first_lcn", &self.first_lcn)
-            .field("clusters", &self.clusters)
+            .field("record_number", &self.record_number)
+            .field("runs", &self.runs.len())
             .finish()
     }
 }
@@ -593,12 +723,17 @@ impl std::fmt::Debug for LostFile {
 /// depend on that geometry. What comes back names files and dates them; it
 /// locates nothing.
 ///
+/// `census` accumulates what the pass saw, including the records it did not
+/// report: what a region held is a separate question from what came back from
+/// it, and only the first tells a thin result apart from a thin medium.
+///
 /// # Errors
 ///
 /// Fails only on I/O faults; anything that does not validate is skipped.
 pub fn orphan_records<R: Read + Seek>(
     src: &mut R,
     range: ByteRange,
+    census: &mut Census,
 ) -> Result<Vec<LostFile>, FsError> {
     let record_len = DEFAULT_RECORD_SIZE as usize;
     let mut found = Vec::new();
@@ -609,11 +744,14 @@ pub fn orphan_records<R: Read + Seek>(
         if !read_at(src, at, record_len, &mut buf)? {
             break;
         }
-        if buf.get(..4) == Some(FILE_MAGIC)
-            && let Some(record) = Record::parse(&buf, at)
-            && record.deleted
-        {
-            found.push(record.into_lost_file());
+        if buf.get(..4) == Some(FILE_MAGIC) {
+            census.seen = census.seen.saturating_add(1);
+            if let Some(record) = Record::parse(&buf, at) {
+                census.observe(&record);
+                if record.deleted {
+                    found.push(record.into_lost_file());
+                }
+            }
         }
         at += record_len as u64;
     }
@@ -628,6 +766,9 @@ pub fn orphan_records<R: Read + Seek>(
 /// belong to (the residue anchor's geometry); passing the wrong volume start
 /// yields extents pointing at the wrong bytes.
 ///
+/// `census` accumulates what the pass saw, on the same terms as
+/// [`orphan_records`].
+///
 /// # Errors
 ///
 /// Fails only on I/O faults; anything that does not validate is skipped.
@@ -636,6 +777,7 @@ pub fn orphan_scan<R: Read + Seek>(
     range: ByteRange,
     volume_offset: ByteOffset,
     cluster_bytes: u64,
+    census: &mut Census,
 ) -> Result<Vec<DeletedFile>, FsError> {
     let geom = Ntfs {
         volume_offset,
@@ -655,12 +797,16 @@ pub fn orphan_scan<R: Read + Seek>(
         }
         // The spec is explicit: only records with the in-use flag clear are
         // deleted files. Reporting live records would assert something false
-        // about every file on the volume.
-        if buf.get(..4) == Some(FILE_MAGIC)
-            && let Some(record) = Record::parse(&buf, at)
-            && record.deleted
-        {
-            found.push(record.into_deleted_file(&geom));
+        // about every file on the volume — so they are counted and not
+        // reported, which is what makes the omission visible.
+        if buf.get(..4) == Some(FILE_MAGIC) {
+            census.seen = census.seen.saturating_add(1);
+            if let Some(record) = Record::parse(&buf, at) {
+                census.observe(&record);
+                if record.deleted {
+                    found.push(record.into_deleted_file(&geom));
+                }
+            }
         }
         at += record_len as u64;
     }
@@ -672,6 +818,8 @@ struct Record {
     deleted: bool,
     /// Absolute offset the record was read from.
     position: u64,
+    /// The number the record states for itself (header offset 44).
+    number: u64,
     name: Option<String>,
     timestamps: Timestamps,
     size: u64,
@@ -792,6 +940,7 @@ impl Record {
         Some(Self {
             deleted: flags & 0x01 == 0,
             position: record_at,
+            number: record_number,
             name,
             timestamps,
             size,
@@ -851,22 +1000,22 @@ impl Record {
     }
 
     /// What the record says about itself, with no geometry to place it by.
+    ///
+    /// The run list comes across whole. It is the one part of a record that
+    /// cannot be re-derived once the record is gone, and collapsing it to a
+    /// first cluster would throw away every fragment after the first.
     fn into_lost_file(self) -> LostFile {
-        let (first_lcn, clusters) = match &self.data {
-            RecordData::Runs { runs, .. } => (
-                runs.iter().find_map(|run| run.lcn),
-                runs.iter()
-                    .fold(0_u64, |sum, run| sum.saturating_add(run.clusters)),
-            ),
-            RecordData::None | RecordData::Resident { .. } => (None, 0),
+        let runs = match self.data {
+            RecordData::Runs { runs, .. } => runs.into_boxed_slice(),
+            RecordData::None | RecordData::Resident { .. } => Box::default(),
         };
         LostFile {
             name: self.name,
             timestamps: self.timestamps,
             size: self.size,
             record_at: self.position,
-            first_lcn,
-            clusters,
+            record_number: self.number,
+            runs,
         }
     }
 
@@ -918,12 +1067,19 @@ fn data_extension_records(list: &[u8], base: u64) -> Vec<u64> {
     out
 }
 
-/// One entry of a non-resident run list. A sparse run maps no medium bytes
-/// but still covers file offsets.
-#[derive(Clone, Copy)]
-struct Run {
-    lcn: Option<u64>,
-    clusters: u64,
+/// One entry of a non-resident run list, in the volume's own cluster units.
+///
+/// This is the map the filesystem itself wrote for a file's content. Turning
+/// it into medium offsets needs the volume's cluster size and start and
+/// nothing else, which is what makes a surviving run list testable against a
+/// candidate geometry long after the boot sector that stated one is gone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Run {
+    /// First logical cluster of the run; `None` for a sparse run, which maps
+    /// no medium bytes but still covers file offsets.
+    pub lcn: Option<u64>,
+    /// Clusters the run covers.
+    pub clusters: u64,
 }
 
 /// A `$FILE_NAME` attribute value.

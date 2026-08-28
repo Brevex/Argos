@@ -388,7 +388,7 @@ impl Noise {
     }
 
     /// The next pseudo-random byte.
-    pub fn next_byte(&mut self) -> u8 {
+    pub(crate) fn next_byte(&mut self) -> u8 {
         self.state ^= self.state << 13;
         self.state ^= self.state >> 7;
         self.state ^= self.state << 17;
@@ -549,7 +549,7 @@ pub struct Fragmented {
     pub image: Vec<u8>,
     /// Where each fragment landed, in file order — the answer a reassembly
     /// has to arrive at.
-    pub extents: Vec<argos_core::geometry::ByteRange>,
+    pub extents: Vec<argos_core::ByteRange>,
     /// The composed disk.
     pub disk: Vec<u8>,
 }
@@ -589,7 +589,7 @@ impl Fragmented {
 /// Panics if the fragments do not fit, overlap, or if `starts` is empty.
 #[must_use]
 pub fn fragmented(len: usize, image: &[u8], starts: &[usize], block: usize) -> Fragmented {
-    use argos_core::geometry::{ByteOffset, ByteRange};
+    use argos_core::{ByteOffset, ByteRange};
 
     assert!(!starts.is_empty(), "a fragmented layout needs a start");
     assert!(block > 0, "the block size must be positive");
@@ -944,7 +944,7 @@ impl SparseDisk {
     ///
     /// Panics if an extent runs past the end of the medium — a fixture bug.
     #[must_use]
-    pub fn read_extents(&self, extents: &[argos_core::geometry::ByteRange]) -> Vec<u8> {
+    pub fn read_extents(&self, extents: &[argos_core::ByteRange]) -> Vec<u8> {
         let mut out = Vec::new();
         for extent in extents {
             let len = usize::try_from(extent.len).expect("fixture extent lengths fit usize");
@@ -1046,7 +1046,7 @@ pub struct Planted {
     pub image: Vec<u8>,
     /// Where each fragment landed, in file order — the answer a reassembly has
     /// to arrive at.
-    pub extents: Vec<argos_core::geometry::ByteRange>,
+    pub extents: Vec<argos_core::ByteRange>,
     /// The composed medium.
     pub disk: SparseDisk,
 }
@@ -1077,7 +1077,7 @@ impl Planted {
 /// Panics if the fragments do not fit, overlap, or if `starts` is empty.
 #[must_use]
 pub fn planted(len: u64, image: &[u8], starts: &[u64], block: u64) -> Planted {
-    use argos_core::geometry::{ByteOffset, ByteRange};
+    use argos_core::{ByteOffset, ByteRange};
 
     assert!(!starts.is_empty(), "a planted layout needs a start");
     assert!(block > 0, "the block size must be positive");

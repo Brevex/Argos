@@ -21,17 +21,10 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "test-util")]
 use argos_core::fixture::MemDisk;
-use argos_core::geometry::{Lba, SectorSize};
-use argos_core::source::{BlockSource, DeviceClass, Geometry, ReadError};
+use argos_core::ports::{BlockSource, DeviceClass, Geometry, ReadError};
+use argos_core::{Lba, SectorSize};
 
 use crate::class::TrimState;
-
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(windows)]
-mod windows;
 
 /// A `len`-byte view into `bounce`, aligned to `align` bytes.
 ///
@@ -41,7 +34,7 @@ mod windows;
 /// taking an aligned window of it turns that requirement into a single place
 /// to audit, and reuses the allocation across every read (`M-MEM-REUSE`).
 #[cfg(any(target_os = "linux", windows))]
-fn aligned_slice(bounce: &mut Vec<u8>, len: usize, align: usize) -> &mut [u8] {
+pub fn aligned_slice(bounce: &mut Vec<u8>, len: usize, align: usize) -> &mut [u8] {
     bounce.resize(len + align, 0);
     let start = bounce.as_ptr().align_offset(align);
     &mut bounce[start..start + len]
@@ -60,11 +53,11 @@ pub struct Device {
 #[derive(Debug)]
 enum Core {
     #[cfg(target_os = "linux")]
-    Native(linux::Native),
+    Native(crate::platform::linux::Native),
     #[cfg(target_os = "macos")]
-    Native(macos::Native),
+    Native(crate::platform::macos::Native),
     #[cfg(windows)]
-    Native(windows::Native),
+    Native(crate::platform::windows::Native),
     #[cfg(feature = "test-util")]
     Mocked(Ctrl),
     /// A target with no HAL yet. Carries nothing; it exists so the enum has a
@@ -85,19 +78,19 @@ impl Device {
         #[cfg(target_os = "linux")]
         {
             Ok(Self {
-                core: Core::Native(linux::Native::open(path)?),
+                core: Core::Native(crate::platform::linux::Native::open(path)?),
             })
         }
         #[cfg(target_os = "macos")]
         {
             Ok(Self {
-                core: Core::Native(macos::Native::open(path)?),
+                core: Core::Native(crate::platform::macos::Native::open(path)?),
             })
         }
         #[cfg(windows)]
         {
             Ok(Self {
-                core: Core::Native(windows::Native::open(path)?),
+                core: Core::Native(crate::platform::windows::Native::open(path)?),
             })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

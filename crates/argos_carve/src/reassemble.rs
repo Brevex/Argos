@@ -26,7 +26,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange};
 
 use crate::classify::{self, BlockProfile};
 use crate::decode;
@@ -59,7 +59,7 @@ pub const MAX_FRAGMENTS: usize = 16;
 /// This is what bounds the time a single fragmented candidate can take,
 /// independent of anything read from the medium. It is set to what a complete
 /// search proposes rather than below it, so a candidate whose remainder is on
-/// the medium is not missed for want of budget: [`MAX_PREFIX_CANDIDATES`]
+/// the medium is not missed for want of budget: `MAX_PREFIX_CANDIDATES`
 /// splices, each sweeping [`MAX_GAP_BYTES`] either side of the header in
 /// [`BLOCK_BYTES`] steps, is 8 x 2 x 16384.
 pub const MAX_HYPOTHESES: u32 = 262_144;
@@ -91,7 +91,7 @@ pub(crate) const MAX_SEAM_RATIO: f32 = 3.0;
 /// ends; the true boundary is the block boundary at or below it. Trying the
 /// nearest few covers the case where the next fragment's bytes happened to
 /// keep parsing for a while past the real splice.
-pub const MAX_PREFIX_CANDIDATES: usize = 8;
+pub(crate) const MAX_PREFIX_CANDIDATES: usize = 8;
 
 /// How hard a reassembly is allowed to try.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

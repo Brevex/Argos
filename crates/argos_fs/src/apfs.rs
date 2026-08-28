@@ -17,8 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
 use std::time::{Duration, SystemTime};
 
-use argos_core::Confidence;
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange, Confidence};
 
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
 use crate::{read_at, u16_le, u32_le, u64_le};
@@ -515,10 +514,12 @@ fn fletcher64_ok(block: &[u8]) -> bool {
 
 /// Computes the Fletcher-64 checksum an object header must carry.
 ///
-/// Exposed for fixture builders, which must produce checksummed objects for
-/// the validator to accept them.
+/// Exists for the fixture builders, which must produce checksummed objects for
+/// the validator to accept them; the validator itself checks a stored sum
+/// rather than computing one, so nothing outside `test-util` calls this.
+#[cfg(feature = "test-util")]
 #[must_use]
-pub fn fletcher64(body: &[u8]) -> u64 {
+pub(crate) fn fletcher64(body: &[u8]) -> u64 {
     let mut sum1 = 0_u64;
     let mut sum2 = 0_u64;
     for word in body.chunks_exact(4) {

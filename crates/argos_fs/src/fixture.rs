@@ -217,7 +217,12 @@ pub fn gpt_image(len: usize, partitions: &[std::ops::RangeInclusive<u64>]) -> Ve
 
 /// One GPT header sector with a correct CRC32.
 #[must_use]
-pub fn gpt_header(entries_lba: u64, entry_count: u32, entry_size: u32, array_crc: u32) -> Vec<u8> {
+pub(crate) fn gpt_header(
+    entries_lba: u64,
+    entry_count: u32,
+    entry_size: u32,
+    array_crc: u32,
+) -> Vec<u8> {
     let mut header = vec![0_u8; SECTOR];
     header[..8].copy_from_slice(b"EFI PART");
     header[8..12].copy_from_slice(&0x0001_0000_u32.to_le_bytes()); // revision 1.0
@@ -239,7 +244,7 @@ pub fn gpt_header(entries_lba: u64, entry_count: u32, entry_size: u32, array_crc
 pub const NTFS_CLUSTER: usize = 4096;
 
 /// Bytes per MFT record in NTFS fixtures.
-pub const NTFS_RECORD: usize = 1024;
+pub(crate) const NTFS_RECORD: usize = 1024;
 
 /// An NTFS volume of `len` bytes whose `$MFT` holds one deleted file.
 ///
@@ -738,10 +743,10 @@ pub fn usn_journal(entries: &[(&str, u64)]) -> Vec<u8> {
 pub const EXT4_BLOCK: usize = 1024;
 
 /// Inodes per group in ext4 fixtures.
-pub const EXT4_INODES_PER_GROUP: u32 = 16;
+pub(crate) const EXT4_INODES_PER_GROUP: u32 = 16;
 
 /// Bytes per inode in ext4 fixtures.
-pub const EXT4_INODE_BYTES: u16 = 128;
+pub(crate) const EXT4_INODE_BYTES: u16 = 128;
 
 /// An ext4 volume of `len` bytes whose journal holds a stale inode-table
 /// block describing `file` as deleted.
@@ -779,6 +784,9 @@ pub fn ext4_volume(len: usize, file: &FilePlan) -> Vec<u8> {
     );
     let slot = (8 - 1) as usize * usize::from(EXT4_INODE_BYTES);
     inode_table[slot..slot + journal_inode.len()].copy_from_slice(&journal_inode);
+    let root = ext4_root_inode();
+    let root_slot = usize::from(EXT4_INODE_BYTES);
+    inode_table[root_slot..root_slot + root.len()].copy_from_slice(&root);
 
     // The journal's descriptor block maps the following data block onto the
     // live inode table; that data block is a *stale copy* holding the deleted
@@ -851,6 +859,9 @@ pub fn ext4_volume_deep_extents(len: usize, file: &FilePlan) -> Vec<u8> {
     );
     let slot = (8 - 1) as usize * usize::from(EXT4_INODE_BYTES);
     inode_table[slot..slot + journal_inode.len()].copy_from_slice(&journal_inode);
+    let root = ext4_root_inode();
+    let root_slot = usize::from(EXT4_INODE_BYTES);
+    inode_table[root_slot..root_slot + root.len()].copy_from_slice(&root);
 
     let descriptor = jbd2_descriptor(&[INODE_TABLE_BLOCK]);
     let extents: Vec<(u64, u16)> = file
@@ -888,15 +899,50 @@ pub fn ext4_volume_deep_extents(len: usize, file: &FilePlan) -> Vec<u8> {
 /// An ext4 superblock describing a `blocks`-block filesystem.
 #[must_use]
 pub fn ext4_superblock(blocks: usize) -> Vec<u8> {
+    const BLOCKS_PER_GROUP: u32 = 8192;
+    let blocks = u32::try_from(blocks).unwrap_or(u32::MAX);
     let mut sb = vec![0_u8; EXT4_BLOCK];
-    sb[4..8].copy_from_slice(&u32::try_from(blocks).unwrap_or(u32::MAX).to_le_bytes());
+    // The counts have to agree the way mke2fs writes them, or the anchor
+    // validator is right to reject this: one inode count per group, and the
+    // first data block that a 1 KiB block size implies.
+    let groups = blocks.div_ceil(BLOCKS_PER_GROUP);
+    sb[0..4].copy_from_slice(&(groups * EXT4_INODES_PER_GROUP).to_le_bytes());
+    sb[4..8].copy_from_slice(&blocks.to_le_bytes());
+    sb[20..24].copy_from_slice(&1_u32.to_le_bytes()); // first data block: 1 KiB blocks
     sb[24..28].copy_from_slice(&0_u32.to_le_bytes()); // log block size: 1 KiB
-    sb[32..36].copy_from_slice(&8192_u32.to_le_bytes()); // blocks per group
+    sb[32..36].copy_from_slice(&BLOCKS_PER_GROUP.to_le_bytes());
     sb[40..44].copy_from_slice(&EXT4_INODES_PER_GROUP.to_le_bytes());
     sb[56..58].copy_from_slice(&0xEF53_u16.to_le_bytes());
     sb[88..90].copy_from_slice(&EXT4_INODE_BYTES.to_le_bytes());
     sb[224..228].copy_from_slice(&8_u32.to_le_bytes()); // journal inode
     sb
+}
+
+/// A backup superblock of the filesystem `primary` describes, for `group`.
+///
+/// Byte-identical to the primary but for the group number it carries, which is
+/// the only thing that says where the volume it belongs to really starts.
+#[must_use]
+pub fn ext4_backup_superblock(primary: &[u8], group: u16) -> Vec<u8> {
+    let mut backup = primary.to_vec();
+    backup[90..92].copy_from_slice(&group.to_le_bytes());
+    backup
+}
+
+/// The root directory inode every ext filesystem has at inode 2.
+///
+/// A fixture without one describes a filesystem that could not be mounted, and
+/// the anchor confirmation is right to refuse it.
+#[must_use]
+pub(crate) fn ext4_root_inode() -> Vec<u8> {
+    // Mode `S_IFDIR | 0755`, and the two links `.` and `..` give it.
+    ext4_inode_with_extents(
+        0x41ED,
+        2,
+        0,
+        u64::try_from(EXT4_BLOCK).unwrap_or(0),
+        &[(1, 1)],
+    )
 }
 
 /// An inode with a depth-0 extent tree over (start block, block count) pairs.
@@ -978,7 +1024,7 @@ pub(crate) fn ext4_inode_with_index(
 
 /// A depth-0 extent node as it appears in its own block.
 #[must_use]
-pub fn ext4_extent_leaf(first_file_block: u32, extents: &[(u64, u16)]) -> Vec<u8> {
+pub(crate) fn ext4_extent_leaf(first_file_block: u32, extents: &[(u64, u16)]) -> Vec<u8> {
     let mut block = vec![0_u8; EXT4_BLOCK];
     block[0..2].copy_from_slice(&0xF30A_u16.to_le_bytes());
     block[2..4].copy_from_slice(&u16::try_from(extents.len()).unwrap_or(0).to_le_bytes());
@@ -1003,7 +1049,7 @@ pub fn ext4_extent_leaf(first_file_block: u32, extents: &[(u64, u16)]) -> Vec<u8
 
 /// A jbd2 descriptor block tagging `targets` in order.
 #[must_use]
-pub fn jbd2_descriptor(targets: &[u64]) -> Vec<u8> {
+pub(crate) fn jbd2_descriptor(targets: &[u64]) -> Vec<u8> {
     let mut block = vec![0_u8; EXT4_BLOCK];
     block[0..4].copy_from_slice(&0xC03B_3998_u32.to_be_bytes());
     block[4..8].copy_from_slice(&1_u32.to_be_bytes()); // descriptor block
@@ -1127,7 +1173,7 @@ pub(crate) fn fat_dir_subdirectory(name: &str, cluster: u32) -> Vec<u8> {
 
 /// A FAT32 boot sector for a volume of `len` bytes.
 #[must_use]
-pub fn fat32_boot_sector(len: usize) -> Vec<u8> {
+pub(crate) fn fat32_boot_sector(len: usize) -> Vec<u8> {
     let mut sector = vec![0_u8; SECTOR];
     sector[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
     sector[3..11].copy_from_slice(b"MSDOS5.0");
@@ -1145,7 +1191,7 @@ pub fn fat32_boot_sector(len: usize) -> Vec<u8> {
 
 /// A root-directory region with one deleted entry (long name + 8.3 alias).
 #[must_use]
-pub fn fat_dir_deleted(name: &str, cluster: u32, size: u32) -> Vec<u8> {
+pub(crate) fn fat_dir_deleted(name: &str, cluster: u32, size: u32) -> Vec<u8> {
     let mut dir = vec![0_u8; FAT_CLUSTER];
     let units: Vec<u16> = name.encode_utf16().collect();
     let fragments = units.len().div_ceil(13).max(1);
@@ -1315,7 +1361,7 @@ pub fn apfs_container(len: usize, file: &FilePlan) -> Vec<u8> {
 /// A container superblock; `desc_base`/`desc_blocks` locate the checkpoint
 /// ring, `volume_oid` the volume this checkpoint's omap resolves.
 #[must_use]
-pub fn apfs_nxsb(
+pub(crate) fn apfs_nxsb(
     blocks: u64,
     omap_oid: u64,
     volume_oid: u64,
@@ -1338,7 +1384,7 @@ pub fn apfs_nxsb(
 
 /// An object-map object pointing at its root node block.
 #[must_use]
-pub fn apfs_omap(root_block: u64) -> Vec<u8> {
+pub(crate) fn apfs_omap(root_block: u64) -> Vec<u8> {
     let mut block = vec![0_u8; APFS_BLOCK];
     block[24..28].copy_from_slice(&0x0000_000B_u32.to_le_bytes()); // omap type
     block[48..56].copy_from_slice(&root_block.to_le_bytes());
@@ -1347,7 +1393,7 @@ pub fn apfs_omap(root_block: u64) -> Vec<u8> {
 
 /// An omap leaf node mapping `oid` to `paddr`.
 #[must_use]
-pub fn apfs_omap_root(oid: u64, paddr: u64) -> Vec<u8> {
+pub(crate) fn apfs_omap_root(oid: u64, paddr: u64) -> Vec<u8> {
     let mut key = vec![0_u8; 16];
     key[0..8].copy_from_slice(&oid.to_le_bytes());
     let mut value = vec![0_u8; 16];
@@ -1357,7 +1403,7 @@ pub fn apfs_omap_root(oid: u64, paddr: u64) -> Vec<u8> {
 
 /// A volume superblock pointing at its filesystem tree block.
 #[must_use]
-pub fn apfs_volume(tree_block: u64) -> Vec<u8> {
+pub(crate) fn apfs_volume(tree_block: u64) -> Vec<u8> {
     let mut block = vec![0_u8; APFS_BLOCK];
     block[24..28].copy_from_slice(&0x0000_000D_u32.to_le_bytes()); // volume type
     block[32..36].copy_from_slice(&0x4253_5041_u32.to_le_bytes()); // APSB
@@ -1367,7 +1413,7 @@ pub fn apfs_volume(tree_block: u64) -> Vec<u8> {
 
 /// One file's records in a filesystem tree.
 #[derive(Clone, Debug)]
-pub struct FsRecord {
+pub(crate) struct FsRecord {
     /// Inode number.
     pub inode: u64,
     /// File name.
@@ -1382,7 +1428,7 @@ pub struct FsRecord {
 
 /// A filesystem-tree leaf node holding inode, extent and name records.
 #[must_use]
-pub fn apfs_fs_tree(records: &[FsRecord]) -> Vec<u8> {
+pub(crate) fn apfs_fs_tree(records: &[FsRecord]) -> Vec<u8> {
     let mut entries = Vec::new();
     for record in records {
         // Inode record: key oid tagged with the record type in the top nibble.
@@ -1544,10 +1590,6 @@ pub const BTRFS_NODE: usize = 16384;
 
 /// Physical offset of the primary superblock. Source: `BTRFS_SUPER_INFO_OFFSET`.
 pub const BTRFS_SUPERBLOCK_AT: usize = 0x1_0000;
-
-/// Physical offset of the first superblock mirror. Source:
-/// `BTRFS_SUPER_MIRROR_OFFSET(1)`.
-pub const BTRFS_MIRROR_AT: usize = 0x400_0000;
 
 /// The filesystem identity every block of a fixture volume carries.
 const BTRFS_FSID: [u8; 16] = *b"ArgosBtrfsFixtr\x00";
@@ -1769,7 +1811,7 @@ pub fn btrfs_superblock(
 /// One (key, `btrfs_chunk`) pair as `sys_chunk_array` and the chunk tree store
 /// it, mapping `logical` to `physical` for `length` bytes.
 #[must_use]
-pub fn btrfs_chunk_item(logical: u64, length: u64, physical: u64, profile: u64) -> Vec<u8> {
+pub(crate) fn btrfs_chunk_item(logical: u64, length: u64, physical: u64, profile: u64) -> Vec<u8> {
     let mut out = Vec::new();
     // btrfs_disk_key: objectid 256 (first chunk tree), type 228, offset logical.
     out.extend_from_slice(&256_u64.to_le_bytes());
@@ -1794,7 +1836,7 @@ pub fn btrfs_chunk_item(logical: u64, length: u64, physical: u64, profile: u64) 
 
 /// A chunk-tree leaf mapping each (logical, length, physical, profile) entry.
 #[must_use]
-pub fn btrfs_chunk_tree(bytenr: u64, chunks: &[(u64, u64, u64, u64)]) -> Vec<u8> {
+pub(crate) fn btrfs_chunk_tree(bytenr: u64, chunks: &[(u64, u64, u64, u64)]) -> Vec<u8> {
     let items: Vec<(u64, u8, u64, Vec<u8>)> = chunks
         .iter()
         .map(|&(logical, length, physical, profile)| {
@@ -1809,7 +1851,7 @@ pub fn btrfs_chunk_tree(bytenr: u64, chunks: &[(u64, u64, u64, u64)]) -> Vec<u8>
 
 /// A root-tree leaf naming the filesystem tree at `fs_tree`.
 #[must_use]
-pub fn btrfs_root_tree(bytenr: u64, generation: u64, fs_tree: u64) -> Vec<u8> {
+pub(crate) fn btrfs_root_tree(bytenr: u64, generation: u64, fs_tree: u64) -> Vec<u8> {
     /// Bytes of a `btrfs_root_item`. Source: the struct.
     const ROOT_ITEM_BYTES: usize = 439;
 
@@ -1819,11 +1861,11 @@ pub fn btrfs_root_tree(bytenr: u64, generation: u64, fs_tree: u64) -> Vec<u8> {
 }
 
 /// One extent of a fixture file: file offset, logical address, bytes.
-pub type BtrfsExtent = (u64, u64, u64);
+pub(crate) type BtrfsExtent = (u64, u64, u64);
 
 /// One file's records in a btrfs filesystem tree.
 #[derive(Clone, Copy, Debug)]
-pub struct BtrfsFile<'a> {
+pub(crate) struct BtrfsFile<'a> {
     /// Inode number.
     pub inode: u64,
     /// File name, as an `INODE_REF` carries it.
@@ -1836,13 +1878,13 @@ pub struct BtrfsFile<'a> {
 
 /// A filesystem-tree leaf holding one record set per file.
 #[must_use]
-pub fn btrfs_fs_tree(bytenr: u64, generation: u64, records: &[BtrfsFile<'_>]) -> Vec<u8> {
+pub(crate) fn btrfs_fs_tree(bytenr: u64, generation: u64, records: &[BtrfsFile<'_>]) -> Vec<u8> {
     btrfs_fs_tree_compressed(bytenr, generation, records, 0)
 }
 
 /// As [`btrfs_fs_tree`], with every extent marked compressed by `compression`.
 #[must_use]
-pub fn btrfs_fs_tree_compressed(
+pub(crate) fn btrfs_fs_tree_compressed(
     bytenr: u64,
     generation: u64,
     records: &[BtrfsFile<'_>],
@@ -1881,7 +1923,7 @@ pub fn btrfs_fs_tree_compressed(
 
 /// A regular `btrfs_file_extent_item` covering `bytes` at `logical`.
 #[must_use]
-pub fn btrfs_extent_item(logical: u64, bytes: u64) -> Vec<u8> {
+pub(crate) fn btrfs_extent_item(logical: u64, bytes: u64) -> Vec<u8> {
     let mut item = vec![0_u8; 53];
     item[8..16].copy_from_slice(&bytes.to_le_bytes()); // ram_bytes
     item[20] = 1; // regular, not inline

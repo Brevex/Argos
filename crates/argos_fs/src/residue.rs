@@ -10,7 +10,7 @@
 
 use std::io::{Read, Seek};
 
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange};
 
 use crate::apfs::Apfs;
 use crate::btrfs;
@@ -41,11 +41,11 @@ pub const WINDOW_OVERLAP_BYTES: usize = 4096;
 /// the sweep's own result set would exhaust memory before anything could be
 /// reported (A-BOUNDED-ALLOC). Real media hold a handful of volumes, so a
 /// sweep that reaches this has found a pattern, not a disk.
-pub const MAX_VOLUMES: usize = 4096;
+pub(crate) const MAX_VOLUMES: usize = 4096;
 
 /// Cap on orphaned `FILE`-record regions one sweep reports. Adjacent records
 /// coalesce into runs, so this bounds genuinely scattered residue.
-pub const MAX_RECORD_REGIONS: usize = 65_536;
+pub(crate) const MAX_RECORD_REGIONS: usize = 65_536;
 
 /// Everything one sweep located.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -168,7 +168,7 @@ pub fn sweep<R: Read + Seek>(
 /// Volumes are appended with [`Origin::Residual`]; [`Sweep::mark_current`]
 /// re-labels the ones the current partition table also lists.
 ///
-/// Returns `false` once [`MAX_VOLUMES`] or [`MAX_RECORD_REGIONS`] is reached,
+/// Returns `false` once `MAX_VOLUMES` or `MAX_RECORD_REGIONS` is reached,
 /// meaning the sweep stopped early and its result is incomplete.
 pub fn scan_window(window: &[u8], start: ByteOffset, medium_len: u64, out: &mut Sweep) -> bool {
     let step = usize::try_from(STEP_BYTES).unwrap_or(512);

@@ -26,8 +26,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
 
-use argos_core::Confidence;
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange, Confidence};
 
 pub mod apfs;
 pub mod btrfs;

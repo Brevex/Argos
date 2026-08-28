@@ -4,13 +4,13 @@
 //! and in what order the evidence is trusted; it owns nothing about where the
 //! bytes come from, where the results go, or how progress is displayed. Those
 //! arrive as ports: an `impl Read + Seek` view of the medium, an
-//! [`ArtifactSink`](argos_core::artifact::ArtifactSink) and a
-//! [`ProgressSink`](argos_core::progress::ProgressSink).
+//! [`ArtifactSink`](argos_core::ports::ArtifactSink) and a
+//! [`ProgressSink`](argos_core::ports::ProgressSink).
 //!
 //! ```no_run
 //! # use std::io::Cursor;
 //! # fn demo(views: Vec<Cursor<Vec<u8>>>, len: u64) -> Result<(), Box<dyn std::error::Error>> {
-//! use argos_core::progress::Discard;
+//! use argos_core::ports::Discard;
 //! use argos_engine::{Medium, ScanConfig, ScanSession};
 //!
 //! let session = ScanSession::new(ScanConfig::default());
@@ -31,7 +31,7 @@ use std::backtrace::{Backtrace, BacktraceStatus};
 use std::error::Error;
 use std::fmt;
 
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 
 pub mod config;
 pub mod finding;

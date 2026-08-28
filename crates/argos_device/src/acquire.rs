@@ -11,8 +11,8 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Seek, SeekFrom, Write};
 
-use argos_core::geometry::{Lba, SectorRange, SectorSize};
-use argos_core::source::BlockSource;
+use argos_core::ports::BlockSource;
+use argos_core::{Lba, SectorRange, SectorSize};
 
 /// Sectors per read during the sweep pass. 128 sectors is 64 KiB at 512-byte
 /// sectors: large enough to stream a healthy HDD near platter speed, small enough

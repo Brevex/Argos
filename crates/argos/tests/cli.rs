@@ -499,7 +499,7 @@ fn provenance_digest(manifest: &serde_json::Value) -> String {
     }
     hasher.update(manifest["rejected_candidates"].to_string().as_bytes());
     hasher.update(manifest["scan_state"].to_string().as_bytes());
-    argos_core::artifact::Digest::new(hasher.finalize().into()).to_string()
+    argos_core::ports::Digest::new(hasher.finalize().into()).to_string()
 }
 
 #[test]

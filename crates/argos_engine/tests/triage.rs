@@ -11,10 +11,10 @@ use std::convert::Infallible;
 use std::io::Cursor;
 use std::num::NonZeroUsize;
 
-use argos_core::classify::{
+use argos_core::ports::Discard;
+use argos_core::ports::{
     Classifier, Decision, ModelIdentity, PixelImage, TriageLabel, TriageScore,
 };
-use argos_core::progress::Discard;
 use argos_engine::fixture::{Collected, Collector};
 use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession};
 

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use argos_classify::rank::{Evidence, Standing};
-use argos_core::artifact::Digest;
+use argos_core::ports::Digest;
 use argos_report::{ArtifactRecord, Manifest};
 use sha2::{Digest as _, Sha256};
 

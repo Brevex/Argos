@@ -14,7 +14,7 @@ mod decodes {
     use argos_carve::Scratch;
     use argos_carve::fixture::{Disk, Jpeg, photo_jpeg, truncated};
     use argos_carve::mcu::{self, ScanStop};
-    use argos_core::geometry::ByteOffset;
+    use argos_core::ByteOffset;
 
     fn scan_of(bytes: &[u8]) -> mcu::ScanOutcome {
         let mut src = Cursor::new(bytes);
@@ -234,7 +234,7 @@ mod equivalence {
         with_flipped_byte,
     };
     use argos_carve::mcu::{self, ScanOutcome};
-    use argos_core::geometry::ByteOffset;
+    use argos_core::ByteOffset;
 
     /// One corpus entry: a name that says what it poses, and the bytes.
     struct Case {

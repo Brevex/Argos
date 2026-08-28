@@ -15,7 +15,7 @@
 
 use argos_classify::fixture::{Slice, sample};
 use argos_classify::rules;
-use argos_core::classify::TriageLabel;
+use argos_core::ports::TriageLabel;
 
 /// Samples per slice. Enough for a stable first percentile.
 const PER_SLICE: usize = 200;

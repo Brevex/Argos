@@ -10,7 +10,7 @@
 
 use std::io::{Read, Seek};
 
-use argos_core::geometry::ByteOffset;
+use argos_core::ByteOffset;
 use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 

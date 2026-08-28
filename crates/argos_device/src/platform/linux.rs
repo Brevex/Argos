@@ -1,18 +1,28 @@
-//! Linux native device access: `O_DIRECT` reads and geometry ioctls.
+//! The Linux syscall layer: `O_DIRECT` opens, geometry ioctls, sysfs enumeration.
 //!
 //! The only `unsafe` in the workspace lives here, confined to two ioctl wrappers.
 //! Devices are opened `O_RDONLY`; there is no write path to encapsulate.
+//!
+//! Enumeration needs neither privileges nor `unsafe`. `/sys/block` lists every
+//! block device the kernel knows, and each entry carries its size, its
+//! partitions and its queue attributes as plain files; the decisions all live
+//! in [`naming`](crate::naming), [`class`](crate::class) and
+//! [`mount`](crate::mount).
 
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, FileTypeExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use argos_core::geometry::{Lba, SectorSize};
-use argos_core::source::{DeviceClass, Geometry, ReadError};
+use argos_core::ports::{DeviceClass, Geometry, ReadError};
+use argos_core::{Lba, SectorSize};
 
-use super::DeviceError;
+use crate::class::{self, TrimState};
+use crate::device::{DeviceError, aligned_slice};
+use crate::inventory::{DeviceInfo, MountPoint};
+use crate::mount;
+use crate::naming::{self, NodeKind};
 
 /// `BLKGETSIZE64` ioctl: writes the total device size in bytes into a `u64`.
 /// Encoding `_IOR(0x12, 114, size_t)`; the encoded size field follows the
@@ -28,7 +38,7 @@ const BLKGETSIZE64: libc::c_ulong = 0x8004_1272;
 const BLKSSZGET: libc::c_ulong = 0x1268;
 
 /// A block device opened `O_RDONLY`, with `O_DIRECT` when the kernel allows it.
-pub(crate) struct Native {
+pub struct Native {
     file: File,
     geometry: Geometry,
     trim: crate::class::TrimState,
@@ -132,7 +142,7 @@ impl Native {
             // O_DIRECT requires the user buffer to be aligned to the logical
             // sector size; the caller's buffer makes no such promise, so read
             // into an internally aligned bounce buffer and copy out.
-            let aligned = super::aligned_slice(&mut self.bounce, buf.len(), sector_bytes);
+            let aligned = aligned_slice(&mut self.bounce, buf.len(), sector_bytes);
             self.file
                 .read_exact_at(aligned, offset)
                 .map(|()| buf.copy_from_slice(aligned))
@@ -233,10 +243,104 @@ fn logical_sector_bytes(file: &File) -> io::Result<libc::c_int> {
     }
 }
 
+/// Bytes per sector in the units `/sys/block/*/size` counts.
+///
+/// The kernel reports that file in 512-byte units regardless of the device's
+/// real logical sector size — a long-standing quirk of the interface, not a
+/// property of the medium (`M-DOCUMENTED-MAGIC`). The true sector size comes
+/// from an ioctl at open time.
+const SYSFS_SIZE_UNIT: u64 = 512;
+
+pub fn list() -> Vec<DeviceInfo> {
+    let mounts = read_mounts();
+    let Ok(entries) = std::fs::read_dir("/sys/block") else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let sysfs = entry.path();
+        let path = PathBuf::from(format!("/dev/{name}"));
+        // Only nodes whose convention this build understands; a name with no
+        // convention is skipped rather than presented as a disk.
+        let Some(kind) = naming::linux_node_kind(&path.to_string_lossy()) else {
+            continue;
+        };
+        found.push(describe(&path, kind, &sysfs, &mounts));
+
+        // Partitions are subdirectories of their disk, carrying a `partition`
+        // file and their own `size`.
+        let Ok(children) = std::fs::read_dir(&sysfs) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let child_name = child.file_name();
+            let Some(child_name) = child_name.to_str() else {
+                continue;
+            };
+            if !child.path().join("partition").exists() {
+                continue;
+            }
+            let child_path = PathBuf::from(format!("/dev/{child_name}"));
+            found.push(describe(
+                &child_path,
+                NodeKind::Partition,
+                &child.path(),
+                &mounts,
+            ));
+        }
+    }
+    found
+}
+
+/// Everything sysfs will say about one node without opening it.
+fn describe(path: &Path, kind: NodeKind, sysfs: &Path, mounts: &[MountPoint]) -> DeviceInfo {
+    // A partition's queue attributes live on its parent disk.
+    let queue = if kind == NodeKind::Partition {
+        sysfs.parent().map(Path::to_path_buf)
+    } else {
+        Some(sysfs.to_path_buf())
+    };
+    let attribute = |name: &str| {
+        queue
+            .as_ref()
+            .and_then(|base| std::fs::read_to_string(base.join("queue").join(name)).ok())
+    };
+
+    DeviceInfo {
+        path: path.to_path_buf(),
+        kind,
+        capacity_bytes: std::fs::read_to_string(sysfs.join("size"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .and_then(|sectors| sectors.checked_mul(SYSFS_SIZE_UNIT)),
+        class: class::from_rotational(attribute("rotational").as_deref()),
+        trim: TrimState::from_flag(
+            attribute("discard_max_bytes")
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .map(|bytes| bytes > 0),
+        ),
+        mounts: mount::mounts_of(path, mounts, naming::linux_whole_disk),
+        model: std::fs::read_to_string(sysfs.join("device").join("model"))
+            .ok()
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty()),
+    }
+}
+
+/// The kernel's mount table, or nothing when it cannot be read.
+fn read_mounts() -> Vec<MountPoint> {
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|text| mount::parse_linux_mountinfo(&text))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
-    use argos_core::geometry::SectorSize;
-    use argos_core::source::{DeviceClass, Geometry};
+    use argos_core::SectorSize;
+    use argos_core::ports::{DeviceClass, Geometry};
 
     use super::Native;
 

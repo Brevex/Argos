@@ -30,7 +30,7 @@ pub mod fixture;
 
 use std::convert::Infallible;
 
-use argos_core::classify::{Classifier, ModelIdentity, PixelImage, TriageScore};
+use argos_core::ports::{Classifier, ModelIdentity, PixelImage, TriageScore};
 
 /// Version of the decision procedure, recorded in every manifest it labels.
 ///

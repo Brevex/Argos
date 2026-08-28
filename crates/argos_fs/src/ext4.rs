@@ -14,8 +14,7 @@
 use std::io::{Read, Seek};
 use std::time::{Duration, SystemTime};
 
-use argos_core::Confidence;
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange, Confidence};
 
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
 use crate::{read_at, u16_le, u32_be, u32_le};
@@ -29,6 +28,15 @@ pub(crate) const SUPERBLOCK_OFFSET: u64 = 1024;
 
 /// Size of the superblock structure in bytes.
 const SUPERBLOCK_BYTES: usize = 1024;
+
+/// Inode number of the root directory. Source: ext4 layout — inode 1 is the
+/// bad-block list, 2 is `/`, and the first 10 are reserved.
+const ROOT_INODE: u32 = 2;
+
+/// Mask selecting the file-type bits of `i_mode`, and the value meaning a
+/// directory. Source: `stat(2)` `S_IFMT` and `S_IFDIR`.
+const MODE_FORMAT: u16 = 0xF000;
+const MODE_DIRECTORY: u16 = 0x4000;
 
 /// Extent tree node header magic. Source: ext4 `ext4_extent_header`.
 const EXTENT_MAGIC: u16 = 0xF30A;
@@ -132,6 +140,14 @@ impl Ext4 {
 
     /// Interprets `raw` as a superblock (also the residue-sweep anchor
     /// validator: self-consistency decides, never position).
+    ///
+    /// The magic is sixteen bits, which on a terabyte of arbitrary content
+    /// occurs constantly, so the magic alone decides nothing. What decides is
+    /// that the fields agree with each other the way `mke2fs` writes them: the
+    /// first data block follows from the block size, the bitmaps bound the
+    /// per-group counts, the inode table fits in its group, and the inode
+    /// count is exactly the per-group count times the number of groups. Bytes
+    /// that are not a superblock do not satisfy those at once.
     #[must_use]
     pub fn from_superblock(raw: &[u8], volume_offset: ByteOffset) -> Option<Self> {
         if u16_le(raw, 56)? != SUPERBLOCK_MAGIC {
@@ -153,6 +169,38 @@ impl Ext4 {
         if !(128..=4096).contains(&inode_bytes) || !inode_bytes.is_power_of_two() {
             return None;
         }
+
+        // The first 1024 bytes are reserved for boot code, so with 1 KiB
+        // blocks the filesystem starts at block 1 and otherwise at block 0.
+        // There is no third possibility.
+        let first_data_block = u32_le(raw, 20)?;
+        if first_data_block != u32::from(block_bytes == 1024) {
+            return None;
+        }
+        // One block holds each group's block bitmap and each group's inode
+        // bitmap, so neither per-group count can exceed the bits in a block.
+        let block_bits = block_bytes.checked_mul(8)?;
+        if u64::from(blocks_per_group) > block_bits || u64::from(inodes_per_group) > block_bits {
+            return None;
+        }
+        // A group's inode table lives inside the group.
+        if u64::from(inodes_per_group).checked_mul(u64::from(inode_bytes))?
+            > u64::from(blocks_per_group).checked_mul(block_bytes)?
+        {
+            return None;
+        }
+        let block_count = u64::from(u32_le(raw, 4)?);
+        if block_count == 0 {
+            return None;
+        }
+        // Every group holds the same number of inodes, so the total is the
+        // per-group count times the group count — exactly, with no remainder
+        // to absorb a coincidence.
+        let groups = block_count.div_ceil(u64::from(blocks_per_group));
+        if u64::from(u32_le(raw, 0)?) != groups.checked_mul(u64::from(inodes_per_group))? {
+            return None;
+        }
+
         let desc_bytes = u16_le(raw, 254).filter(|&size| size >= 32).unwrap_or(32);
         Some(Self {
             volume_offset,
@@ -160,10 +208,95 @@ impl Ext4 {
             inode_bytes,
             inodes_per_group,
             blocks_per_group,
-            block_count: u64::from(u32_le(raw, 4)?),
+            block_count,
             journal_inode: u32_le(raw, 224).filter(|&inum| inum != 0).unwrap_or(8),
             desc_bytes,
         })
+    }
+
+    /// Resolves an anchor to the filesystem it claims, or to nothing.
+    ///
+    /// The counterpart of [`crate::ntfs::locate`], and for the same reason: a
+    /// sweep reports an anchor for any sector whose fields are consistent, and
+    /// consistency is not existence. This settles it by the one thing that
+    /// does — whichever anchor has a real root directory behind it is a
+    /// filesystem. An anchor that cannot be confirmed is not reported
+    /// (`A-CONFIDENCE-HONEST`).
+    ///
+    /// Reads only this anchor's own superblock: the backup search in
+    /// [`Ext4::open`] exists to rescue a volume already known to be there, and
+    /// running it here would let one filesystem confirm a different anchor.
+    /// A backup superblock is instead corrected to the volume it belongs to,
+    /// by the group number it carries.
+    ///
+    /// # Errors
+    ///
+    /// Fails only on I/O faults.
+    pub fn locate<R: Read + Seek>(
+        src: &mut R,
+        volume_offset: ByteOffset,
+    ) -> Result<Option<Self>, FsError> {
+        let mut buf = Vec::new();
+        let at = volume_offset.get().saturating_add(SUPERBLOCK_OFFSET);
+        if !read_at(src, at, SUPERBLOCK_BYTES, &mut buf)? {
+            return Ok(None);
+        }
+        let Some(primary) = Self::from_superblock(&buf, volume_offset) else {
+            return Ok(None);
+        };
+        if primary.has_root_directory(src)? {
+            return Ok(Some(primary));
+        }
+
+        // Read instead as one of the backups ext writes at the start of some
+        // groups. A backup is byte-identical to the primary but for the group
+        // it names, and taken as a primary it puts the volume — and every
+        // block address resolved against it — a whole number of groups past
+        // where it is. The same correction `ntfs::locate` makes for the boot
+        // sector's copy, and the reason a volume whose primary superblock a
+        // later format overwrote is still reachable.
+        let Some(group) = u16_le(&buf, 90).map(u64::from).filter(|&group| group != 0) else {
+            return Ok(None);
+        };
+        let first_data_block = u64::from(primary.block_bytes == 1024);
+        let Some(start) = group
+            .checked_mul(u64::from(primary.blocks_per_group))
+            .and_then(|blocks| blocks.checked_add(first_data_block))
+            .and_then(|blocks| blocks.checked_mul(primary.block_bytes))
+            .and_then(|delta| at.checked_sub(delta))
+        else {
+            return Ok(None);
+        };
+        let Some(backup) = Self::from_superblock(&buf, ByteOffset::new(start)) else {
+            return Ok(None);
+        };
+        Ok(backup.has_root_directory(src)?.then_some(backup))
+    }
+
+    /// Whether group 0's inode table holds a plausible root directory.
+    ///
+    /// Inode 2 of any ext filesystem is `/`, so a filesystem that is here has
+    /// one here, with at least the two links `.` and `..` give it. Unreadable
+    /// is not confirmation: a geometry that cannot be checked is one that must
+    /// not be acted on.
+    fn has_root_directory<R: Read + Seek>(&self, src: &mut R) -> Result<bool, FsError> {
+        let Some(table) = self.inode_table_block(src, 0)? else {
+            return Ok(false);
+        };
+        let Some(at) = u64::from(ROOT_INODE - 1)
+            .checked_mul(u64::from(self.inode_bytes))
+            .and_then(|delta| self.block_at(table)?.checked_add(delta))
+        else {
+            return Ok(false);
+        };
+        let mut buf = Vec::new();
+        if !read_at(src, at.get(), usize::from(self.inode_bytes), &mut buf)? {
+            return Ok(false);
+        }
+        let (Some(mode), Some(links)) = (u16_le(&buf, 0), u16_le(&buf, 26)) else {
+            return Ok(false);
+        };
+        Ok(mode & MODE_FORMAT == MODE_DIRECTORY && links >= 2)
     }
 
     /// Absolute byte offset of filesystem block `block`.

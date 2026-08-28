@@ -23,8 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
 use std::time::{Duration, SystemTime};
 
-use argos_core::Confidence;
-use argos_core::geometry::{ByteOffset, ByteRange};
+use argos_core::{ByteOffset, ByteRange, Confidence};
 
 use crate::{DeletedFile, FsError, FsKind, Timestamps};
 use crate::{read_at, u16_le, u32_le, u64_le};

@@ -27,7 +27,7 @@
 //! not writing what these rules call an asset — is the caller's, is off by
 //! default, and still records every artifact it omits.
 
-use argos_core::classify::{Decision, PixelImage, TriageLabel, TriageScore};
+use argos_core::ports::{Decision, PixelImage, TriageLabel, TriageScore};
 
 /// Fraction of non-opaque pixels above which an image is called an asset.
 ///

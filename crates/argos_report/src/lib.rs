@@ -17,18 +17,17 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use argos_core::artifact::{Artifact, ArtifactSink, Digest};
-use argos_core::classify::PixelImage;
+use argos_core::ports::{Artifact, ArtifactSink, Digest, PixelImage};
 
 use sha2::{Digest as _, Sha256};
 
-mod manifest;
+pub mod manifest;
 
 use manifest::MANIFEST_FILE;
 
 pub use manifest::{
     ArtifactRecord, CoverageRecord, ExtentRecord, FragmentRecord, LostFileRecord, Manifest,
-    TriageAnnotation, TriageRecord, VolumeRecord,
+    ResidueCensusRecord, RunRecord, TriageAnnotation, TriageRecord, VolumeRecord,
 };
 
 /// Subdirectory of the output holding preview images.
@@ -211,7 +210,7 @@ impl Store {
             deleted_unix: artifact.deleted.map(unix_seconds),
             recovered_name: artifact.recovered_name.map(str::to_owned),
             source_object: artifact.source_object,
-            parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
+            parent_offset: artifact.parent.map(argos_core::ByteOffset::get),
             sha256,
             standing: None,
             same_size_neighbours: None,
@@ -302,7 +301,7 @@ impl Store {
             deleted_unix: artifact.deleted.map(unix_seconds),
             recovered_name: artifact.recovered_name.map(str::to_owned),
             source_object: artifact.source_object,
-            parent_offset: artifact.parent.map(argos_core::geometry::ByteOffset::get),
+            parent_offset: artifact.parent.map(argos_core::ByteOffset::get),
             sha256: artifact.sha256.to_string(),
             written: false,
             triage_label: None,
@@ -366,7 +365,7 @@ impl Store {
     /// evidence.
     fn save_preview(
         &mut self,
-        sha256: &argos_core::artifact::Digest,
+        sha256: &argos_core::ports::Digest,
         image: &PixelImage,
     ) -> Result<(), ReportError> {
         let hash = sha256.to_string();
@@ -452,7 +451,7 @@ impl ArtifactSink for Store {
 
     fn preview(
         &mut self,
-        sha256: &argos_core::artifact::Digest,
+        sha256: &argos_core::ports::Digest,
         image: &PixelImage,
     ) -> Result<(), Self::Error> {
         Self::save_preview(self, sha256, image)
@@ -782,7 +781,7 @@ fn over_white(channel: u32, alpha: u32) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use argos_core::classify::PixelImage;
+    use argos_core::ports::PixelImage;
 
     #[cfg(unix)]
     use super::Owner;

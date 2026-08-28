@@ -11,7 +11,7 @@
 //! The training tool and the eval harness both draw from this generator with
 //! disjoint seed ranges; the eval set is fixed by its seeds (A-EVAL-GATED).
 
-use argos_core::classify::{PixelImage, TriageLabel};
+use argos_core::ports::{PixelImage, TriageLabel};
 
 /// Deterministic xorshift64 generator, so a corpus is its seeds.
 #[derive(Clone, Debug)]
@@ -25,7 +25,7 @@ impl Noise {
     }
 
     /// Next raw value.
-    pub fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 7;
@@ -44,7 +44,7 @@ impl Noise {
     }
 
     /// Uniform value in `-amplitude..=amplitude`.
-    pub fn jitter(&mut self, amplitude: i64) -> i64 {
+    pub(crate) fn jitter(&mut self, amplitude: i64) -> i64 {
         if amplitude <= 0 {
             return 0;
         }
