@@ -517,7 +517,7 @@
     outline-offset: 2px;
   }
 
-  /* --- a switch: a track with a thumb that slides across it -------------- */
+  /* a switch: a track with a thumb that slides across it */
   :global(html[data-checkbox='switch']) input[type='checkbox'] {
     border-radius: var(--switch-radius);
     background: var(--switch-track);
@@ -549,7 +549,7 @@
     left: calc(100% - 0.99rem);
   }
 
-  /* --- a tick box: a sunken well with a mark cut into it ----------------- */
+  /* a tick box: a sunken well with a mark cut into it */
   :global(html[data-checkbox='checkbox']) input[type='checkbox']::before {
     content: '';
     position: absolute;
@@ -586,7 +586,7 @@
     box-shadow: var(--check-shadow-hover);
   }
 
-  /* --- brackets: a cell that is lit or unlit ----------------------------- */
+  /* brackets: a cell that is lit or unlit */
   :global(html[data-checkbox='bracket']) input[type='checkbox']::before {
     content: '[ ]';
     position: absolute;

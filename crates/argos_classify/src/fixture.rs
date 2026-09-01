@@ -296,7 +296,7 @@ fn photograph(width: usize, height: usize, noise: &mut Noise) -> PixelImage {
 /// picture is intact, but every colour statistic a rule might use is gone.
 fn desaturated(image: &PixelImage) -> PixelImage {
     let mut rgba = image.rgba().to_vec();
-    for px in rgba.chunks_exact_mut(PixelImage::BYTES_PER_PIXEL) {
+    for px in rgba.as_chunks_mut::<{ PixelImage::BYTES_PER_PIXEL }>().0 {
         let luma = u8::try_from(
             ((77 * u32::from(px[0]) + 150 * u32::from(px[1]) + 29 * u32::from(px[2])) >> 8)
                 .min(255),

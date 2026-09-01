@@ -153,7 +153,7 @@ fn patterned(len: usize) -> Vec<u8> {
     (0..len).map(|i| ((i * 31 + 7) % 251) as u8).collect()
 }
 
-// --- MBR / GPT ------------------------------------------------------------
+// MBR / GPT
 
 /// An MBR with one partition of `sectors` sectors starting at `start_lba`.
 #[must_use]
@@ -238,7 +238,7 @@ pub(crate) fn gpt_header(
     header
 }
 
-// --- NTFS -----------------------------------------------------------------
+// NTFS
 
 /// Bytes per cluster in NTFS fixtures.
 pub const NTFS_CLUSTER: usize = 4096;
@@ -737,7 +737,7 @@ pub fn usn_journal(entries: &[(&str, u64)]) -> Vec<u8> {
     out
 }
 
-// --- ext4 -----------------------------------------------------------------
+// ext4
 
 /// Bytes per block in ext4 fixtures.
 pub const EXT4_BLOCK: usize = 1024;
@@ -1084,7 +1084,7 @@ pub fn ext4_dir_block(entries: &[(&str, u32)]) -> Vec<u8> {
     block
 }
 
-// --- FAT32 / exFAT --------------------------------------------------------
+// FAT32 / exFAT
 
 /// Bytes per cluster in FAT fixtures.
 pub const FAT_CLUSTER: usize = 4096;
@@ -1307,7 +1307,7 @@ pub(crate) fn exfat_dir_deleted(name: &str, cluster: u32, size: u64) -> Vec<u8> 
     dir
 }
 
-// --- APFS -----------------------------------------------------------------
+// APFS
 
 /// Bytes per block in APFS fixtures.
 pub const APFS_BLOCK: usize = 4096;
@@ -1523,7 +1523,7 @@ fn seal(mut block: Vec<u8>) -> Vec<u8> {
     block
 }
 
-// --- corrupt variants -----------------------------------------------------
+// corrupt variants
 
 /// `bytes` truncated after `keep` bytes.
 ///
@@ -1580,7 +1580,7 @@ pub fn zero_filled(len: usize) -> Vec<u8> {
     vec![0_u8; len]
 }
 
-// --- btrfs ----------------------------------------------------------------
+// btrfs
 
 /// Bytes per sector in btrfs fixtures.
 pub const BTRFS_SECTOR: usize = 4096;

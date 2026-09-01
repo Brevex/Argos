@@ -250,7 +250,7 @@ fn cyclic_exif_ifd_chain_terminates_without_a_thumbnail() {
     assert_eq!(argos_carve::jpeg::exif::thumbnail(&payload[6..]), None);
 }
 
-// --- what a recovered image says about itself ------------------------------
+// what a recovered image says about itself
 
 #[test]
 fn a_recovered_image_reports_the_camera_and_the_moment() {

@@ -19,6 +19,10 @@ fn main() -> std::io::Result<()> {
 
     let part = base.join("part_scan");
     fs::create_dir_all(&part)?;
+    #[expect(
+        clippy::single_range_in_vec_init,
+        reason = "one range is one partition extent, not a mistyped length"
+    )]
     let gpt = gpt_image(256 * 1024, &[64..=511]);
     fs::write(part.join("gpt"), &gpt)?;
     fs::write(part.join("gpt-truncated"), truncated(&gpt, gpt.len() / 2))?;

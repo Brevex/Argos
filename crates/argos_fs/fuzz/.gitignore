@@ -2,8 +2,10 @@ target/
 artifacts/
 coverage/
 
-# libFuzzer writes its own discoveries back into the corpus directories under
-# their SHA-1. Those are not seeds: they are unbounded, hash-named and carry no
-# intent. A seed is authored by `examples/gen_fuzz_corpus.rs` and named for the
-# case it covers (A-SUPPORT-DECLARED).
-corpus/*/????????????????????????????????????????
+# The seed corpus is generated, not source. `examples/gen_fuzz_corpus.rs` writes
+# one named seed per case, and the `fuzz` lane runs it before it fuzzes, so the
+# seeds cannot drift from the fixture builders that produce them — which is what
+# happened while they were committed (A-SUPPORT-DECLARED). libFuzzer's own
+# discoveries land here too, under their SHA-1, and are not seeds either: they
+# are unbounded, hash-named and carry no intent.
+corpus/

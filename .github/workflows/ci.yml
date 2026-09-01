@@ -103,6 +103,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked
+      - name: Seed corpora
+        # The seeds are derived from the fixture builders, so they are generated
+        # here rather than committed: a versioned copy drifts from its generator
+        # silently, because libFuzzer accepts any bytes as a seed
+        # (A-SUPPORT-DECLARED).
+        run: |
+          cargo run -p argos_carve --example gen_fuzz_corpus
+          cargo run -p argos_fs --example gen_fuzz_corpus
       - name: Fuzz crates build
         # The fuzz crates are outside the workspace, so clippy and test do
         # not cover them; a target that stopped compiling would otherwise be

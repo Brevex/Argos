@@ -257,7 +257,12 @@ fn png_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     // 16-bit samples arrive as big-endian byte pairs; keep the high byte.
     // Triage needs tone, not tonal depth.
     let samples: Vec<u8> = match depth {
-        BitDepth::Sixteen => samples.chunks_exact(2).map(|pair| pair[0]).collect(),
+        BitDepth::Sixteen => samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| pair[0])
+            .collect(),
         _ => samples,
     };
 
@@ -281,12 +286,12 @@ fn png_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
             }
         }
         2 => {
-            for pair in samples.chunks_exact(2) {
+            for pair in samples.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[pair[0], pair[0], pair[0], pair[1]]);
             }
         }
         3 => {
-            for rgb in samples.chunks_exact(3) {
+            for rgb in samples.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], u8::MAX]);
             }
         }

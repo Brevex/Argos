@@ -360,7 +360,9 @@ fn limits(ceiling: u32) -> Limits {
 /// them: every 4 KiB chunk whose profile can carry a compressed stream.
 fn blocks_of(region: &[u8]) -> Vec<reassemble::Candidate> {
     region
-        .chunks_exact(BLOCK)
+        .as_chunks::<BLOCK>()
+        .0
+        .iter()
         .enumerate()
         .filter_map(|(index, chunk)| {
             let profile = argos_carve::classify::classify(chunk);

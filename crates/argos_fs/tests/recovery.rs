@@ -46,7 +46,7 @@ fn assert_recovers_the_planted_bytes(image: &[u8], file: &FilePlan, extents: &[B
     );
 }
 
-// --- partition tables -----------------------------------------------------
+// partition tables
 
 #[test]
 fn gpt_partitions_are_read_from_the_primary_header() {
@@ -63,6 +63,10 @@ fn gpt_partitions_are_read_from_the_primary_header() {
 
 #[test]
 fn a_wiped_primary_gpt_falls_back_to_the_backup_header() {
+    #[expect(
+        clippy::single_range_in_vec_init,
+        reason = "one range is one partition extent, not a mistyped length"
+    )]
     let mut image = gpt_image(4 * 1024 * 1024, &[2048..=4095]);
     // Destroy LBA 1 — exactly what a quick re-partition does.
     image[SECTOR..2 * SECTOR].fill(0);
@@ -82,6 +86,10 @@ fn a_wiped_primary_gpt_falls_back_to_the_backup_header() {
 
 #[test]
 fn a_corrupt_gpt_crc_is_rejected_not_trusted() {
+    #[expect(
+        clippy::single_range_in_vec_init,
+        reason = "one range is one partition extent, not a mistyped length"
+    )]
     let mut image = gpt_image(4 * 1024 * 1024, &[2048..=4095]);
     // Flip a byte inside the primary entry array; its CRC no longer matches.
     image[2 * SECTOR + 40] ^= 0xFF;
@@ -98,6 +106,10 @@ fn a_corrupt_gpt_crc_is_rejected_not_trusted() {
 
 #[test]
 fn a_truncated_gpt_yields_nothing_rather_than_a_partial_table() {
+    #[expect(
+        clippy::single_range_in_vec_init,
+        reason = "one range is one partition extent, not a mistyped length"
+    )]
     let image = gpt_image(4 * 1024 * 1024, &[2048..=4095]);
     for keep in [0_usize, 100, SECTOR, SECTOR + 200, 3 * SECTOR] {
         let cut = truncated(&image, keep);
@@ -120,7 +132,7 @@ fn plain_mbr_partitions_carry_a_filesystem_hint() {
     assert_eq!(tables.partitions[0].kind_hint, Some(FsKind::Ext4));
 }
 
-// --- NTFS -----------------------------------------------------------------
+// NTFS
 
 #[test]
 fn ntfs_recovers_a_deleted_file_with_name_timestamps_and_extents() {
@@ -528,7 +540,7 @@ fn no_debug_impl_ever_renders_a_name_read_off_the_medium() {
     }
 }
 
-// --- ext4 -----------------------------------------------------------------
+// ext4
 
 #[test]
 fn ext4_recovers_deleted_extents_from_the_journal() {
@@ -726,7 +738,7 @@ fn a_directory_block_with_an_overflowed_record_length_terminates() {
     assert!(entries.len() <= 1);
 }
 
-// --- FAT32 / exFAT --------------------------------------------------------
+// FAT32 / exFAT
 
 #[test]
 fn fat32_recovers_a_deleted_entry_with_its_long_name() {
@@ -794,7 +806,7 @@ fn a_zero_filled_or_truncated_fat_directory_yields_nothing() {
     }
 }
 
-// --- APFS -----------------------------------------------------------------
+// APFS
 
 #[test]
 fn apfs_recovers_an_inode_present_in_an_older_checkpoint() {
@@ -853,7 +865,7 @@ fn a_cyclic_apfs_tree_terminates_instead_of_looping() {
     );
 }
 
-// --- btrfs ----------------------------------------------------------------
+// btrfs
 
 /// The fixture volume size every btrfs case uses: enough for the metadata
 /// chunk plus room to plant content past it.
@@ -1168,7 +1180,7 @@ fn residue_sweep_finds_a_btrfs_volume_under_a_later_format() {
     assert_recovers_the_planted_bytes(&image, &file, &found[0].extents);
 }
 
-// --- residue sweep --------------------------------------------------------
+// residue sweep
 
 #[test]
 fn residue_sweep_finds_a_filesystem_two_reformats_ago() {
@@ -1252,7 +1264,7 @@ fn zero_filled_and_random_regions_yield_no_anchors() {
     );
 }
 
-// --- regressions: extents must point at the real bytes ---------------------
+// regressions: extents must point at the real bytes
 
 #[test]
 fn a_resident_data_extent_points_at_the_payload_in_the_record() {
@@ -1483,7 +1495,7 @@ fn every_recovery_records_its_source_filesystem_object() {
     );
 }
 
-// --- regressions: corrupt geometry must not drive allocation ---------------
+// regressions: corrupt geometry must not drive allocation
 
 #[test]
 fn an_absurd_exfat_cluster_size_is_rejected_before_any_allocation() {
@@ -1527,6 +1539,10 @@ fn an_exfat_size_field_cannot_claim_more_than_the_volume() {
 
 #[test]
 fn an_absurd_gpt_entry_size_is_rejected_before_any_allocation() {
+    #[expect(
+        clippy::single_range_in_vec_init,
+        reason = "one range is one partition extent, not a mistyped length"
+    )]
     let image = gpt_image(4 * 1024 * 1024, &[2048..=4095]);
     // Claim 2 MiB per entry: the array would be gigabytes.
     let mut broken = with_u32_le(&image, SECTOR + 84, 1 << 21);

@@ -90,7 +90,7 @@ pub fn engine(binary: &str) -> Command {
     command
 }
 
-// ---------------------------------------------------------------- Linux
+// Linux
 
 /// Linux: relaunch through `pkexec`, or put the session back and proceed.
 #[cfg(target_os = "linux")]
@@ -165,7 +165,7 @@ fn platform_report(reason: &str) {
     eprintln!("argos: {reason}");
 }
 
-// ---------------------------------------------------------------- Windows
+// Windows
 
 /// Windows: the manifest already asked, and Windows already prompted.
 #[cfg(windows)]
@@ -178,7 +178,7 @@ fn platform_report(reason: &str) {
     eprintln!("argos: {reason}");
 }
 
-// ---------------------------------------------------------------- macOS
+// macOS
 
 /// macOS: relaunch through `osascript` unless this is the relaunched copy.
 #[cfg(target_os = "macos")]
@@ -262,7 +262,7 @@ fn platform_report(reason: &str) {
     let _ = Command::new("osascript").arg("-e").arg(alert).status();
 }
 
-// ---------------------------------------------------------------- other
+// other
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn platform_start() -> Start {

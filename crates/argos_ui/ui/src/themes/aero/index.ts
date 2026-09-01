@@ -1,31 +1,7 @@
 import { theme } from '../contract';
 
 /**
- * Aero: the glass desktop of Windows 7.
- *
- * This is a port, not a reconstruction. Every fill, edge, shadow and glyph
- * below comes from **7-Aero-Stylesheet** by Z2r-YT (MIT; the licence travels
- * with it, in `LICENSE-7-Aero-Stylesheet.txt`), which reproduces that desktop
- * in plain CSS. Its window is built the way this one is — a frame, a title bar
- * with a control group hanging off its right, and an opaque body inside — so
- * the mapping is one rule to one token and nothing had to be invented to make
- * it fit.
- *
- * Two things the source does that a token cannot carry, and how they are
- * handled here:
- *
- * - Its gradients run `0deg`, which in CSS is bottom to top. Every one of them
- *   is written here as `180deg` with the stops reversed, so the numbers read in
- *   the order the eye meets them.
- * - Its `.window` blurs what is behind it. There, that is the page's own
- *   wallpaper and the blur works. Here the window is a transparent Tauri
- *   window over a desktop no filter inside a web view can reach, so the tint
- *   is carried at the source's own alpha and the blur is left declared and
- *   inert — never faked with a picture of the desktop.
- *
- * What is not from the source is marked where it appears: this application has
- * a primary button, a progress arc and a scrollbar that the source has no
- * equivalent for, and those are built from its own palette.
+ * Aero: the glass desktop.
  */
 export default theme({
   id: 'aero',
@@ -35,7 +11,7 @@ export default theme({
   // switch is a decade too late for this window.
   controls: { checkbox: 'checkbox', choice: 'radio' },
   tokens: {
-    // ---------------------------------------------------------------- frame
+    // frame
     // `.window`: a translucent blue wash, a white band low on the glass, a
     // black outline and a white line just inside it.
     '--backdrop': 'rgba(70, 162, 255, 0.37)',
@@ -73,7 +49,7 @@ export default theme({
       '0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff, ' +
       '0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff, 0 0 10px #fff',
 
-    // ------------------------------------------------------- caption group
+    // caption group
     // `.title-bar-controls`: pulled up so the buttons meet the window's top
     // edge, 20px tall, 27px wide, and 45px for the close.
     '--winbtn-align': 'flex-start',
@@ -133,7 +109,7 @@ export default theme({
     '--winbtn-group-border-off': 'transparent',
     '--winbtn-divider-off': 'rgba(0, 0, 0, 0.18)',
 
-    // ---------------------------------------------------------------- panes
+    // panes
     // `fieldset`: a hairline in `#cdd7db` with a white line inside it.
     '--pane': '#f0eff2',
     '--pane-blur': 'none',
@@ -157,7 +133,7 @@ export default theme({
     // behind it, and behind a dialog is a light window.
     '--scrim': 'rgba(12, 32, 56, 0.62)',
 
-    // ----------------------------------------------------------------- rows
+    // rows
     // Not in the source, which has no list. Built from its own hover blues.
     '--row': 'transparent',
     '--row-hover': 'linear-gradient(180deg, #f3f9fe 0%, #eaf6fd 51%, #d9f0fc 51%, #cbe8fb 100%)',
@@ -177,7 +153,7 @@ export default theme({
       'inset 0 0 0 1.5px #f4f4f4, inset 1px 1px 0 1.5px #aeaeae, ' +
       'inset -1px 0 0 1.5px #dddddd, inset 3px 3px 6px #cccccc',
 
-    // --------------------------------------------------------------- fields
+    // fields
     // A list box and a text field on this desktop are white, cut into the
     // surface with the fieldset's hairline and its white inner line.
     '--inset': '#ffffff',
@@ -193,7 +169,7 @@ export default theme({
     '--track-lit': '#fcfcfc',
     '--track-shadow': 'inset 0 1px 3px rgba(0, 0, 0, 0.16)',
 
-    // -------------------------------------------------------------- buttons
+    // buttons
     // `button`, verbatim: a four-stop gradient with the break at the middle,
     // a grey outline and a white line inside it. Hover turns it blue; the
     // press darkens it and lays a two-pixel lit edge inside.
@@ -235,7 +211,7 @@ export default theme({
     '--focus-outline': '1px dotted #000000',
     '--focus-offset': '-3px',
 
-    // ------------------------------------------------------------- progress
+    // progress
     // Not in the source. The green is the one Windows 7's own progress bar
     // used, and the bands either side of it are mixed from it.
     '--ring': '#00d328',
@@ -252,7 +228,7 @@ export default theme({
     '--sheen-duration': '2.1s',
     '--sheen-easing': 'cubic-bezier(0.45, 0, 0.55, 1)',
 
-    // ------------------------------------------------------------- controls
+    // controls
     // The switch is not this theme's idiom, but the contract is total, so it
     // is drawn in the same greys and blues as everything else.
     '--switch-track': 'linear-gradient(180deg, #cfcfcf 0%, #ebebeb 100%)',
@@ -298,7 +274,7 @@ export default theme({
     '--scrollbar-border': '#cdd7db',
     '--scrollbar-radius': '0.14rem',
 
-    // --------------------------------------------------------------- ground
+    // ground
     '--scanlines': 'none',
     '--text-glow': 'none',
     '--bevel-raised': 'inset 0 0 0 1px #fcfcfc',

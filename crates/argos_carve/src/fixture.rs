@@ -539,8 +539,6 @@ fn ifd_entry(tiff: &mut Vec<u8>, tag: u16, kind: u16, value: u32) {
     tiff.extend_from_slice(&value.to_le_bytes());
 }
 
-// --- fragmented layouts ----------------------------------------------------
-
 /// A fragmented image planted on a disk, with the ground truth to check
 /// against.
 #[derive(Clone, Debug)]
@@ -626,8 +624,6 @@ pub fn fragmented(len: usize, image: &[u8], starts: &[usize], block: usize) -> F
         disk: disk.into_bytes(),
     }
 }
-
-// --- decodable images ------------------------------------------------------
 
 /// A real, decodable JPEG of `width` x `height` with photograph-like content.
 ///
@@ -822,8 +818,6 @@ pub fn icon_png(size: u32, seed: u32) -> Vec<u8> {
     }
     png_from_raw(size, size, &raw)
 }
-
-// --- large media -----------------------------------------------------------
 
 /// Filler byte at `at`, from a position-keyed generator.
 ///

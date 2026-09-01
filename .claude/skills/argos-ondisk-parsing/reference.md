@@ -42,7 +42,9 @@ Each public parser entry point gets a `cargo-fuzz` target feeding it arbitrary b
 the same change that introduces the parser. The property under fuzz is total: for any input, the
 parser returns `Ok` or `Err` in bounded time and bounded memory — no panic, no OOM, no hang.
 Fuzz targets live in the owning crate's `fuzz/` directory; CI runs each target for a fixed budget,
-and interesting corpus entries are committed under `fuzz/corpus/`.
+and the seed corpus under `fuzz/corpus/` is **generated, not committed**: a committed generator
+writes one named seed per case, and the lane that fuzzes runs it first. A reproducer found by hand
+is added to the generator, where it acquires the name and the intent a seed is required to carry.
 
 ## Every parser ships a fixture builder and corrupt-input tests (A-FIXTURE-BUILDER) { #A-FIXTURE-BUILDER }
 

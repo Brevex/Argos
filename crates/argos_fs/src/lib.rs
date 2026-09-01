@@ -43,20 +43,17 @@ pub use argos_core::Timestamps;
 pub mod fixture;
 
 /// Filesystem family a volume or finding belongs to.
+///
+/// [`FsKind::Ext4`] covers ext2 and ext3 as well; [`FsKind::Apfs`] is the
+/// container, not a volume inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum FsKind {
-    /// NTFS.
     Ntfs,
-    /// ext2/ext3/ext4.
     Ext4,
-    /// FAT32.
     Fat32,
-    /// exFAT.
     ExFat,
-    /// APFS container.
     Apfs,
-    /// btrfs.
     Btrfs,
 }
 
@@ -287,7 +284,9 @@ pub(crate) fn read_at<R: Read + Seek>(
 /// any on-disk length (A-BOUNDED-ALLOC).
 pub(crate) fn utf16le_name(raw: &[u8], max_chars: usize) -> Option<String> {
     let units: Vec<u16> = raw
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .take(max_chars)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|&unit| unit != 0)

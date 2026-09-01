@@ -23,7 +23,7 @@ export default theme({
   scheme: 'dark',
   controls: { checkbox: 'switch', choice: 'dot' },
   tokens: {
-    // ---------------------------------------------------------------- frame
+    // frame
     '--backdrop': '#14171d',
     // A wide, very dim pool of light behind the window, so the translucent
     // panes have something to be translucent against.
@@ -50,7 +50,7 @@ export default theme({
     '--titlebar-text-weight': '600',
     '--titlebar-text-shadow': 'none',
 
-    // ------------------------------------------------------- caption group
+    // caption group
     // Three glyphs beside the title, each its own target: no strip, no
     // dividers, and a corner soft enough to belong to this window without
     // becoming a pill.
@@ -97,7 +97,7 @@ export default theme({
     '--winbtn-group-border-off': 'transparent',
     '--winbtn-divider-off': 'rgba(255, 255, 255, 0.14)',
 
-    // ---------------------------------------------------------------- panes
+    // panes
     '--pane': 'rgba(255, 255, 255, 0.045)',
     '--pane-blur': 'blur(24px) saturate(140%)',
     '--pane-border': 'rgba(255, 255, 255, 0.09)',
@@ -117,7 +117,7 @@ export default theme({
     '--dialog-blur': 'blur(24px) saturate(140%)',
     '--scrim': 'rgba(4, 5, 7, 0.62)',
 
-    // ----------------------------------------------------------------- rows
+    // rows
     '--row': 'transparent',
     '--row-hover': 'rgba(255, 255, 255, 0.055)',
     '--row-selected': 'rgba(47, 124, 246, 0.17)',
@@ -131,7 +131,7 @@ export default theme({
     '--choice-mark': 'radial-gradient(circle at 50% 50%, #4d94ff 0 55%, transparent 58%)',
     '--choice-shadow': 'none',
 
-    // --------------------------------------------------------------- fields
+    // fields
     '--inset': 'rgba(0, 0, 0, 0.28)',
     '--inset-border': 'rgba(255, 255, 255, 0.08)',
     '--inset-border-hover': 'rgba(255, 255, 255, 0.16)',
@@ -142,7 +142,7 @@ export default theme({
     '--track-lit': 'rgba(255, 255, 255, 0.11)',
     '--track-shadow': 'none',
 
-    // -------------------------------------------------------------- buttons
+    // buttons
     '--action': 'linear-gradient(180deg, #4d94ff, #2f7cf6)',
     '--action-hover': 'linear-gradient(180deg, #63a3ff, #3f88f8)',
     '--action-active': 'linear-gradient(180deg, #2f7cf6, #2569d4)',
@@ -170,7 +170,7 @@ export default theme({
     '--focus-outline': '2px solid #4d94ff',
     '--focus-offset': '2px',
 
-    // ------------------------------------------------------------- progress
+    // progress
     '--ring': '#2f7cf6',
     '--ring-highlight': 'color-mix(in srgb, var(--ring) 62%, #ffffff)',
     '--ring-edge': 'color-mix(in srgb, var(--ring) 78%, #0a0d14)',
@@ -187,7 +187,7 @@ export default theme({
     '--sheen-duration': '2.6s',
     '--sheen-easing': 'cubic-bezier(0.45, 0, 0.55, 1)',
 
-    // ------------------------------------------------------------- controls
+    // controls
     // A pill, because everything else here is soft-cornered.
     '--switch-track': 'rgba(255, 255, 255, 0.12)',
     '--switch-track-on': '#4d94ff',
@@ -220,7 +220,7 @@ export default theme({
     '--scrollbar-border': 'transparent',
     '--scrollbar-radius': '99px',
 
-    // --------------------------------------------------------------- ground
+    // ground
     '--scanlines': 'none',
     '--text-glow': 'none',
     '--bevel-raised': 'none',

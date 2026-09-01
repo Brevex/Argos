@@ -139,7 +139,7 @@ fn transparency_settles_an_image_on_its_own() {
     // scan or screenshot; transparency is an authoring feature. Half the
     // pixels here are transparent, which no sensor produces.
     let mut pixels = vec![255_u8; 64 * 64 * 4];
-    for (index, chunk) in pixels.chunks_exact_mut(4).enumerate() {
+    for (index, chunk) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         chunk[3] = if index % 2 == 0 { 0 } else { 255 };
     }
     let image = PixelImage::new(64, 64, pixels);

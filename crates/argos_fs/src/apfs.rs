@@ -499,7 +499,7 @@ fn fletcher64_ok(block: &[u8]) -> bool {
     }
     let mut sum1 = 0_u64;
     let mut sum2 = 0_u64;
-    for word in body.chunks_exact(4) {
+    for word in body.as_chunks::<4>().0 {
         let value = u64::from(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
         sum1 = (sum1 + value) % FLETCHER_MODULUS;
         sum2 = (sum2 + sum1) % FLETCHER_MODULUS;
@@ -522,7 +522,7 @@ fn fletcher64_ok(block: &[u8]) -> bool {
 pub(crate) fn fletcher64(body: &[u8]) -> u64 {
     let mut sum1 = 0_u64;
     let mut sum2 = 0_u64;
-    for word in body.chunks_exact(4) {
+    for word in body.as_chunks::<4>().0 {
         let value = u64::from(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
         sum1 = (sum1 + value) % FLETCHER_MODULUS;
         sum2 = (sum2 + sum1) % FLETCHER_MODULUS;

@@ -351,7 +351,7 @@ impl Fat {
 
     fn fat32_subdirectories(dir: &[u8]) -> Vec<u64> {
         let mut out = Vec::new();
-        for entry in dir.chunks_exact(32) {
+        for entry in dir.as_chunks::<32>().0 {
             let first = entry[0];
             if first == 0 {
                 break;
@@ -418,7 +418,7 @@ impl Fat {
     fn fat32_deleted(&self, dir: &[u8]) -> Vec<DeletedFile> {
         let mut out = Vec::new();
         let mut fragments: Vec<(u8, String)> = Vec::new();
-        for entry in dir.chunks_exact(32) {
+        for entry in dir.as_chunks::<32>().0 {
             let first = entry[0];
             if first == 0 {
                 break; // End of directory.
@@ -548,7 +548,9 @@ fn long_name_fragment(entry: &[u8]) -> Option<String> {
     raw.extend_from_slice(entry.get(28..32)?);
     // Fragments are not NUL-terminated mid-name; stop at padding.
     let units: Vec<u16> = raw
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .take_while(|&unit| unit != 0 && unit != 0xFFFF)
         .collect();

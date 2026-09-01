@@ -321,27 +321,18 @@
 
 <style>
   /*
-   * The frame. The system draws no decorations, so the edge, the corner and
-   * the shadow around this application are these rules and nothing else.
+   * The frame and the layout's scale.
    *
-   * Two lines, not one: the border is the dark edge against the desktop and
-   * the overlay below it is the bright line just inside — which is how a
-   * window of one generation is drawn and, at a hairline width, exactly how a
-   * window of another is.
-   */
-  /*
-   * The layout's own scale.
+   * The system draws no decorations, so the edge, the corner and the shadow
+   * around this application are these rules and nothing else.
    *
-   * Every measure that dominates the window's height is derived from the
-   * window's height, with a floor and a ceiling: the blocks shrink together as
-   * the window does, so the content fits at the smallest size the window can
-   * take and nothing ever has to scroll. `vh` rather than a media query
-   * because the frame is continuous — there is no size at which the layout
-   * becomes a different layout.
-   *
-   * These are the layout's, not a theme's. A theme decides colour, edge,
-   * corner, texture and typeface; where a control sits and how big it is are
-   * the same under all of them.
+   * Every measure that dominates the window's height is derived from it, with
+   * a floor and a ceiling, so the blocks shrink together and nothing ever has
+   * to scroll. `vh` rather than a media query because the frame is continuous:
+   * there is no size at which the layout becomes a different layout. These
+   * measures are the layout's, never a theme's — a theme decides colour, edge,
+   * corner, texture and typeface, and a control sits in the same place under
+   * all of them.
    */
   .window {
     --block-gap: clamp(0.5rem, 1.45vh, 1.1rem);

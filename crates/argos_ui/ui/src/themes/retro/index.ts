@@ -27,7 +27,7 @@ export default theme({
   // Brackets: the only mark a character display had for either question.
   controls: { checkbox: 'bracket', choice: 'bracket' },
   tokens: {
-    // ---------------------------------------------------------------- frame
+    // frame
     '--backdrop': '#030b05',
     '--backdrop-glow': 'none',
     '--backdrop-noise': 'none',
@@ -50,7 +50,7 @@ export default theme({
     '--titlebar-text-weight': '600',
     '--titlebar-text-shadow': '0 0 0.42em rgba(104, 240, 104, 0.5)',
 
-    // ------------------------------------------------------- caption group
+    // caption group
     // Three bare glyphs on the character grid, each one cell wide, with no
     // strip and no dividers — all a terminal would have drawn.
     '--winbtn-align': 'center',
@@ -92,7 +92,7 @@ export default theme({
     '--winbtn-group-border-off': 'transparent',
     '--winbtn-divider-off': 'transparent',
 
-    // ---------------------------------------------------------------- panes
+    // panes
     // A pane is the same ground as the window with a rule drawn around it.
     '--pane': '#030b05',
     '--pane-blur': 'none',
@@ -109,7 +109,7 @@ export default theme({
     '--dialog-blur': 'none',
     '--scrim': 'rgba(3, 11, 5, 0.72)',
 
-    // ----------------------------------------------------------------- rows
+    // rows
     '--row': 'transparent',
     '--row-hover': '#0b2211',
     '--row-selected': '#0f3018',
@@ -123,7 +123,7 @@ export default theme({
     '--choice-mark': '#6dff6d',
     '--choice-shadow': 'none',
 
-    // --------------------------------------------------------------- fields
+    // fields
     '--inset': '#020803',
     '--inset-border': '#3ca84c',
     '--inset-border-hover': '#6dff6d',
@@ -134,7 +134,7 @@ export default theme({
     '--track-lit': '#24682f',
     '--track-shadow': 'none',
 
-    // -------------------------------------------------------------- buttons
+    // buttons
     // Outlined, not filled: the border and the label carry it, the way a
     // terminal drew a control it could not shade. Hover inverts.
     '--action': 'transparent',
@@ -165,7 +165,7 @@ export default theme({
     '--focus-outline': '1px solid #a6ffa6',
     '--focus-offset': '1px',
 
-    // ------------------------------------------------------------- progress
+    // progress
     '--ring': '#68f068',
     '--ring-highlight': 'var(--ring)',
     '--ring-edge': 'var(--ring)',
@@ -183,7 +183,7 @@ export default theme({
     '--sheen-duration': '0s',
     '--sheen-easing': 'linear',
 
-    // ------------------------------------------------------------- controls
+    // controls
     '--switch-track': '#020803',
     '--switch-track-on': '#0b3a12',
     '--switch-border': '#3ca84c',
@@ -216,7 +216,7 @@ export default theme({
     '--scrollbar-border': '#3ca84c',
     '--scrollbar-radius': '0',
 
-    // --------------------------------------------------------------- ground
+    // ground
     // Rows, and only rows: a display drew in lines, so the texture is lines —
     // one unlit row in every two, at the smallest pitch that survives being
     // drawn. It goes on lit surfaces and on nothing else, so the frame, the

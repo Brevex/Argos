@@ -12,7 +12,7 @@ const SHA256_1234: &str = "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c7
 
 fn digest(hex: &str) -> Digest {
     let mut bytes = [0_u8; Digest::LEN];
-    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
         let text = std::str::from_utf8(pair).expect("ascii hex");
         *byte = u8::from_str_radix(text, 16).expect("hex byte");
     }

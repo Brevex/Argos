@@ -21,7 +21,7 @@ pub(crate) const MANIFEST_FILE: &str = "manifest.json";
 /// The scan manifest: tool identity, source description and every artifact.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Manifest {
-    /// Version of the tool that produced this manifest.
+    /// `CARGO_PKG_VERSION` of the binary that wrote this file.
     pub tool_version: String,
     /// User-supplied description of the scanned source (path or label).
     pub source: String,
@@ -69,7 +69,11 @@ pub struct Manifest {
     /// (`A-CONFIDENCE-HONEST`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost_files: Vec<LostFileRecord>,
-    /// One record per recovered artifact.
+    /// One record per artifact the run accounted for.
+    ///
+    /// Includes the ones deliberately not written — see
+    /// [`CoverageRecord::omitted_assets`] — so this is the complete account of
+    /// the medium rather than a listing of the output directory.
     pub artifacts: Vec<ArtifactRecord>,
 }
 
@@ -349,7 +353,7 @@ pub struct TriageAnnotation {
     pub perceptual_hash: Option<String>,
     /// SHA-256 of the artifact this one is a near-duplicate of.
     pub near_duplicate_of: Option<String>,
-    /// Triage label.
+    /// Triage label: `photograph`, `synthetic-asset` or `ambiguous`.
     pub label: Option<String>,
     /// The property that settled the label.
     pub decided_by: Option<String>,

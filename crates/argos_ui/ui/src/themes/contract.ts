@@ -43,7 +43,6 @@
  * nobody remembered to update.
  */
 export const THEME_TOKENS = [
-  // ---------------------------------------------------------------- frame --
   // The frame band itself — the surface between the window's outer edge and
   // its client area, which the title bar is part of rather than sitting on
   // top of. Where a theme leaves it translucent, the real desktop shows
@@ -87,7 +86,6 @@ export const THEME_TOKENS = [
   '--titlebar-text-weight',
   '--titlebar-text-shadow',
 
-  // ------------------------------------------------------- caption group --
   // Minimise, maximise and close: where the group sits against the frame, how
   // big its buttons are, and what one looks like in each of its states.
   //
@@ -143,7 +141,6 @@ export const THEME_TOKENS = [
   '--winbtn-group-border-off',
   '--winbtn-divider-off',
 
-  // ---------------------------------------------------------------- panes --
   // `--pane` is a fill; `--pane-blur` is the backdrop filter behind it. A
   // theme with no translucency sets the fill opaque and the blur to `none`,
   // and the layout is unchanged.
@@ -180,7 +177,6 @@ export const THEME_TOKENS = [
   '--dialog-inset',
   '--dialog-blur',
 
-  // ----------------------------------------------------------------- rows --
   // Rows in the drive table, and the one that is selected.
   '--row',
   '--row-hover',
@@ -198,7 +194,6 @@ export const THEME_TOKENS = [
   '--choice-mark',
   '--choice-shadow',
 
-  // --------------------------------------------------------------- fields --
   // Inset surfaces: the destination field, the job cards, the progress track.
   // `--inset-shadow` is the sunken bevel — the dark line along the top inside
   // edge and the light one along the bottom that make a surface read as cut
@@ -218,7 +213,6 @@ export const THEME_TOKENS = [
   '--track-lit',
   '--track-shadow',
 
-  // -------------------------------------------------------------- buttons --
   // Three kinds, and the layout uses no others: the button that runs the job,
   // the ordinary button, and the one that is a word rather than an object.
   //
@@ -261,7 +255,6 @@ export const THEME_TOKENS = [
   '--focus-outline',
   '--focus-offset',
 
-  // ------------------------------------------------------------- progress --
   // What the arcs are made of. `--ring` is set by the layout from the state
   // of the run and read by everything else here, so a theme can derive the
   // rest from whatever colour the state put there.
@@ -296,7 +289,6 @@ export const THEME_TOKENS = [
   '--sheen-duration',
   '--sheen-easing',
 
-  // ------------------------------------------------------------- controls --
   // A binary control drawn as a sliding switch.
   '--switch-track',
   '--switch-track-on',
@@ -342,7 +334,6 @@ export const THEME_TOKENS = [
   '--scrollbar-border',
   '--scrollbar-radius',
 
-  // --------------------------------------------------------------- ground --
   // The texture of a lit surface, laid over the fill of the panes, the table,
   // the field, the statistics strip and the progress arcs — and over nothing
   // else. A display that drew in rows leaves rows; the frame, the title and
