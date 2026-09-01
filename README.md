@@ -64,16 +64,3 @@ gh workflow run release.yml
 
 To run the engine alone, without building the window: `cargo build --release -p argos` and use
 `target/release/argos`.
-
-## Checks
-
-```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-## License
-
-MIT — see [LICENSE](LICENSE). The Selawik typeface and the guideline text adapted
-from Microsoft's Pragmatic Rust Guidelines keep their own, named there.
