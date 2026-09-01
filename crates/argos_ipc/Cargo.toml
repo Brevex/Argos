@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # No workspace dependency belongs here, and that absence is the point: a crate
 # that cannot name an engine type cannot leak one onto the wire

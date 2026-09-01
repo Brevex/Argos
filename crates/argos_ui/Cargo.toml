@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 publish = false
+license = "MIT"
 description = "Argos presentation shell"
 
 # Its own workspace: excluded from the engine's, so the Tauri dependency tree

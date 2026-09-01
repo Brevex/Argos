@@ -17,6 +17,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 publish = false
+license = "MIT"
 
 [workspace.dependencies]
 argos_carve = { path = "crates/argos_carve", version = "0.1.0" }
