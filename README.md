@@ -5,7 +5,7 @@ Deleted image recovery tool for HDD, SSD and NVMe. The medium is opened read-onl
 Carves JPEG and PNG from the raw surface, recovers from NTFS, ext2/3/4, FAT32, exFAT, APFS and
 btrfs metadata, and reassembles photographs the medium stored in pieces
 
-![Argos](docs/images/tela-inicial.png)
+![Argos](docs/images/argos.png)
 
 ## Dependencies
 
