@@ -236,6 +236,10 @@ fn a_single_worker_scan_recovers_exactly_what_a_parallel_one_does() {
                 .arg("--out")
                 .arg(&out)
                 .args(["--jobs", jobs])
+                // The fixtures here are a few pixels across and this test is
+                // about what the workers agree on, not about which sizes reach
+                // a directory.
+                .args(["--min-long-side", "0"])
                 .output()
                 .expect("run argos scan");
             assert!(

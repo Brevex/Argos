@@ -324,13 +324,14 @@ pub struct Artifact<'a> {
     pub source_object: Option<u64>,
     /// For an embedded thumbnail, the offset of the candidate it was found in.
     pub parent: Option<ByteOffset>,
-    /// Width and height of the decoded picture, when it decoded.
+    /// Width and height of the picture, as its own frame header declares them.
     ///
     /// The one property that tells a photograph from the derived images a used
     /// disk is full of — cache entries, icons, avatars — and the one a reader
-    /// of the manifest cannot work out from a byte count. Absent when the
-    /// artifact did not decode, which is a statement about the decoder and not
-    /// about the bytes.
+    /// of the manifest cannot work out from a byte count. Absent when no frame
+    /// header was found or the frame it declares is outside the bounds this
+    /// tool works within, which is a statement about the header and not about
+    /// the bytes.
     pub pixels: Option<(u32, u32)>,
     /// What the picture records about itself and the camera that made it.
     pub capture: &'a Capture,

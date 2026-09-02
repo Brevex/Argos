@@ -54,6 +54,7 @@ pub use config::{
     DEFAULT_MIN_LONG_SIDE, DEFAULT_REASSEMBLY_BUDGET, ScanConfig, ScanConfigBuilder, Stages,
 };
 pub use finding::{CacheRun, Ceilings, Finding, ScanReport};
+pub use pipeline::Counter;
 pub use session::{Medium, ScanSession};
 
 /// Merges findings the way a scan does, for tests that need to drive the

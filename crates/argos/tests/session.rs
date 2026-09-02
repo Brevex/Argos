@@ -297,3 +297,48 @@ fn an_ambiguous_selection_is_refused_rather_than_guessed() {
     let text = String::from_utf8_lossy(&output.stderr);
     assert!(text.contains("too short"), "{text}");
 }
+
+#[test]
+fn the_manifest_stage_announces_itself_after_the_last_artifact_is_written() {
+    // A scan that has written its artifacts still has the annotation joins and
+    // the manifest ahead of it. On a whole-disk recovery that is the last
+    // stretch of a run measured in hours, and a stretch that says nothing
+    // reads, from outside, exactly like a run that has stopped.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let disk = Disk::filled(1024 * 1024)
+        .with(10_000, &photo_jpeg(320, 240, 0x5EED_0001))
+        .into_bytes();
+    let image = dir.path().join("fixture.img");
+    std::fs::write(&image, &disk).expect("write fixture disk");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .arg("scan")
+        .arg(&image)
+        .arg("--out")
+        .arg(dir.path().join("session"))
+        .args(["--min-long-side", "0"])
+        .output()
+        .expect("run argos scan");
+    assert!(output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+
+    let stage_line = |name: &str| {
+        said.lines().position(|line| {
+            line.trim_start().starts_with(&format!("{name} ")) && line.contains("done")
+        })
+    };
+    let report = stage_line("report").expect("the writing stage says it finished");
+    let manifest = stage_line("manifest").unwrap_or_else(|| {
+        panic!("nothing announced the manifest stage; a run ends in silence:\n{said}")
+    });
+    assert!(
+        manifest > report,
+        "the manifest stage must come after the artifacts it describes:\n{said}"
+    );
+    assert!(
+        said.lines()
+            .skip(manifest + 1)
+            .all(|line| !line.contains("done")),
+        "the manifest is the last stage of a run:\n{said}"
+    );
+}

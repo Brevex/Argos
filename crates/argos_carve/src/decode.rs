@@ -200,6 +200,27 @@ pub fn decode_rgba(format: Format, bytes: &[u8]) -> Option<PixelImage> {
     Some(PixelImage::new(width, height, rgba))
 }
 
+/// The frame dimensions `bytes` declares, without decoding a pixel of it.
+///
+/// Same bounds as [`decode_rgba`], because it is the same header parse: a frame
+/// this module would refuse to materialize has no dimensions to report either.
+///
+/// Where the full decode succeeds the two agree by construction —
+/// [`decode_rgba`] sizes its expectation from these numbers and refuses an
+/// image whose plane does not match. They differ only for bytes whose header
+/// parses and whose scan data does not decode, which this answers for and
+/// [`decode_rgba`] does not.
+#[must_use]
+pub fn dimensions(format: Format, bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() > MAX_DECODE_BYTES {
+        return None;
+    }
+    match format {
+        Format::Jpeg => jpeg_frame(&mut jpeg_decoder(bytes)),
+        Format::Png => png_frame(&mut png_decoder(bytes)),
+    }
+}
+
 /// The pixel count of a `width` by `height` frame, when it is one this module
 /// will materialize.
 ///
@@ -212,43 +233,71 @@ fn affordable(width: u32, height: u32) -> Option<u64> {
 
 /// Decodes a JPEG to interleaved RGBA.
 fn jpeg_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    // Not strict: triage scores images that already passed structural
-    // validation, so a tolerant decode that yields pixels is the useful one —
-    // this is scoring, not the reassembly oracle above.
+    let mut decoder = jpeg_decoder(bytes);
+    let (width, height) = jpeg_frame(&mut decoder)?;
+    let rgba = decoder.decode().ok()?;
+    Some((width, height, rgba))
+}
+
+/// A decoder over `bytes`, bounded the way this module bounds every decode.
+///
+/// Not strict: triage scores images that already passed structural validation,
+/// so a tolerant decode that yields pixels is the useful one — this is
+/// scoring, not the reassembly oracle above.
+fn jpeg_decoder(bytes: &[u8]) -> JpegDecoder<std::io::Cursor<&[u8]>> {
     let options = DecoderOptions::default()
         .jpeg_set_out_colorspace(ColorSpace::RGBA)
         .set_max_width(MAX_FRAME_EDGE)
         .set_max_height(MAX_FRAME_EDGE);
-    let mut decoder = JpegDecoder::new_with_options(std::io::Cursor::new(bytes), options);
-    // Headers first: this parses the frame header without sizing anything
-    // from it, so the area check below happens before the decoder allocates.
+    JpegDecoder::new_with_options(std::io::Cursor::new(bytes), options)
+}
+
+/// The frame `decoder` declares, checked against what this module will
+/// materialize, leaving the decoder ready to decode it.
+///
+/// Headers first: this parses the frame header without sizing anything from
+/// it, so the area check happens before the decoder allocates.
+fn jpeg_frame(decoder: &mut JpegDecoder<std::io::Cursor<&[u8]>>) -> Option<(u32, u32)> {
     decoder.decode_headers().ok()?;
     let (width, height) = decoder.dimensions()?;
     let width = u32::try_from(width).ok()?;
     let height = u32::try_from(height).ok()?;
     affordable(width, height)?;
+    Some((width, height))
+}
 
-    let rgba = decoder.decode().ok()?;
-    Some((width, height, rgba))
+/// A PNG decoder over `bytes`, bounded the way this module bounds every decode.
+fn png_decoder(bytes: &[u8]) -> zune_png::PngDecoder<std::io::Cursor<&[u8]>> {
+    use zune_png::zune_core::options::DecoderOptions as PngOptions;
+
+    let options = PngOptions::default()
+        .set_max_width(MAX_FRAME_EDGE)
+        .set_max_height(MAX_FRAME_EDGE);
+    zune_png::PngDecoder::new_with_options(std::io::Cursor::new(bytes), options)
+}
+
+/// The frame `decoder` declares, checked against what this module will
+/// materialize, leaving the decoder ready to decode it.
+///
+/// Same reasoning as the JPEG path: `IHDR` is parsed here, and the area it
+/// declares is checked before `decode_raw` sizes a buffer from it.
+fn png_frame(decoder: &mut zune_png::PngDecoder<std::io::Cursor<&[u8]>>) -> Option<(u32, u32)> {
+    decoder.decode_headers().ok()?;
+    let (width, height) = decoder.dimensions()?;
+    let width = u32::try_from(width).ok()?;
+    let height = u32::try_from(height).ok()?;
+    affordable(width, height)?;
+    Some((width, height))
 }
 
 /// Decodes a PNG and expands whatever colorspace it stored to RGBA.
 fn png_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     use zune_png::zune_core::bit_depth::BitDepth;
     use zune_png::zune_core::colorspace::ColorSpace as PngColor;
-    use zune_png::zune_core::options::DecoderOptions as PngOptions;
 
-    let options = PngOptions::default()
-        .set_max_width(MAX_FRAME_EDGE)
-        .set_max_height(MAX_FRAME_EDGE);
-    let mut decoder = zune_png::PngDecoder::new_with_options(std::io::Cursor::new(bytes), options);
-    // Same reasoning as the JPEG path: `IHDR` is parsed here, and the area it
-    // declares is checked before `decode_raw` sizes a buffer from it.
-    decoder.decode_headers().ok()?;
-    let (width, height) = decoder.dimensions()?;
-    let frame_width = u32::try_from(width).ok()?;
-    let frame_height = u32::try_from(height).ok()?;
-    affordable(frame_width, frame_height)?;
+    let mut decoder = png_decoder(bytes);
+    let (frame_width, frame_height) = png_frame(&mut decoder)?;
+    let (width, height) = (frame_width as usize, frame_height as usize);
 
     let samples = decoder.decode_raw().ok()?;
     let depth = decoder.depth()?;

@@ -74,13 +74,18 @@ pub enum Stage {
     Reassembly,
     /// Structural validation, hashing and scoring of candidates.
     Validation,
-    /// Writing artifacts and the manifest.
+    /// Writing artifacts, and describing each one once it is written:
+    /// its preview, its perceptual hash and its triage label all come from the
+    /// bytes this stage is already holding.
     Report,
-    /// Rendering previews of persisted artifacts.
-    Preview,
-    /// ML triage: labeling artifacts photograph vs synthetic asset, after
-    /// they are persisted.
-    Triage,
+    /// Joining what the later stages learned onto the records already written,
+    /// and writing the manifest that describes them.
+    ///
+    /// Last, and never a finding's stage: nothing is recovered here. It is a
+    /// stage because on a whole-disk recovery it is minutes of work between
+    /// the final artifact and the run ending, and a stage that says nothing
+    /// for minutes cannot be told from one that has stopped.
+    Manifest,
 }
 
 impl fmt::Display for Stage {
@@ -92,8 +97,7 @@ impl fmt::Display for Stage {
             Self::Reassembly => "reassembly",
             Self::Validation => "validation",
             Self::Report => "report",
-            Self::Preview => "preview",
-            Self::Triage => "triage",
+            Self::Manifest => "manifest",
         };
         f.write_str(name)
     }

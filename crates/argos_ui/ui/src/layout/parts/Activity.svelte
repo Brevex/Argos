@@ -43,6 +43,10 @@
         // that are not the read: a screen that only ever said "Scanning" while
         // candidates were being validated for ten minutes would look stalled.
         if (session.doing === '') return 'Starting…';
+        // A stage whose figure has stopped moving is still working, and saying
+        // so is more honest than repeating a percentage that has not changed —
+        // which is what a stalled number reads as.
+        if (session.progressStalled) return `${session.doing} — still working`;
         const percent = session.doneOfStage;
         return percent === null ? `${session.doing}…` : `${session.doing} — ${percent}%`;
       }

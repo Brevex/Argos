@@ -9,12 +9,14 @@
         }
       ],
       "format": "jpeg",
+      "height": 8,
       "length": 3239,
       "name": "000000.jpg",
       "sha256": "44bd28d64c8742cb510c7f6520eab542711dfc0326fae10d1ebac720f78cc0c0",
       "source_offset": 65536,
       "stage": "carve",
       "standing": "unremarkable",
+      "width": 8,
       "written": true
     },
     {
@@ -30,6 +32,7 @@
         }
       ],
       "format": "jpeg",
+      "height": 8,
       "length": 3379,
       "name": "000001.jpg",
       "sha256": "70c44419165aa02d06781a6031e659bbd95a13d017c17f45f7a05067bac9072e",
@@ -37,6 +40,7 @@
       "stage": "carve",
       "standing": "camera-named",
       "taken": "2016:07:04 11:22:33",
+      "width": 8,
       "written": true
     },
     {
@@ -48,12 +52,14 @@
         }
       ],
       "format": "jpeg",
+      "height": 8,
       "length": 4993,
       "name": "000002.jpg",
       "sha256": "3ae31cf0a9fcad8f210df7a6eed6a14cf536fdeb03d45162ddb41469075a63cc",
       "source_offset": 1048576,
       "stage": "carve",
       "standing": "unremarkable",
+      "width": 8,
       "written": true
     },
     {
@@ -65,6 +71,7 @@
         }
       ],
       "format": "jpeg",
+      "height": 8,
       "length": 653,
       "name": "000003.jpg",
       "parent_offset": 1048576,
@@ -72,6 +79,7 @@
       "source_offset": 1048662,
       "stage": "carve",
       "standing": "unremarkable",
+      "width": 8,
       "written": true
     },
     {

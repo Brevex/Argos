@@ -11,6 +11,7 @@
 //! name; log and error messages never do (A-NO-CONTENT-IN-LOGS).
 
 use std::backtrace::{Backtrace, BacktraceStatus};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
@@ -38,15 +39,34 @@ pub use manifest::{
 /// (`A-DTO-VERSIONED`).
 pub const PREVIEW_DIR: &str = "previews";
 
+/// Bytes of write buffer the manifest is serialized through.
+const MANIFEST_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// Bytes copied per streaming step while hashing and writing an artifact.
-/// 64 KiB balances syscall count against buffer size.
-const COPY_CHUNK_BYTES: usize = 64 * 1024;
+///
+/// Written straight to the file: a `BufWriter` passes through any write at
+/// least as large as its own capacity, so one sitting under a chunk this size
+/// would absorb nothing but the last short piece of each artifact. One megabyte
+/// puts a three-megabyte photograph on disk in three writes rather than
+/// forty-eight, and is the same buffer for every artifact of a run
+/// (`M-MEM-REUSE`).
+const COPY_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// Writes artifacts and the manifest into one output directory.
 #[derive(Debug)]
 pub struct Store {
     dir: PathBuf,
     records: Vec<ArtifactRecord>,
+    /// Where each digest's record sits in `records`, so an annotation reaches
+    /// its record in one lookup rather than by walking every record before it.
+    /// A whole-disk recovery writes hundreds of thousands of them, and each is
+    /// annotated three times.
+    ///
+    /// Keyed by the 32-byte digest rather than by the hex string the record
+    /// serialises, so a join costs no allocation. The two cannot disagree:
+    /// both are derived from the same [`Artifact::sha256`], which [`Store::save`]
+    /// has already checked against the bytes it wrote.
+    by_digest: HashMap<Digest, usize>,
     /// Who every file written here is given to, once it is written. `None`
     /// when nobody was named or the directory could not be handed over.
     owner: Option<Owner>,
@@ -56,6 +76,13 @@ pub struct Store {
     /// Reused streaming buffer so saving many artifacts does not allocate per
     /// artifact.
     copy_buf: Vec<u8>,
+    /// Whether the preview directory has been created and handed over.
+    ///
+    /// Lazily, and once: a session that rendered no previews should not be left
+    /// with an empty `previews/` explaining nothing, and a session that
+    /// rendered two hundred thousand should not pay a `mkdir` and a `chown` of
+    /// the directory for each of them.
+    previews_ready: bool,
 }
 
 impl Store {
@@ -78,9 +105,11 @@ impl Store {
         Ok(Self {
             dir: dir.to_path_buf(),
             records: Vec::new(),
+            by_digest: HashMap::new(),
             owner: handback.owner(owner),
             handback,
             copy_buf: Vec::new(),
+            previews_ready: false,
         })
     }
 
@@ -114,6 +143,29 @@ impl Store {
         &self.records
     }
 
+    /// Appends one record and indexes it by the digest it describes.
+    ///
+    /// The index keeps the *first* record for a digest, which is the record
+    /// a scan of every record in order would have found. Two records can carry
+    /// one digest — the engine's own deduplication prevents it, but this store
+    /// is public and does not — and an annotation must land on the same one
+    /// either way.
+    fn push_record(&mut self, digest: Digest, record: ArtifactRecord) {
+        self.by_digest.entry(digest).or_insert(self.records.len());
+        self.records.push(record);
+    }
+
+    /// Where `digest`'s record sits, if this store holds one for it.
+    fn index_of(&self, digest: Digest) -> Option<usize> {
+        self.by_digest.get(&digest).copied()
+    }
+
+    /// The record `digest` was stored under, if this store stored it.
+    fn record_of(&mut self, digest: Digest) -> Option<&mut ArtifactRecord> {
+        let index = self.index_of(digest)?;
+        self.records.get_mut(index)
+    }
+
     /// Streams `bytes` into the output directory and records the artifact.
     ///
     /// The file is named `<index>.<extension>` from the artifact's format and
@@ -136,7 +188,7 @@ impl Store {
         let path = self.dir.join(&name);
         let into_err = |source: io::Error| ReportError::new(&path, source);
 
-        let mut out = BufWriter::new(File::create(&path).map_err(into_err)?);
+        let mut out = File::create(&path).map_err(into_err)?;
         let mut hasher = Sha256::new();
         self.copy_buf.resize(COPY_CHUNK_BYTES, 0);
         let mut written = 0_u64;
@@ -175,53 +227,56 @@ impl Store {
         drop(out);
         self.give(&path);
 
-        self.records.push(ArtifactRecord {
-            name: Some(name),
-            stage: artifact.stage.to_string(),
-            format: artifact.format.to_string(),
-            source_offset: artifact
-                .extents
-                .first()
-                .map_or(0, |first| first.start.get()),
-            length: written,
-            width: artifact.pixels.map(|(width, _)| width),
-            height: artifact.pixels.map(|(_, height)| height),
-            camera_make: artifact.capture.make.clone(),
-            camera_model: artifact.capture.model.clone(),
-            taken: artifact.capture.taken.clone(),
-            declared_width: artifact.capture.pixels.map(|(width, _)| width),
-            declared_height: artifact.capture.pixels.map(|(_, height)| height),
-            expected_length: artifact.expected_length,
-            missing_bytes: artifact
-                .expected_length
-                .map(|expected| expected.saturating_sub(written))
-                .filter(|missing| *missing > 0),
-            confidence: artifact.confidence.to_string(),
-            extents: artifact
-                .extents
-                .iter()
-                .map(|extent| ExtentRecord {
-                    offset: extent.start.get(),
-                    length: extent.len,
-                })
-                .collect(),
-            created_unix: artifact.timestamps.created.map(unix_seconds),
-            modified_unix: artifact.timestamps.modified.map(unix_seconds),
-            deleted_unix: artifact.deleted.map(unix_seconds),
-            recovered_name: artifact.recovered_name.map(str::to_owned),
-            source_object: artifact.source_object,
-            parent_offset: artifact.parent.map(argos_core::ByteOffset::get),
-            sha256,
-            standing: None,
-            same_size_neighbours: None,
-            triage_label: None,
-            triage_decided_by: None,
-            written: true,
-            omitted_because: None,
-            perceptual_hash: None,
-            near_duplicate_of: None,
-            preview: None,
-        });
+        self.push_record(
+            artifact.sha256,
+            ArtifactRecord {
+                name: Some(name),
+                stage: artifact.stage.to_string(),
+                format: artifact.format.to_string(),
+                source_offset: artifact
+                    .extents
+                    .first()
+                    .map_or(0, |first| first.start.get()),
+                length: written,
+                width: artifact.pixels.map(|(width, _)| width),
+                height: artifact.pixels.map(|(_, height)| height),
+                camera_make: artifact.capture.make.clone(),
+                camera_model: artifact.capture.model.clone(),
+                taken: artifact.capture.taken.clone(),
+                declared_width: artifact.capture.pixels.map(|(width, _)| width),
+                declared_height: artifact.capture.pixels.map(|(_, height)| height),
+                expected_length: artifact.expected_length,
+                missing_bytes: artifact
+                    .expected_length
+                    .map(|expected| expected.saturating_sub(written))
+                    .filter(|missing| *missing > 0),
+                confidence: artifact.confidence.to_string(),
+                extents: artifact
+                    .extents
+                    .iter()
+                    .map(|extent| ExtentRecord {
+                        offset: extent.start.get(),
+                        length: extent.len,
+                    })
+                    .collect(),
+                created_unix: artifact.timestamps.created.map(unix_seconds),
+                modified_unix: artifact.timestamps.modified.map(unix_seconds),
+                deleted_unix: artifact.deleted.map(unix_seconds),
+                recovered_name: artifact.recovered_name.map(str::to_owned),
+                source_object: artifact.source_object,
+                parent_offset: artifact.parent.map(argos_core::ByteOffset::get),
+                sha256,
+                standing: None,
+                same_size_neighbours: None,
+                triage_label: None,
+                triage_decided_by: None,
+                written: true,
+                omitted_because: None,
+                perceptual_hash: None,
+                near_duplicate_of: None,
+                preview: None,
+            },
+        );
         Ok(self
             .records
             .last()
@@ -237,13 +292,7 @@ impl Store {
     /// (A-TRIAGE-NOT-VERDICT).
     pub fn annotate_triage(&mut self, annotations: &[TriageAnnotation]) {
         for annotation in annotations {
-            // Linear match: artifact counts are the size of a photo library,
-            // and this runs once per scan.
-            let Some(record) = self
-                .records
-                .iter_mut()
-                .find(|record| record.sha256 == annotation.sha256)
-            else {
+            let Some(record) = self.record_of(annotation.sha256) else {
                 continue;
             };
             record.triage_label.clone_from(&annotation.label);
@@ -251,9 +300,7 @@ impl Store {
             record
                 .perceptual_hash
                 .clone_from(&annotation.perceptual_hash);
-            record
-                .near_duplicate_of
-                .clone_from(&annotation.near_duplicate_of);
+            record.near_duplicate_of = annotation.near_duplicate_of.map(|of| of.to_string());
         }
     }
 
@@ -266,53 +313,56 @@ impl Store {
     /// bytes are still at the extents recorded here, which locate them on the
     /// source exactly.
     fn record_only(&mut self, artifact: &Artifact<'_>, reason: &str) {
-        self.records.push(ArtifactRecord {
-            name: None,
-            stage: artifact.stage.to_string(),
-            format: artifact.format.to_string(),
-            source_offset: artifact
-                .extents
-                .first()
-                .map_or(0, |first| first.start.get()),
-            length: artifact.length,
-            width: artifact.pixels.map(|(width, _)| width),
-            height: artifact.pixels.map(|(_, height)| height),
-            camera_make: artifact.capture.make.clone(),
-            camera_model: artifact.capture.model.clone(),
-            taken: artifact.capture.taken.clone(),
-            declared_width: artifact.capture.pixels.map(|(width, _)| width),
-            declared_height: artifact.capture.pixels.map(|(_, height)| height),
-            expected_length: artifact.expected_length,
-            missing_bytes: artifact
-                .expected_length
-                .map(|expected| expected.saturating_sub(artifact.length))
-                .filter(|missing| *missing > 0),
-            confidence: artifact.confidence.to_string(),
-            extents: artifact
-                .extents
-                .iter()
-                .map(|extent| ExtentRecord {
-                    offset: extent.start.get(),
-                    length: extent.len,
-                })
-                .collect(),
-            created_unix: artifact.timestamps.created.map(unix_seconds),
-            modified_unix: artifact.timestamps.modified.map(unix_seconds),
-            deleted_unix: artifact.deleted.map(unix_seconds),
-            recovered_name: artifact.recovered_name.map(str::to_owned),
-            source_object: artifact.source_object,
-            parent_offset: artifact.parent.map(argos_core::ByteOffset::get),
-            sha256: artifact.sha256.to_string(),
-            written: false,
-            triage_label: None,
-            triage_decided_by: None,
-            standing: None,
-            same_size_neighbours: None,
-            perceptual_hash: None,
-            near_duplicate_of: None,
-            preview: None,
-            omitted_because: Some(reason.to_owned()),
-        });
+        self.push_record(
+            artifact.sha256,
+            ArtifactRecord {
+                name: None,
+                stage: artifact.stage.to_string(),
+                format: artifact.format.to_string(),
+                source_offset: artifact
+                    .extents
+                    .first()
+                    .map_or(0, |first| first.start.get()),
+                length: artifact.length,
+                width: artifact.pixels.map(|(width, _)| width),
+                height: artifact.pixels.map(|(_, height)| height),
+                camera_make: artifact.capture.make.clone(),
+                camera_model: artifact.capture.model.clone(),
+                taken: artifact.capture.taken.clone(),
+                declared_width: artifact.capture.pixels.map(|(width, _)| width),
+                declared_height: artifact.capture.pixels.map(|(_, height)| height),
+                expected_length: artifact.expected_length,
+                missing_bytes: artifact
+                    .expected_length
+                    .map(|expected| expected.saturating_sub(artifact.length))
+                    .filter(|missing| *missing > 0),
+                confidence: artifact.confidence.to_string(),
+                extents: artifact
+                    .extents
+                    .iter()
+                    .map(|extent| ExtentRecord {
+                        offset: extent.start.get(),
+                        length: extent.len,
+                    })
+                    .collect(),
+                created_unix: artifact.timestamps.created.map(unix_seconds),
+                modified_unix: artifact.timestamps.modified.map(unix_seconds),
+                deleted_unix: artifact.deleted.map(unix_seconds),
+                recovered_name: artifact.recovered_name.map(str::to_owned),
+                source_object: artifact.source_object,
+                parent_offset: artifact.parent.map(argos_core::ByteOffset::get),
+                sha256: artifact.sha256.to_string(),
+                written: false,
+                triage_label: None,
+                triage_decided_by: None,
+                standing: None,
+                same_size_neighbours: None,
+                perceptual_hash: None,
+                near_duplicate_of: None,
+                preview: None,
+                omitted_because: Some(reason.to_owned()),
+            },
+        );
     }
 
     /// Records where each named artifact stands in a list.
@@ -321,14 +371,10 @@ impl Store {
     /// adds a sort key to records already written and can remove nothing
     /// (A-TRIAGE-NOT-VERDICT). A standing for an artifact this store never
     /// saved is dropped rather than creating a record.
-    pub fn annotate_standings(&mut self, standings: &[(String, String)]) {
+    pub fn annotate_standings(&mut self, standings: &[(Digest, &str)]) {
         for (sha256, standing) in standings {
-            if let Some(record) = self
-                .records
-                .iter_mut()
-                .find(|record| record.sha256 == *sha256)
-            {
-                record.standing = Some(standing.clone());
+            if let Some(record) = self.record_of(*sha256) {
+                record.standing = Some((*standing).to_owned());
             }
         }
     }
@@ -338,16 +384,27 @@ impl Store {
     ///
     /// Annotation only, like the triage labels: it adds a fact about the
     /// medium's layout to records already written and can remove nothing.
-    pub fn annotate_same_size_runs(&mut self, runs: &[(String, u32)]) {
+    pub fn annotate_same_size_runs(&mut self, runs: &[(Digest, u32)]) {
         for (sha256, neighbours) in runs {
-            if let Some(record) = self
-                .records
-                .iter_mut()
-                .find(|record| record.sha256 == *sha256)
-            {
+            if let Some(record) = self.record_of(*sha256) {
                 record.same_size_neighbours = Some(*neighbours);
             }
         }
+    }
+
+    /// The preview directory, created and handed over on the first call.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory cannot be created.
+    fn preview_dir(&mut self) -> Result<PathBuf, ReportError> {
+        let dir = self.dir.join(PREVIEW_DIR);
+        if !self.previews_ready {
+            fs::create_dir_all(&dir).map_err(|source| ReportError::new(&dir, source))?;
+            self.give(&dir);
+            self.previews_ready = true;
+        }
+        Ok(dir)
     }
 
     /// Writes a preview of an artifact already saved, named by its hash.
@@ -368,8 +425,7 @@ impl Store {
         sha256: &argos_core::ports::Digest,
         image: &PixelImage,
     ) -> Result<(), ReportError> {
-        let hash = sha256.to_string();
-        let Some(index) = self.records.iter().position(|record| record.sha256 == hash) else {
+        let Some(index) = self.index_of(*sha256) else {
             return Ok(());
         };
         // An image the encoder declines is one with no pixels to show. That is
@@ -378,16 +434,18 @@ impl Store {
         let Some(encoded) = encode(image) else {
             return Ok(());
         };
+        // Spelled out only now: both ways out above are taken often enough on
+        // a whole-disk recovery that formatting the hex first would be paid
+        // for previews that are never written.
+        let hash = sha256.to_string();
 
-        let dir = self.dir.join(PREVIEW_DIR);
-        fs::create_dir_all(&dir).map_err(|source| ReportError::new(&dir, source))?;
+        let dir = self.preview_dir()?;
         // Named by content hash, so the manifest joins previews to records the
         // same way it joins triage annotations, and a rerun overwrites rather
         // than accumulating.
         let name = format!("{hash}.jpg");
         let path = dir.join(&name);
         fs::write(&path, encoded).map_err(|source| ReportError::new(&path, source))?;
-        self.give(&dir);
         self.give(&path);
 
         if let Some(record) = self.records.get_mut(index) {
@@ -422,7 +480,10 @@ impl Store {
         // on top of the records themselves, at the very end of a run that has
         // already been holding them all (A-BOUNDED-ALLOC).
         let file = File::create(&path).map_err(|source| ReportError::new(&path, source))?;
-        let mut out = BufWriter::new(file);
+        // A buffer of its own, because the serializer writes a field at a time:
+        // the default eight kibibytes turns a manifest of that size into tens of
+        // thousands of writes.
+        let mut out = BufWriter::with_capacity(MANIFEST_BUFFER_BYTES, file);
         serde_json::to_writer_pretty(&mut out, &manifest)
             .map_err(|source| ReportError::new(&path, io::Error::other(source)))?;
         out.flush()

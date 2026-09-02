@@ -142,9 +142,21 @@ pub struct Counter<'a, P: ?Sized> {
     spoke_at: AtomicU64,
 }
 
+impl<P: ?Sized> std::fmt::Debug for Counter<'_, P> {
+    /// The sink is left out: it is whatever the caller is rendering with, and
+    /// nothing about it describes the stage.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Counter")
+            .field("stage", &self.stage)
+            .field("bound", &self.bound)
+            .field("done", &self.done.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
     /// Announces the stage and prepares to count `total` of `unit`.
-    pub(crate) fn start(progress: &'a P, stage: Stage, total: u64, unit: Unit) -> Self {
+    pub fn start(progress: &'a P, stage: Stage, total: u64, unit: Unit) -> Self {
         Self::new(
             progress,
             stage,
@@ -181,7 +193,7 @@ impl<'a, P: ProgressSink + ?Sized> Counter<'a, P> {
 
     /// Records one item handled, reporting on stride boundaries, at the end,
     /// and whenever the stage has been quiet for [`PROGRESS_INTERVAL_MS`].
-    pub(crate) fn step(&self) {
+    pub fn step(&self) {
         let done = self.done.fetch_add(1, Ordering::Relaxed).saturating_add(1);
         if let Bound::Work { total, stride, .. } = self.bound
             && (done.is_multiple_of(stride) || done == total)
@@ -430,52 +442,90 @@ where
     C: Classifier + Send,
 {
     report.dropped_unreadable = finding::consolidate(&mut findings, &report.unreadable);
-    // The size floor is applied inside the report stage or not at all: whether
-    // to write an artifact has to be settled before it is written.
-    let emitted = emit(
-        control,
-        views,
-        &findings,
-        sink,
-        config.min_long_side(),
-        progress,
-        report,
-    )?;
-
-    report.cache_runs = same_size_runs(&emitted);
-    report.standings = standings(&emitted, &report.cache_runs);
-
-    // Annotation runs last, over artifacts already persisted and recorded:
-    // previews and triage labels describe them and can no longer change what
-    // was recovered (A-TRIAGE-NOT-VERDICT).
-    let work = crate::annotate::Work {
-        sink,
+    // One pass over the findings, with the annotator beside it. Previews and
+    // triage want the artifact decoded, and the writing stage is holding those
+    // exact bytes already — reading the medium a second time for them is a
+    // whole extra sweep of the head over every artifact recovered.
+    //
+    // The size floor is applied inside that pass or not at all: whether to
+    // write an artifact has to be settled before it is written, and it is
+    // settled from the frame header, never from anything the annotator saw
+    // (`A-TRIAGE-NOT-VERDICT`).
+    let (emitted, scored) = crate::annotate::alongside(
         classifier,
-        previews: config.previews(),
-    };
-    if !work.is_idle()
-        && let Some(view) = views.first_mut()
-    {
-        crate::annotate::run(control, view, &findings, &emitted, work, progress, report);
-    }
+        config.previews(),
+        findings.len(),
+        |annotating| {
+            emit(
+                control,
+                views,
+                &findings,
+                output::Output {
+                    sink,
+                    min_long_side: config.min_long_side(),
+                    annotating,
+                },
+                progress,
+                report,
+            )
+        },
+    );
+    let emitted = emitted?;
+    report.triage_model = scored.model;
+    report.triage_degraded = scored.degraded;
+    report.triage_scored = scored
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.score.is_some())
+        .count() as u64;
+    report.triage_unscored = (scored.outcomes.len() as u64).saturating_sub(report.triage_scored);
+    report.triage = scored.outcomes;
+
+    // Counted once, by position, and read twice: what the manifest is told and
+    // what the sort key is derived from are the same fact about the medium.
+    let neighbours = same_size_neighbours(&emitted);
+    report.cache_runs = cache_runs(&emitted, &neighbours);
+    report.standings = standings(&emitted, &neighbours);
+
     Ok(())
 }
 
-/// What the medium's layout says about the artifacts just written.
+/// What the medium's layout says about the artifacts just written, one answer
+/// per artifact in the order they were written.
 ///
 /// A run of same-sized neighbours is a thumbnail cache, and naming it is what
 /// stops a report from presenting a preview of a lost photograph as the
 /// photograph.
-fn same_size_runs(emitted: &[crate::annotate::Emitted]) -> Vec<crate::finding::CacheRun> {
+fn same_size_neighbours(emitted: &[crate::annotate::Emitted]) -> Vec<u32> {
     let entries: Vec<_> = emitted
         .iter()
         .map(|item| crate::finding::Entry {
             offset: item.offset,
             pixels: item.pixels,
-            sha256: item.sha256,
         })
         .collect();
     crate::finding::runs(&entries)
+}
+
+/// The artifacts that sat among same-sized neighbours, named for the manifest.
+///
+/// Only those: an artifact belonging to no run has nothing to say here, and
+/// saying zero about it would put a fact in the manifest that the medium never
+/// stated.
+fn cache_runs(
+    emitted: &[crate::annotate::Emitted],
+    neighbours: &[u32],
+) -> Vec<crate::finding::CacheRun> {
+    emitted
+        .iter()
+        .zip(neighbours)
+        .filter_map(|(item, &neighbours)| {
+            (neighbours > 0).then_some(crate::finding::CacheRun {
+                sha256: item.sha256,
+                neighbours,
+            })
+        })
+        .collect()
 }
 
 /// Where each written artifact stands in a list, by the evidence about it.
@@ -491,17 +541,17 @@ fn same_size_runs(emitted: &[crate::annotate::Emitted]) -> Vec<crate::finding::C
 /// once they have all been written.
 fn standings(
     emitted: &[crate::annotate::Emitted],
-    runs: &[crate::finding::CacheRun],
+    neighbours: &[u32],
 ) -> Vec<(Digest, argos_classify::rank::Standing)> {
     emitted
         .iter()
-        .map(|item| {
-            let evidence = runs
-                .iter()
-                .find(|run| run.sha256 == item.sha256)
-                .map_or(item.evidence, |run| {
-                    item.evidence.among_neighbours(run.neighbours)
-                });
+        .zip(neighbours)
+        .map(|(item, &neighbours)| {
+            let evidence = if neighbours > 0 {
+                item.evidence.among_neighbours(neighbours)
+            } else {
+                item.evidence
+            };
             (item.sha256, argos_classify::rank::standing(&evidence))
         })
         .collect()

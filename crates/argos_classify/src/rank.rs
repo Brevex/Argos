@@ -108,16 +108,27 @@ pub enum Standing {
     CameraNamed,
 }
 
-impl fmt::Display for Standing {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
+impl Standing {
+    /// The name this standing is recorded under.
+    ///
+    /// Borrowed rather than formatted: a whole-disk recovery names one per
+    /// artifact, and a manifest join that allocated a string for each would
+    /// pay for hundreds of thousands of copies of five words.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
             Self::CacheNeighbour => "cache-neighbour",
             Self::Unremarkable => "unremarkable",
             Self::PhotographSized => "photograph-sized",
             Self::Dated => "dated",
             Self::CameraNamed => "camera-named",
-        };
-        f.write_str(name)
+        }
+    }
+}
+
+impl fmt::Display for Standing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 

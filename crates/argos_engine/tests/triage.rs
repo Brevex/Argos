@@ -234,3 +234,44 @@ fn identical_images_collapse_into_one_decision_and_share_its_score() {
     // Both still carry the score, and both are still artifacts.
     assert_eq!(report.triage_scored, 2);
 }
+
+#[test]
+fn an_artifact_the_floor_kept_out_is_never_shown_to_the_classifier() {
+    // The port is reached from one place: after the sink has taken the
+    // artifact and recorded its digest. So an artifact the run decided not to
+    // store is not one the classifier gets an opinion about — there is nothing
+    // for an opinion to be attached to, and offering one would be the first
+    // half of a path from a score to a disposal (`A-TRIAGE-NOT-VERDICT`).
+    let disk = disk_with_photographs(3);
+    let floored = ScanConfig::builder()
+        .workers(NonZeroUsize::new(2).expect("two workers"))
+        .chunk_bytes(CHUNK)
+        // Far above the fixtures, so every one of them is recorded and none is
+        // written.
+        .min_long_side(4096)
+        .previews(true)
+        .build()
+        .expect("valid configuration");
+
+    let medium = Medium::new(views(&disk), disk.len() as u64).expect("medium");
+    let mut sink = Collector::new();
+    let mut hostile = CondemnEverything::default();
+    let report = ScanSession::new(floored)
+        .start_with_classifier(medium, &mut sink, &Discard, &mut hostile)
+        .expect("scan");
+
+    assert!(
+        report.omitted_assets > 0,
+        "the floor must actually have kept something out"
+    );
+    assert_eq!(report.artifacts, 0, "and stored nothing");
+    assert_eq!(
+        hostile.seen, 0,
+        "the classifier was shown an artifact the run never stored"
+    );
+    assert!(
+        report.triage.is_empty(),
+        "an unstored artifact has no outcome"
+    );
+    assert_eq!(report.previews_written, 0);
+}

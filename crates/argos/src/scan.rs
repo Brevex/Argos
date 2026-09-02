@@ -32,10 +32,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use argos_core::ByteOffset;
-use argos_core::ports::{ProgressSink, ScanEvent};
+use argos_core::ports::{Digest, ProgressSink, ScanEvent, Unit};
+use argos_core::{ByteOffset, Stage};
 use argos_engine::graft::JpegReference as Reference;
-use argos_engine::{Medium, ScanConfig, ScanReport, ScanSession, Stages};
+use argos_engine::{Counter, Medium, ScanConfig, ScanReport, ScanSession, Stages};
 use argos_report::Owner;
 
 use crate::medium;
@@ -215,7 +215,13 @@ where
     };
 
     let report = outcome.as_ref().ok();
-    let manifest = write_manifest(store, report, &description, triage_disabled.as_deref())?;
+    let manifest = write_manifest(
+        store,
+        report,
+        &description,
+        triage_disabled.as_deref(),
+        progress,
+    )?;
     match report {
         Some(report) => log.summary(report),
         None => log.line("scan failed before it could report"),
@@ -259,17 +265,22 @@ fn graft_after<N: Notice + ?Sized>(
     }
 }
 
+/// Steps [`write_manifest`] reports: the three annotation joins, then the
+/// write. Their costs are nothing alike, which is why they are steps.
+const MANIFEST_STEPS: u64 = 4;
+
 /// Annotates what was stored and writes the manifest describing it.
 ///
 /// Written whatever happened, including for a run that failed partway:
 /// artifacts already on disk without one would be bytes nothing can attribute
 /// to a sector, which is the situation provenance exists to prevent
 /// (`A-PROVENANCE`).
-fn write_manifest(
+fn write_manifest<P: ProgressSink + ?Sized>(
     store: argos_report::Store,
     report: Option<&ScanReport>,
     description: &str,
     triage_disabled: Option<&str>,
+    progress: &P,
 ) -> anyhow::Result<std::path::PathBuf> {
     let mut store = store;
     let unreadable: Vec<argos_report::ExtentRecord> = report
@@ -284,32 +295,45 @@ fn write_manifest(
                 .collect()
         })
         .unwrap_or_default();
+    // The four things left to do, announced as a stage of its own. On a
+    // whole-disk recovery this is the last minute of a run that has already
+    // said it finished writing artifacts, and a run that goes quiet there is
+    // indistinguishable from one that has stopped.
+    //
+    // Steps rather than items: the three joins are milliseconds and the write
+    // is most of the time, so a percentage over them would report the stage as
+    // nearly done while nearly all of it is left (`Unit::Steps`).
+    let counter = Counter::start(progress, Stage::Manifest, MANIFEST_STEPS, Unit::Steps);
     // Triage annotations join the records by content hash. They add labels to
     // artifacts already written; nothing here can remove one
     // (A-TRIAGE-NOT-VERDICT).
     if let Some(report) = report {
         store.annotate_triage(&annotations(report));
-        let runs: Vec<(String, u32)> = report
+        counter.step();
+        let runs: Vec<(Digest, u32)> = report
             .cache_runs
             .iter()
-            .map(|run| (run.sha256.to_string(), run.neighbours))
+            .map(|run| (run.sha256, run.neighbours))
             .collect();
         store.annotate_same_size_runs(&runs);
+        counter.step();
         // The sort key, so a reader of this directory can put the photographs
         // first without deriving anything itself.
-        let standings: Vec<(String, String)> = report
+        let standings: Vec<(Digest, &str)> = report
             .standings
             .iter()
-            .map(|(sha256, standing)| (sha256.to_string(), standing.to_string()))
+            .map(|(sha256, standing)| (*sha256, standing.name()))
             .collect();
         store.annotate_standings(&standings);
+        counter.step();
     }
     let triage_record = report.map(|report| triage_record(report, triage_disabled));
     let coverage = report.map(coverage);
     let volumes = report.map(volumes).unwrap_or_default();
     let fragmentation = report.map(fragmentation).unwrap_or_default();
     let lost = report.map(lost_files).unwrap_or_default();
-    store
+    let records = store.records().len() as u64;
+    let written = store
         .finish(argos_report::Summary {
             tool_version: env!("CARGO_PKG_VERSION"),
             source: description,
@@ -322,7 +346,13 @@ fn write_manifest(
             fragmentation: &fragmentation,
             lost_files: &lost,
         })
-        .context("cannot write manifest")
+        .context("cannot write manifest")?;
+    counter.step();
+    progress.emit(ScanEvent::StageFinished {
+        stage: Stage::Manifest,
+        findings: records,
+    });
+    Ok(written)
 }
 
 /// Parses a `START..END` byte range, decimal or `0x`-prefixed hexadecimal.
@@ -556,9 +586,9 @@ fn annotations(report: &ScanReport) -> Vec<argos_report::TriageAnnotation> {
         .triage
         .iter()
         .map(|outcome| argos_report::TriageAnnotation {
-            sha256: outcome.sha256.to_string(),
+            sha256: outcome.sha256,
             perceptual_hash: outcome.perceptual_hash.map(|hash| format!("{hash:016x}")),
-            near_duplicate_of: outcome.near_duplicate_of.map(|of| of.to_string()),
+            near_duplicate_of: outcome.near_duplicate_of,
             label: outcome.score.map(|score| score.label.to_string()),
             decided_by: outcome.score.map(|score| score.decided_by.to_string()),
         })

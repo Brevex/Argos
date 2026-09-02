@@ -32,7 +32,17 @@ const REPORT_STAGE = 'report';
  * Reaching any of them means every stage that examines the medium has ended,
  * which is why the scan figure reads full from here on.
  */
-const AFTER_RECOVERY = new Set([REPORT_STAGE, 'preview', 'triage']);
+const AFTER_RECOVERY = new Set([REPORT_STAGE, 'manifest']);
+
+/**
+ * How long an unchanged progress figure is still worth showing as a figure.
+ *
+ * The engine repeats its last progress every second so a client can tell a
+ * live wire from a dead one. That heartbeat says the engine is alive; it says
+ * nothing about the stage moving, and a percentage that has not changed in a
+ * minute reads as a frozen program.
+ */
+const STALE_PROGRESS_MS = 20_000;
 
 /**
  * What each stage the engine can report is called on screen.
@@ -47,9 +57,10 @@ const STAGE_NAMES: Record<string, string> = {
   carve: 'Reading the medium',
   validation: 'Validating candidates',
   reassembly: 'Reassembling fragmented images',
+  // Writing an artifact and describing it are one pass over one set of bytes,
+  // so they are one stage and it is named for the part a person is waiting on.
   report: 'Writing recovered images',
-  preview: 'Rendering previews',
-  triage: 'Labelling recovered images',
+  manifest: 'Writing the manifest',
   // The two passes of an acquisition. Named the same way, because to a person
   // watching they are the same thing: the machine is working through a disk.
   sweep: 'Copying the disk',
@@ -89,6 +100,14 @@ class Session {
 
   /** What `work` is counted in, as the engine named it. */
   workUnit = $state('');
+
+  /**
+   * When a progress figure last changed, rather than when one last arrived.
+   *
+   * The two differ exactly when a stage has gone quiet, which is the case this
+   * exists to make visible.
+   */
+  progressMovedAt = $state(0);
 
   /** Bytes read off the medium by the sweep, and how many there are. */
   sweep = $state<StageProgress>({ done: 0, total: 0 });
@@ -196,6 +215,20 @@ class Session {
     return Math.round(fraction(this.work) * 100);
   }
 
+  /**
+   * Whether the active stage's figure has stopped moving.
+   *
+   * The engine repeats its last progress once a second so a client can tell a
+   * live wire from a dead one, so a figure arriving is not a figure changing.
+   * A display that repeats an unmoving percentage claims the stage is stuck at
+   * that point, which is a stronger statement than "still working" and the one
+   * thing this cannot know.
+   */
+  get progressStalled(): boolean {
+    if (this.progressMovedAt === 0) return false;
+    return this.now - this.progressMovedAt >= STALE_PROGRESS_MS;
+  }
+
   /** Seconds since the run started. */
   get elapsed(): number {
     if (this.startedAt === 0) return 0;
@@ -247,6 +280,7 @@ class Session {
     this.stage = '';
     this.work = { done: 0, total: 0 };
     this.workUnit = '';
+    this.progressMovedAt = 0;
     this.sweep = { done: 0, total: 0 };
     this.recovery = { done: 0, total: 0 };
     this.stored = 0;
@@ -265,6 +299,9 @@ class Session {
       case 'stageBegan': {
         const { stage, unit, total } = message.params;
         this.stage = stage;
+        // A stage that has just announced itself has not gone quiet, whatever
+        // the stage before it was doing.
+        this.progressMovedAt = Date.now();
         this.work = { done: 0, total };
         this.workUnit = unit;
         // The writing stage announces how much it has to get through before it
@@ -275,6 +312,10 @@ class Session {
       }
       case 'progress': {
         const { stage, unit, done, total } = message.params;
+        const current = stage === REPORT_STAGE ? this.recovery : this.work;
+        if (done !== current.done || total !== current.total) {
+          this.progressMovedAt = Date.now();
+        }
         if (stage === REPORT_STAGE) {
           this.recovery = { done, total };
           break;

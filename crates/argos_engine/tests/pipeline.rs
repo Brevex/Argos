@@ -1716,3 +1716,103 @@ fn merging_scales_with_the_findings_rather_than_their_square() {
          shape of a quadratic search, not a linear one"
     );
 }
+
+#[test]
+fn a_picture_whose_frame_survives_is_measured_by_it_even_when_its_scan_does_not_decode() {
+    // A frame header and a scan are two different things, and a used medium is
+    // full of files where the first survived and the second did not. The size
+    // such a file states is a fact about the file, and the floor is entitled to
+    // act on it: an 8-pixel frame is an 8-pixel frame whether or not its
+    // entropy data still decodes.
+    let small = argos_carve::fixture::Jpeg::new()
+        .with_entropy_bytes(3072)
+        .build();
+    let disk = argos_carve::fixture::Disk::filled(CHUNK * 4)
+        .with(64 * 1024, &small)
+        .into_bytes();
+
+    let (kept, report) = scan_with(&disk, config(2));
+    assert_eq!(kept.len(), 1, "with no floor the artifact is written");
+    assert_eq!(report.omitted_assets, 0);
+
+    let floored = ScanConfig::builder()
+        .workers(NonZeroUsize::new(2).expect("at least one worker"))
+        .chunk_bytes(CHUNK)
+        .min_long_side(argos_engine::DEFAULT_MIN_LONG_SIDE)
+        .build()
+        .expect("valid configuration");
+    let (written, report) = scan_with(&disk, floored);
+    assert!(
+        written.is_empty(),
+        "a frame smaller than the floor stays out of the directory: {written:?}"
+    );
+    assert_eq!(
+        report.omitted_assets, 1,
+        "and is recorded as omitted rather than dropped, so the manifest still \
+         locates its bytes"
+    );
+}
+
+#[test]
+fn an_artifact_is_read_off_the_medium_once_after_it_is_found() {
+    // Nothing in a scan's results says how many times it read the medium to
+    // produce them, and on a rotational disk that number is most of the cost:
+    // each extra pass is a seek back to the artifact's first byte and a second
+    // sweep of the head across it. Counting the bytes handed back is the only
+    // way this property can be tested at all.
+    let mut disk = argos_carve::fixture::Disk::filled(4 * 1024 * 1024);
+    for n in 0..8_usize {
+        // Distinct, or deduplication by content hash collapses them into one.
+        let photo = argos_carve::fixture::photo_jpeg(640, 480, 0x51 + n as u64);
+        disk = disk.with(256 * 1024 * (n + 1), &photo);
+    }
+    let image = disk.into_bytes();
+
+    let config = ScanConfig::builder()
+        .workers(NonZeroUsize::new(1).expect("at least one worker"))
+        .chunk_bytes(CHUNK)
+        .min_long_side(0)
+        // Previews on: rendering one wants the artifact decoded, which is the
+        // work that used to read the medium a second time after the writing
+        // stage had already finished with it.
+        .previews(true)
+        .build()
+        .expect("valid configuration");
+    let tally = argos_engine::fixture::Reads::new();
+    let medium = Medium::new(
+        vec![tally.watching(Cursor::new(image.clone()))],
+        image.len() as u64,
+    )
+    .expect("medium");
+    let mut sink = Collector::new();
+    let report = ScanSession::new(config)
+        .start(medium, &mut sink, &Discard)
+        .expect("scan");
+
+    assert_eq!(report.artifacts, 8);
+    let stored: u64 = sink
+        .artifacts()
+        .iter()
+        .map(|artifact| artifact.bytes.len() as u64)
+        .sum();
+
+    // What a scan reads beyond its one sweep of the surface, per byte it
+    // recovered. Two passes are inherent: validation runs the format's state
+    // machine over each candidate, and the writing stage reads it once. The
+    // measurement here is 3.4, the rest being the slack of a chunked reader
+    // reading past the end of each artifact.
+    //
+    // It was 6.4 when the writing stage hashed, measured and stored from three
+    // separate reads and annotation went back to the medium for a fourth. A
+    // ceiling of 4.0 fails if any one of those four returns.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a read-volume ratio does not need more than f64 precision"
+    )]
+    let beyond = (tally.bytes() - image.len() as u64) as f64 / stored as f64;
+    assert!(
+        beyond < 4.0,
+        "the scan read {beyond:.1} times each recovered byte beyond its sweep of the \
+         medium; a stage is reading artifacts it already has"
+    );
+}

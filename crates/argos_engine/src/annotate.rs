@@ -1,36 +1,36 @@
-//! Stages F′/G: annotating artifacts that are already persisted.
+//! Annotating artifacts the writing stage has already stored.
 //!
-//! Everything here runs strictly after the report stage: every artifact this
-//! pass sees is already streamed to the sink, hashed and recorded. Its entire
-//! output is annotation — a preview file and a list of scores keyed by content
-//! hash. There is no path from anything computed here back to an artifact's
-//! existence, its extents or its confidence tier (A-TRIAGE-NOT-VERDICT).
+//! Everything here runs strictly after an artifact is persisted: [`Annotating`]
+//! is handed the bytes the sink has already accepted, hashed and recorded. Its
+//! entire output is annotation — a preview file and a list of scores keyed by
+//! content hash.
+//!
+//! **Every method returns `()`.** That is what makes `A-TRIAGE-NOT-VERDICT` a
+//! property of the types rather than of the order two statements happen to be
+//! in: there is no value an annotation can hand back, so no path exists from
+//! anything computed here to an artifact's existence, its extents or its
+//! confidence tier. The [`Classifier`] port is reachable from this module
+//! alone, and only from a method the writing stage calls after its sink has
+//! taken the artifact.
 //!
 //! Two annotations want the same expensive thing: the artifact decoded to
-//! pixels. So they share one pass. Reading an artifact back, checking it still
-//! hashes to what was stored and decoding it happens once, and both the
-//! preview and the classifier see the result. That is also why previews do not
-//! depend on triage being enabled — a scan with `--no-triage` renders previews
-//! exactly as one with triage does.
+//! pixels. So they share one decode, of bytes the writing stage already holds
+//! — which is also why the medium is not read again for either. That is why
+//! previews do not depend on triage being enabled: a scan with `--no-triage`
+//! renders previews exactly as one with triage does.
 //!
 //! Perceptual-hash dedup runs before scoring, so near-duplicate images
 //! collapse into one decision and share it. Scoring itself runs on one
-//! dedicated worker thread, in batches, overlapping the decode of the next
-//! images with the scoring of the previous ones.
+//! dedicated worker thread, in batches, overlapping the writing of the next
+//! artifacts with the scoring of the previous ones.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek};
 
-use argos_carve::decode;
 use argos_classify::{NEAR_DUPLICATE_DISTANCE, hamming, perceptual_hash};
-use argos_core::Stage;
-use argos_core::ports::{
-    ArtifactSink, Classifier, Digest, PixelImage, ProgressSink, ScanEvent, TriageScore, Unit,
-};
-use sha2::{Digest as _, Sha256};
+use argos_core::Format;
+use argos_core::ports::{ArtifactSink, Classifier, Digest, ModelIdentity, PixelImage, TriageScore};
 
-use crate::finding::{Finding, ScanReport};
-use crate::session::Control;
+use crate::finding::ScanReport;
 
 /// One artifact's triage annotation, keyed by the artifact's content hash.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,10 +74,8 @@ const BATCH_MAX_IMAGES: usize = 4;
 /// of one, because refusing to score it would be worse than holding it.
 const BATCH_MAX_PIXELS: u64 = 32 * 1024 * 1024;
 
-/// One artifact already persisted by the report stage.
+/// One artifact already persisted by the writing stage.
 pub struct Emitted {
-    /// Index into the findings the report stage emitted from.
-    pub finding: usize,
     /// Content hash the sink recorded.
     pub sha256: Digest,
     /// Where the artifact starts on the medium.
@@ -88,134 +86,152 @@ pub struct Emitted {
     pub evidence: argos_classify::rank::Evidence,
 }
 
-/// What this pass has been asked to produce.
-///
-/// Both annotations are optional and independent; the pass decodes nothing at
-/// all when neither is wanted.
-pub struct Work<'a, S, C> {
-    /// The sink that stored the artifacts, and that renders previews.
-    pub sink: &'a mut S,
-    /// The classifier, when triage was requested.
-    pub classifier: Option<&'a mut C>,
-    /// Whether to render a preview of every artifact that decodes.
-    pub previews: bool,
+/// What the writing stage produced for one artifact and this module scores.
+#[derive(Debug, Default)]
+pub(crate) struct Scored {
+    /// The procedure that decided the labels, for the manifest.
+    pub model: Option<ModelIdentity>,
+    /// Whether the classifier gave up partway.
+    pub degraded: bool,
+    /// One outcome per persisted artifact, in the order they were written.
+    pub outcomes: Vec<TriageOutcome>,
 }
 
-impl<S, C> Work<'_, S, C> {
-    /// Whether there is nothing to annotate, so the pass can be skipped whole.
-    pub(crate) fn is_idle(&self) -> bool {
-        self.classifier.is_none() && !self.previews
-    }
-}
-
-/// Annotates every emitted artifact and records what came of it.
+/// Runs `write` with an annotator beside it, and collects what came of it.
 ///
-/// Never fails: an image that cannot be read back, decoded within bounds,
-/// previewed or scored is counted and left unannotated. A classifier hard
-/// failure stops scoring but keeps every annotation produced so far, and a
-/// preview that cannot be written costs a thumbnail, never an artifact.
-pub fn run<V, S, C, P>(
-    control: &Control,
-    view: &mut V,
-    findings: &[Finding],
-    emitted: &[Emitted],
-    work: Work<'_, S, C>,
-    progress: &P,
-    report: &mut ScanReport,
-) where
-    V: Read + Seek,
-    S: ArtifactSink,
+/// The scoring worker is spawned around the whole writing pass, so an artifact
+/// is scored while the next one is being read and stored. It is joined here,
+/// whatever `write` returned — a writing stage that failed still owes the
+/// worker an end to its channel.
+pub(crate) fn alongside<C, F, T>(
+    classifier: Option<&mut C>,
+    previews: bool,
+    artifacts: usize,
+    write: F,
+) -> (T, Scored)
+where
     C: Classifier + Send,
-    P: ProgressSink + ?Sized,
+    F: FnOnce(&mut Annotating) -> T,
 {
-    let Work {
-        sink,
-        classifier,
-        previews,
-    } = work;
-    let stage = if classifier.is_some() {
-        Stage::Triage
-    } else {
-        Stage::Preview
-    };
-    let counter =
-        crate::pipeline::Counter::start(progress, stage, emitted.len() as u64, Unit::Items);
-    if let Some(classifier) = classifier.as_ref() {
-        report.triage_model = classifier.model();
-    }
-
+    let model = classifier.as_deref().and_then(Classifier::model);
     let (image_tx, image_rx) = crossbeam_channel::bounded::<(usize, PixelImage)>(1);
-    let scored = std::thread::scope(|scope| {
-        // No classifier, no worker: the channel below stays closed and every
-        // send is a no-op, so the decode loop still runs for the previews.
+    std::thread::scope(|scope| {
+        // No classifier, no worker, no channel: the writing stage still decodes
+        // for the previews, and nothing is scored.
         let worker =
             classifier.map(|classifier| scope.spawn(move || score_worker(&image_rx, classifier)));
-        let mut dedup = worker
-            .is_some()
-            .then(|| Dedup::with_capacity(emitted.len()));
-        let mut buf = Vec::new();
-
-        for entry in emitted {
-            counter.step();
-            let decoded = if control.is_cancelled() {
-                None
-            } else {
-                findings
-                    .get(entry.finding)
-                    .and_then(|finding| decode_finding(view, finding, entry.sha256, &mut buf))
-            };
-            let Some(image) = decoded else {
-                if let Some(dedup) = dedup.as_mut() {
-                    dedup.push_undecoded(entry.sha256);
-                }
-                continue;
-            };
-
-            if previews {
-                match sink.preview(&entry.sha256, &image) {
-                    Ok(()) => report.previews_written += 1,
-                    // The artifact is stored, hashed and recorded already. A
-                    // full output directory costs its thumbnail and nothing
-                    // else, and the count is what says so.
-                    Err(_) => report.previews_failed += 1,
-                }
-            }
-
-            if let Some(dedup) = dedup.as_mut()
-                && let Some(index) = dedup.push(entry.sha256, &image)
-            {
-                // A closed channel means the worker died with the classifier's
-                // error; keep going so every artifact still gets its outcome.
-                let _ = image_tx.send((index, image));
-            }
-        }
-        drop(image_tx);
-
-        let Some(worker) = worker else {
-            return Vec::new();
+        let mut annotating = Annotating {
+            previews,
+            dedup: worker.is_some().then(|| Dedup::with_capacity(artifacts)),
+            images: worker.is_some().then_some(image_tx),
         };
-        let (scores, failed) = worker
+
+        let produced = write(&mut annotating);
+
+        // Ends the channel, which is what tells the worker the run is over.
+        let dedup = annotating.close();
+        let Some(worker) = worker else {
+            return (
+                produced,
+                Scored {
+                    model,
+                    ..Scored::default()
+                },
+            );
+        };
+        let (scores, degraded) = worker
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        report.triage_degraded = failed;
-        dedup.map(|dedup| dedup.resolve(scores)).unwrap_or_default()
-    });
+        let outcomes = dedup.map(|dedup| dedup.resolve(scores)).unwrap_or_default();
+        (
+            produced,
+            Scored {
+                model,
+                degraded,
+                outcomes,
+            },
+        )
+    })
+}
 
-    report.triage_scored = scored
-        .iter()
-        .filter(|outcome| outcome.score.is_some())
-        .count() as u64;
-    report.triage_unscored = (scored.len() as u64).saturating_sub(report.triage_scored);
-    report.triage = scored;
+/// The annotation half of the writing pass.
+///
+/// Constructed only by [`alongside`], and reachable only from the point in the
+/// writing stage that has just handed an artifact to its sink.
+pub(crate) struct Annotating {
+    /// Whether a preview is wanted of every artifact that decodes.
+    previews: bool,
+    /// Near-duplicate grouping, present only when a classifier is scoring.
+    dedup: Option<Dedup>,
+    /// Images on their way to the scoring worker.
+    images: Option<crossbeam_channel::Sender<(usize, PixelImage)>>,
+}
 
-    progress.emit(ScanEvent::StageFinished {
-        stage,
-        findings: if stage == Stage::Triage {
-            report.triage_scored
-        } else {
-            report.previews_written
-        },
-    });
+impl Annotating {
+    /// Whether anything at all is wanted, so the writing stage can skip the
+    /// decode entirely.
+    pub(crate) fn wanted(&self) -> bool {
+        self.previews || self.dedup.is_some()
+    }
+
+    /// Records a stored artifact that produced no image to annotate.
+    ///
+    /// It is reported unscored, never omitted: an artifact past the decode
+    /// ceiling or whose pixels will not come back is still an artifact, and
+    /// the manifest says so.
+    pub(crate) fn undecoded(&mut self, sha256: Digest) {
+        if let Some(dedup) = self.dedup.as_mut() {
+            dedup.push_undecoded(sha256);
+        }
+    }
+
+    /// Annotates one artifact from the bytes it was stored from.
+    ///
+    /// Called after the sink has accepted it, and returns nothing: whatever
+    /// the classifier makes of the picture cannot reach the decision that put
+    /// it on disk, because there is no value here for that decision to read
+    /// (`A-TRIAGE-NOT-VERDICT`).
+    pub(crate) fn annotate<S: ArtifactSink>(
+        &mut self,
+        sink: &mut S,
+        sha256: Digest,
+        format: Format,
+        bytes: &[u8],
+        report: &mut ScanReport,
+    ) {
+        if !self.wanted() {
+            return;
+        }
+        let Some(image) = argos_carve::decode::decode_rgba(format, bytes) else {
+            self.undecoded(sha256);
+            return;
+        };
+
+        if self.previews {
+            match sink.preview(&sha256, &image) {
+                Ok(()) => report.previews_written += 1,
+                // The artifact is stored, hashed and recorded already. A full
+                // output directory costs its thumbnail and nothing else, and
+                // the count is what says so.
+                Err(_) => report.previews_failed += 1,
+            }
+        }
+
+        if let Some(dedup) = self.dedup.as_mut()
+            && let Some(index) = dedup.push(sha256, &image)
+            && let Some(images) = self.images.as_ref()
+        {
+            // A closed channel means the worker died with the classifier's
+            // error; keep going so every artifact still gets its outcome.
+            let _ = images.send((index, image));
+        }
+    }
+
+    /// Ends the run: closes the channel and gives up the grouping.
+    fn close(mut self) -> Option<Dedup> {
+        drop(self.images.take());
+        self.dedup.take()
+    }
 }
 
 /// Collapses near-duplicate images so one decision speaks for a group.
@@ -423,44 +439,6 @@ fn score_worker<C: Classifier>(
         batch.clear();
     }
     (scores, false)
-}
-
-/// Reads an artifact's bytes back and decodes them for annotation.
-///
-/// `None` when the artifact exceeds the decode ceiling, cannot be read back,
-/// does not hash to what was stored, or does not decode — all of which leave
-/// it unannotated, not unreported.
-///
-/// This is the *third* read of these extents: the report stage hashed them
-/// and then streamed them to the sink. An annotation is keyed by the digest
-/// that stage recorded, so bytes that no longer hash to it would attach a
-/// label, a perceptual hash and a preview to a content hash they do not
-/// describe (A-PROVENANCE). Re-hashing here costs one pass over an image
-/// already in memory and makes the annotation say something true.
-fn decode_finding<V: Read + Seek>(
-    view: &mut V,
-    finding: &Finding,
-    sha256: Digest,
-    buf: &mut Vec<u8>,
-) -> Option<PixelImage> {
-    let length = usize::try_from(finding.length()).ok()?;
-    if length > decode::MAX_DECODE_BYTES {
-        return None;
-    }
-    buf.clear();
-    buf.reserve(length);
-    let mut bytes = argos_carve::reassemble::Assembled::new(view, &finding.extents);
-    bytes.read_to_end(buf).ok()?;
-    if buf.len() != length {
-        return None;
-    }
-    if Digest::new(Sha256::digest(&*buf).into()) != sha256 {
-        // The medium answered differently than it did during the report
-        // stage. The artifact stands as written and hashed; what cannot be
-        // done is describe it from bytes that are not it.
-        return None;
-    }
-    decode::decode_rgba(finding.format, buf)
 }
 
 #[cfg(test)]

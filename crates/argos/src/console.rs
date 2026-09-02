@@ -739,10 +739,25 @@ impl ProgressSink for Renderer {
                 line.pending = true;
             }
             ScanEvent::ArtifactStored { artifacts, bytes } => {
+                // The count is state and is kept whatever happens to the
+                // drawing: the summary below reads it.
                 line.stored = artifacts;
                 if !self.interactive {
                     return;
                 }
+                // Throttled like the progress line above it, and for a
+                // stronger reason: a whole-disk recovery stores hundreds of
+                // thousands of artifacts, and a line broken and flushed for
+                // each of them makes the terminal, not the medium, decide how
+                // fast a scan runs.
+                let now = Instant::now();
+                let due = line
+                    .last_drawn
+                    .is_none_or(|last| now.duration_since(last) >= REDRAW_INTERVAL);
+                if !due {
+                    return;
+                }
+                line.last_drawn = Some(now);
                 Renderer::break_line(&mut line);
                 eprint!("\r  recovered  {artifacts} artifacts, {bytes} bytes");
                 let _ = std::io::stderr().flush();

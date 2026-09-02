@@ -3,8 +3,10 @@
 //! These exist so a scan can be asserted on end to end without a filesystem,
 //! a device or a temp directory anywhere in the test.
 
-use std::io::Read;
+use std::io::{Read, Seek};
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use argos_core::ports::{Artifact, ArtifactSink, Digest, ProgressSink, ScanEvent};
 use argos_core::{ByteOffset, ByteRange, Confidence, Format, Stage, Timestamps};
@@ -122,6 +124,71 @@ impl ArtifactSink for Collector {
             bytes: collected,
         });
         Ok(())
+    }
+}
+
+/// A view that counts what the engine asks the medium for.
+///
+/// How many times a scan reads each artifact is not visible from its results —
+/// a stage that reads every artifact three times produces exactly what one
+/// that reads it once produces, and only costs three times as much. On a
+/// rotational medium that is the difference between a recovery that finishes
+/// and one that is abandoned, so it is a property worth a test of its own.
+#[derive(Debug)]
+pub struct Counted<V> {
+    inner: V,
+    bytes: Arc<AtomicU64>,
+    reads: Arc<AtomicU64>,
+}
+
+/// What a set of [`Counted`] views were asked for, together.
+#[derive(Clone, Debug, Default)]
+pub struct Reads {
+    bytes: Arc<AtomicU64>,
+    reads: Arc<AtomicU64>,
+}
+
+impl Reads {
+    /// A fresh tally.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A view over `inner` that reports into this tally.
+    pub fn watching<V>(&self, inner: V) -> Counted<V> {
+        Counted {
+            inner,
+            bytes: Arc::clone(&self.bytes),
+            reads: Arc::clone(&self.reads),
+        }
+    }
+
+    /// Bytes handed back by every view so far.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    /// Read calls every view has answered so far.
+    #[must_use]
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
+    }
+}
+
+impl<V: Read> Read for Counted<V> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.bytes.fetch_add(read as u64, Ordering::Relaxed);
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        Ok(read)
+    }
+}
+
+impl<V: Seek> Seek for Counted<V> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
     }
 }
 

@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::time::Instant;
 
 use argos_core::ports::{Artifact, ArtifactSink, Digest};
 use argos_core::{ByteOffset, ByteRange, Confidence, Format, Stage};
@@ -24,7 +25,7 @@ fn digest(hex: &str) -> Digest {
 static NO_CAPTURE: std::sync::LazyLock<argos_core::ports::Capture> =
     std::sync::LazyLock::new(argos_core::ports::Capture::default);
 
-fn artifact<'a>(extents: &'a [ByteRange], length: u64, sha256: &str) -> Artifact<'a> {
+fn artifact(extents: &[ByteRange], length: u64, sha256: Digest) -> Artifact<'_> {
     Artifact {
         format: Format::Jpeg,
         stage: Stage::Carve,
@@ -32,7 +33,7 @@ fn artifact<'a>(extents: &'a [ByteRange], length: u64, sha256: &str) -> Artifact
         extents,
         length,
         expected_length: None,
-        sha256: digest(sha256),
+        sha256,
         timestamps: argos_core::Timestamps::default(),
         deleted: None,
         recovered_name: None,
@@ -51,7 +52,7 @@ fn saved_artifact_is_written_hashed_and_recorded() {
 
     let record = store
         .save(
-            &artifact(&extents, 3, SHA256_ABC),
+            &artifact(&extents, 3, digest(SHA256_ABC)),
             &mut Cursor::new(b"abc".to_vec()),
         )
         .expect("save artifact")
@@ -73,7 +74,7 @@ fn manifest_carries_every_record_the_rejection_count_and_the_damage() {
         ByteRange::new(ByteOffset::new(99), 2),
         ByteRange::new(ByteOffset::new(512), 2),
     ];
-    let mut png = artifact(&extents, 4, SHA256_1234);
+    let mut png = artifact(&extents, 4, digest(SHA256_1234));
     png.format = Format::Png;
     png.parent = Some(ByteOffset::new(42));
     png.recovered_name = Some("holiday.png");
@@ -167,7 +168,7 @@ fn a_short_save_is_refused_not_misrecorded() {
 
     let err = store
         .save(
-            &artifact(&extents, 3, SHA256_ABC),
+            &artifact(&extents, 3, digest(SHA256_ABC)),
             // Two bytes where three were validated.
             &mut Cursor::new(b"ab".to_vec()),
         )
@@ -185,7 +186,7 @@ fn bytes_that_do_not_reproduce_the_recovery_digest_are_refused() {
     // were resolved against the wrong offset. Either way it is not evidence.
     let err = store
         .accept(
-            &artifact(&extents, 3, SHA256_ABC),
+            &artifact(&extents, 3, digest(SHA256_ABC)),
             &mut Cursor::new(b"abd".to_vec()),
         )
         .expect_err("an artifact whose hash moved must never be recorded");
@@ -222,7 +223,7 @@ fn recovered_files_are_given_to_the_account_that_asked() {
     let extents = [ByteRange::new(ByteOffset::new(0), 3)];
     store
         .accept(
-            &artifact(&extents, 3, SHA256_ABC),
+            &artifact(&extents, 3, digest(SHA256_ABC)),
             &mut Cursor::new(b"abc".to_vec()),
         )
         .expect("save the artifact");
@@ -250,4 +251,93 @@ fn recovered_files_are_given_to_the_account_that_asked() {
             path.display()
         );
     }
+}
+
+// The manifest join, at the size a whole-disk recovery reaches.
+
+/// Distinct digests, from a counter rather than from real content: these tests
+/// are about how a join scales, and hashing a quarter of a million payloads to
+/// find out would measure the hasher.
+fn nth_digest(index: u32) -> Digest {
+    let mut bytes = [0_u8; Digest::LEN];
+    bytes[..4].copy_from_slice(&index.to_be_bytes());
+    Digest::new(bytes)
+}
+
+/// A store holding `count` records, with no file written for any of them.
+///
+/// `omit` records an artifact exactly as `save` does except for the bytes, so
+/// this builds the collection the annotation passes have to search without
+/// spending the measurement on the filesystem.
+fn store_of(dir: &std::path::Path, count: u32) -> Store {
+    let mut store = Store::create(dir, None).expect("create store");
+    let extents = [ByteRange::new(ByteOffset::new(0), 3)];
+    for index in 0..count {
+        store
+            .omit(
+                &artifact(&extents, 3, nth_digest(index)),
+                "below-size-floor",
+            )
+            .expect("record an omitted artifact");
+    }
+    store
+}
+
+#[test]
+fn annotating_scales_with_the_artifacts_rather_than_their_square() {
+    // Every annotation pass joins by content hash. A scan of a 1 TB disk
+    // writes hundreds of thousands of artifacts and annotates each of them
+    // three times, so a join that walks the records is the difference between
+    // a manifest written in a moment and one written in hours.
+    let time = |count: u32| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = store_of(dir.path(), count);
+        // The order that costs a linear scan the most: annotation `k` belongs
+        // to record `k`, so a walk from the front never stops early.
+        let triage: Vec<argos_report::TriageAnnotation> = (0..count)
+            .map(|index| argos_report::TriageAnnotation {
+                sha256: nth_digest(index),
+                perceptual_hash: None,
+                near_duplicate_of: None,
+                label: Some("photograph".to_owned()),
+                decided_by: None,
+            })
+            .collect();
+        let runs: Vec<(Digest, u32)> = (0..count).map(|index| (nth_digest(index), 8)).collect();
+        let standings: Vec<(Digest, &str)> = (0..count)
+            .map(|index| (nth_digest(index), "dated"))
+            .collect();
+
+        let at = Instant::now();
+        store.annotate_triage(&triage);
+        store.annotate_same_size_runs(&runs);
+        store.annotate_standings(&standings);
+        let took = at.elapsed();
+
+        // A join that found nothing would be the fastest of all. Every record
+        // must actually carry what it was told.
+        let records = store.records();
+        assert_eq!(records.len(), count as usize);
+        assert!(
+            records.iter().all(|record| record.triage_label.is_some()
+                && record.same_size_neighbours == Some(8)
+                && record.standing.as_deref() == Some("dated")),
+            "an annotation did not reach the record it names"
+        );
+        took.as_secs_f64()
+    };
+
+    // Warm the allocator so the first measurement is not the slow one.
+    let _ = time(2_000);
+    let small = time(4_000).max(f64::MIN_POSITIVE);
+    let large = time(16_000);
+
+    // Four times the artifacts. Linear predicts 4x, quadratic predicts 16x; a
+    // ceiling of 8 separates them with room for measurement noise.
+    let growth = large / small;
+    assert!(
+        growth < 8.0,
+        "four times the artifacts cost {growth:.1} times the work, which is the \
+         shape of a join that walks every record it has already written"
+    );
 }

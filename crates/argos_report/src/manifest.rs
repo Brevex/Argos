@@ -11,6 +11,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use argos_core::ports::Digest;
 use serde::{Deserialize, Serialize};
 
 use crate::ReportError;
@@ -345,14 +346,18 @@ pub struct TriageRecord {
 }
 
 /// Triage annotation for one stored artifact, matched by content hash.
+///
+/// Carried between the engine and the store in process, never serialised, so
+/// its hashes are the digests themselves rather than the hex the manifest
+/// spells them with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriageAnnotation {
-    /// SHA-256 (lowercase hex) of the artifact the annotation belongs to.
-    pub sha256: String,
+    /// Digest of the artifact the annotation belongs to.
+    pub sha256: Digest,
     /// Perceptual hash of the decoded image, as 16 hex digits.
     pub perceptual_hash: Option<String>,
-    /// SHA-256 of the artifact this one is a near-duplicate of.
-    pub near_duplicate_of: Option<String>,
+    /// Digest of the artifact this one is a near-duplicate of.
+    pub near_duplicate_of: Option<Digest>,
     /// Triage label: `photograph`, `synthetic-asset` or `ambiguous`.
     pub label: Option<String>,
     /// The property that settled the label.
@@ -383,15 +388,20 @@ pub struct ArtifactRecord {
     pub source_offset: u64,
     /// Artifact length in bytes: what was actually recovered and stored.
     pub length: u64,
-    /// Width of the decoded picture, in pixels, when it decoded.
+    /// Width of the picture in pixels, as its own frame header declares it.
     ///
     /// The property that separates a photograph from the derived images a
     /// used medium is full of, and the one a byte count cannot stand in for.
-    /// Absent means the artifact did not decode here — a statement about the
-    /// decoder, not about the bytes.
+    /// Read from the header rather than from decoded pixels, so an artifact
+    /// whose frame is intact and whose scan data is damaged still states the
+    /// size it was.
+    ///
+    /// Absent means no frame header this tool reads was there, or the frame it
+    /// declares is past the bounds this tool will work within — a statement
+    /// about the header, not about the bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
-    /// Height of the decoded picture, on the same terms as [`width`].
+    /// Height of the picture, on the same terms as [`width`].
     ///
     /// [`width`]: ArtifactRecord::width
     #[serde(default, skip_serializing_if = "Option::is_none")]
