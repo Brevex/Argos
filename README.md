@@ -57,39 +57,21 @@ Xcode Command Line Tools are required.
 
 ## Build from source
 
-Install the frontend dependencies:
-
 ```bash
 npm --prefix crates/argos_ui/ui ci
-```
 
-Build the recovery engine:
-
-```bash
 cargo build --release -p argos
-```
 
-Copy the engine binary into the Tauri project:
-
-```bash
 triple=$(rustc -vV | sed -n 's/^host: //p')
 
 mkdir -p crates/argos_ui/binaries
 cp target/release/argos "crates/argos_ui/binaries/argos-$triple"
-```
 
-Build the Tauri application:
-
-```bash
 (cd crates/argos_ui/ui && \
   TAURI_APP_PATH="$PWD/.." \
   TAURI_FRONTEND_PATH="$PWD" \
   npx tauri build)
-```
 
-Collect the generated installers:
-
-```bash
 mkdir -p installers
 
 find crates/argos_ui/target -path '*/release/bundle/*' -type f \
